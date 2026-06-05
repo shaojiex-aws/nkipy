@@ -78,12 +78,23 @@ def trace_to_kernelbuilder(
     api_version: str = "v1",
     dump_dir: str | None = None,
 ) -> str:
-    """Trace -> tiled IR -> kernel_builder Python source (end to end)."""
+    """Trace -> tiled IR -> kernel_builder Python source (end to end).
+
+    When ``dump_dir`` is set, the generated source is also written to
+    ``<dump_dir>/kb_code.py`` alongside the pipeline's MLIR dumps, so the kb
+    output sits next to the IR stages that produced it.
+    """
     ir = compile_to_tiled_ir(traced_func, target=target, dump_dir=dump_dir)
     name = traced_func.__wrapped__.__name__
-    return linalg_to_kernelbuilder(
+    code = linalg_to_kernelbuilder(
         ir, kernel_name=name, target=target, api_version=api_version
     )
+    if dump_dir:
+        import os
+        os.makedirs(dump_dir, exist_ok=True)
+        with open(os.path.join(dump_dir, "kb_code.py"), "w") as f:
+            f.write(code)
+    return code
 
 
 class _ModuleEmitter:

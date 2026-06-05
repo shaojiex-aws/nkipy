@@ -396,7 +396,7 @@ def _run_codegen_verification(
     code = linalg_to_kernelbuilder(compiled_ir, kernel_name=kernel_name, target=target)
     if dump_dir:
         os.makedirs(dump_dir, exist_ok=True)
-        with open(os.path.join(dump_dir, "kernelbuilder.py"), "w") as f:
+        with open(os.path.join(dump_dir, "kb_code.py"), "w") as f:
             f.write(code)
 
     # Execute the generated source to recover the kernel function.
@@ -429,7 +429,7 @@ def _run_codegen_verification(
         assert np.allclose(result, expected, rtol=rtol, atol=atol), (
             f"Mode.CODEGEN: generated kernel output {i} differs from NumPy "
             f"reference with max_diff={max_diff:.2e} (rtol={rtol}, atol={atol})."
-            + (f" Generated code dumped to {dump_dir}/kernelbuilder.py" if dump_dir else "")
+            + (f" Generated code dumped to {dump_dir}/kb_code.py" if dump_dir else "")
         )
 
 def _compile_nisa_to_neff(

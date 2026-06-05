@@ -152,7 +152,22 @@ def trace(
                 _clear_registry()
                 b.cleanup()
 
+        def to_kernel_builder(target: str = "trn2", api_version: str = "v1",
+                              dump_dir: Optional[str] = None) -> str:
+            """Generate readable ``kernel_builder`` Python source for this kernel.
+
+            Runs the full nkigen pipeline up to (but not including) NISA
+            lowering, then emits equivalent kernel_builder code as text. The
+            result is directly executable/compilable through the standard NKI
+            flow. See ``nkigen.codegen.kernelbuilder``.
+            """
+            from ..codegen.kernelbuilder import trace_to_kernelbuilder
+            return trace_to_kernelbuilder(
+                wrapper, target=target, api_version=api_version, dump_dir=dump_dir
+            )
+
         wrapper.to_mlir = to_mlir
+        wrapper.to_kernel_builder = to_kernel_builder
         wrapper.__traced__ = True
         wrapper.input_specs = input_specs
 
