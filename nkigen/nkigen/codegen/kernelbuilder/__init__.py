@@ -112,6 +112,8 @@ class _ModuleEmitter:
         # whose offset depends on one of these must render as nb.ds(...) rather
         # than a Python slice (kb rejects Reg-valued Python slices).
         self.loop_regs: set = set()
+        # Written-value -> role-name hint (e.g. exp_out), built per function.
+        self._tile_roles: dict = {}
 
     def run(self) -> str:
         for stmt in self.api.imports():
@@ -130,6 +132,7 @@ class _ModuleEmitter:
     def _emit_func(self, func) -> None:
         self.names = {}
         self.loop_regs = set()
+        self._tile_roles = self._build_tile_roles(func)
         name = self.kernel_name or irutils.func_name(func)
 
         block = func.regions[0].blocks[0]
@@ -172,17 +175,42 @@ class _ModuleEmitter:
     # -- naming hints ------------------------------------------------------
 
     def tile_hint(self, op, memspace) -> str:
-        """A readable variable-name hint for an allocated tile.
+        """A readable variable-name hint for the tile allocated by ``op``.
 
-        Phase 2 keeps this simple (space-based); Phase 6 enriches it with
-        op-role information.
+        Prefers a role derived from the op that *writes* this tile (its
+        producer), e.g. ``exp_out``, ``add_out``, ``mm_psum`` — falling back to
+        the memory space (``sbuf``/``psum``/``hbm``) when no producer role is
+        known. The per-function writer map is built lazily in :meth:`_emit_func`.
         """
         from .api import MEMSPACE_PSUM, MEMSPACE_SBUF
+        role = self._tile_roles.get(op.operation.results[0])
+        if role is not None:
+            return role
         if memspace == MEMSPACE_SBUF:
             return "sbuf"
         if memspace == MEMSPACE_PSUM:
             return "psum"
         return "hbm"
+
+    def _build_tile_roles(self, func) -> dict:
+        """Map each written memref value -> a role name from its writer op.
+
+        The writer is the op whose *destination* operand is that value. We name
+        the tile after the op's semantics so the variable reads like what it
+        holds (the result of an exp, an add, a matmul, ...).
+        """
+        roles: dict = {}
+
+        def visit(op_handle):
+            role = _writer_role(op_handle.opview)
+            if role is not None:
+                dst = _dst_operand(op_handle.opview)
+                if dst is not None:
+                    roles.setdefault(dst, role)
+            return up_ir.WalkResult.ADVANCE
+
+        func.operation.walk(visit)
+        return roles
 
     # -- block / op dispatch ----------------------------------------------
 
@@ -215,6 +243,79 @@ class _ModuleEmitter:
             return False
         self.em.comment(f"TODO unhandled op: {name}")
         return False
+
+
+# Op name -> role stem for the tile it writes (its destination). The tile is
+# named ``<role>_out`` (e.g. ``exp_out``), or ``<role>`` directly when the
+# suffix would be redundant. linalg.generic is resolved from its body below.
+_OP_ROLE = {
+    "linalg.add": "add",
+    "linalg.sub": "sub",
+    "linalg.mul": "mul",
+    "linalg.max": "max",
+    "linalg.min": "min",
+    "linalg.exp": "exp",
+    "linalg.tanh": "tanh",
+    "linalg.log": "log",
+    "linalg.sqrt": "sqrt",
+    "linalg.abs": "abs",
+    "linalg.square": "square",
+    "linalg.reciprocal": "recip",
+    "linalg.rsqrt": "rsqrt",
+    "linalg.sigmoid": "sigmoid",
+    "linalg.matmul_transpose_a": "matmul",
+    "linalg.transpose": "transpose",
+    "linalg.fill": "fill",
+}
+
+
+# Single-op linalg.generic bodies -> role stem (matches emit_compute's maps).
+_GENERIC_BODY_ROLE = {
+    "arith.addf": "add", "arith.addi": "add",
+    "arith.subf": "sub", "arith.subi": "sub",
+    "arith.mulf": "mul", "arith.muli": "mul",
+    "arith.divf": "div",
+    "arith.maximumf": "max", "arith.minimumf": "min",
+}
+
+
+def _writer_role(op) -> str | None:
+    """Role-name stem for the tile written by ``op`` (None if not a writer)."""
+    name = op.operation.name
+    role = _OP_ROLE.get(name)
+    if role is not None:
+        return f"{role}_out"
+    if name == "linalg.generic":
+        # Classify by the single arith op in the body, if any (reduction vs
+        # elementwise both read like ``<op>_out`` for naming purposes).
+        try:
+            body = [o for o in op.regions[0].blocks[0].operations
+                    if o.name != "linalg.yield"]
+        except (IndexError, AttributeError):
+            body = []
+        if len(body) == 1:
+            stem = _GENERIC_BODY_ROLE.get(body[0].name)
+            if stem is not None:
+                return f"{stem}_out"
+        return "tile"
+    return None
+
+
+def _dst_operand(op):
+    """The destination (written) operand of a destination-passing op.
+
+    For the linalg/memref ops we name, the output buffer is the trailing
+    operand (``outs`` for linalg named/generic ops; the target for memref.copy
+    is operand 1). Returns the SSA value, or None if it can't be determined.
+    """
+    operands = list(op.operation.operands)
+    if not operands:
+        return None
+    name = op.operation.name
+    if name == "memref.copy":
+        return operands[1] if len(operands) > 1 else None
+    # linalg destination-passing ops: outs is the last operand.
+    return operands[-1]
 
 
 def _build_dispatch() -> dict:
