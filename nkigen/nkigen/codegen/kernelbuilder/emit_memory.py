@@ -10,6 +10,7 @@ Handlers are wired into the walker's dispatch table by :func:`register`.
 from __future__ import annotations
 
 from . import irutils
+from .api import MEMSPACE_HBM, MEMSPACE_PSUM, MEMSPACE_SBUF, MEMSPACE_SHARED_HBM
 from .emit_indexing import memref_expr
 
 
@@ -44,17 +45,55 @@ def _emit_dealloc(gen, op) -> bool:
     return True
 
 
-def _emit_copy(gen, op) -> bool:
-    """``memref.copy src, dst`` -> ``nisa.dma_copy(dst, src)``.
+def _is_hbm(ms) -> bool:
+    return ms in (MEMSPACE_HBM, MEMSPACE_SHARED_HBM)
 
-    MLIR's ``memref.copy`` is ``(source, target)``; kb's ``dma_copy`` is
-    ``(dst, src)``, so the operands are swapped.
+
+def _emit_copy(gen, op) -> bool:
+    """``memref.copy src, dst`` -> a DMA or on-chip tensor copy.
+
+    MLIR's ``memref.copy`` is ``(source, target)``; the kb calls take
+    ``(dst, src)``, so the operands are swapped. The engine is chosen by
+    memory space, mirroring the NISA backend:
+
+    - HBM on either side  -> ``nisa.dma_copy`` (DMA engine).
+    - on-chip (SBUF<->SBUF, SBUF<->PSUM) -> ``nisa.tensor_copy`` (DMA can't
+      read/write PSUM, and SBUF<->SBUF is cheaper on a compute engine).
+
+    The rare HBM<->PSUM copy needs a two-hop through SBUF (DMA can't touch
+    PSUM); that path is emitted explicitly with an intermediate tile.
     """
     src = op.operation.operands[0]
     dst = op.operation.operands[1]
+    src_ms = irutils.memref_memspace(src.type)
+    dst_ms = irutils.memref_memspace(dst.type)
     src_expr = memref_expr(gen, src)
     dst_expr = memref_expr(gen, dst)
-    gen.em.line(gen.api.dma_copy(dst_expr, src_expr))
+
+    src_hbm, dst_hbm = _is_hbm(src_ms), _is_hbm(dst_ms)
+    needs_psum_hop = (
+        (src_hbm and dst_ms == MEMSPACE_PSUM)
+        or (src_ms == MEMSPACE_PSUM and dst_hbm)
+    )
+
+    if needs_psum_hop:
+        shape = tuple(irutils.memref_shape(dst.type))
+        dtype = gen.api.dtype(irutils.memref_elem_type(dst.type))
+        inter = gen.em.fresh_name("sbuf")
+        gen.em.line(f"{inter} = {gen.api.alloc(shape, dtype, gen.api.memory_space(MEMSPACE_SBUF))}")
+        if src_hbm:  # HBM -> SBUF (dma) -> PSUM (tensor)
+            gen.em.line(gen.api.dma_copy(inter, src_expr))
+            gen.em.line(gen.api.tensor_copy(dst_expr, inter))
+        else:        # PSUM -> SBUF (tensor) -> HBM (dma)
+            gen.em.line(gen.api.tensor_copy(inter, src_expr))
+            gen.em.line(gen.api.dma_copy(dst_expr, inter))
+        gen.em.line(gen.api.release(inter))
+        return True
+
+    if src_hbm or dst_hbm:
+        gen.em.line(gen.api.dma_copy(dst_expr, src_expr))
+    else:
+        gen.em.line(gen.api.tensor_copy(dst_expr, src_expr))
     return True
 
 

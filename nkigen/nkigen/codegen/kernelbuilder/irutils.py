@@ -81,6 +81,25 @@ def const_int(value: up_ir.Value) -> int | None:
         return None
 
 
+def const_scalar(value: up_ir.Value) -> int | float | None:
+    """If ``value`` is an ``arith.constant`` (int or float), return its value."""
+    owner = getattr(value, "owner", None)
+    if owner is None:
+        return None
+    op = owner.opview if hasattr(owner, "opview") else owner
+    if getattr(op, "name", None) != "arith.constant":
+        return None
+    attr = op.attributes["value"]
+    try:
+        return up_ir.IntegerAttr(attr).value
+    except (ValueError, TypeError):
+        pass
+    try:
+        return up_ir.FloatAttr(attr).value
+    except (ValueError, TypeError):
+        return None
+
+
 def op_id(op: up_ir.OpView) -> int | None:
     """The ``nkipy.op_id`` integer stamped on an op, if present."""
     attrs = op.operation.attributes

@@ -44,6 +44,47 @@ def _expand_pass_groups(passes: list[str]) -> list[str]:
     return out
 
 
+def _resolve_pass_index(passes: list[str], spec: str) -> int:
+    """Return the index of the pass named by ``spec`` in the flat pass list.
+
+    ``spec`` accepts a bare pass name, a ``py:`` prefix (matched the same as
+    the bare name), a pass-group name (resolves to its last member), and a
+    ``name:N`` suffix selecting the Nth (1-indexed) occurrence. Raises
+    ValueError if not found.
+    """
+    name = spec
+    nth = 1
+    if ':' in spec:
+        head, tail = spec.rsplit(':', 1)
+        if tail.isdigit():
+            name, nth = head, int(tail)
+
+    req_name = name[len('py:'):] if name.startswith('py:') else name
+    if req_name in PASS_GROUPS:
+        members = PASS_GROUPS[req_name]
+        if not members:
+            raise ValueError(f"Pass group '{req_name}' is empty")
+        req_name = members[-1]
+
+    occurrence = 0
+    for i, p in enumerate(passes):
+        raw = p[len('py:'):] if p.startswith('py:') else p
+        base_name = raw.split('=')[0].split('"')[0].strip()
+        if base_name == req_name:
+            occurrence += 1
+            if occurrence == nth:
+                return i
+
+    available = [
+        (p[len('py:'):] if p.startswith('py:') else p)
+        .split('=')[0].split('"')[0].strip()
+        for p in passes
+    ] + list(PASS_GROUPS)
+    raise ValueError(
+        f"Pass '{spec}' not found in pipeline. Available passes: {available}"
+    )
+
+
 def _pass_to_arg(pass_name: str) -> str:
     """Convert a pass spec to a CLI argument.
 
@@ -164,6 +205,7 @@ def apply_complete_knob_pipeline(
     print_ir_after_all: bool = False,
     dump_dir: str = None,
     stop_after=None,
+    stop_before=None,
     print_debuginfo: bool = False,
     print_generic: bool = False,
 ) -> str:
@@ -224,6 +266,13 @@ def apply_complete_knob_pipeline(
             - str: stop after the first occurrence of the named pass.
               For passes that appear multiple times (e.g. "canonicalize"),
               use "name:N" to stop at the Nth occurrence (1-indexed).
+        stop_before: Stop just *before* the named pass (str), i.e. run every
+            pass up to but excluding it. Resolved by pass name so it is robust
+            to pipeline reordering. Accepts the same "py:" prefix / "name:N"
+            forms as stop_after. Mutually exclusive with stop_after. Useful to
+            obtain the IR a downstream consumer expects (e.g. the linalg-level
+            IR just before "linalg-to-nisa" that the kernelbuilder backend
+            walks).
         print_debuginfo: If True, include source locations in output (--mlir-print-debuginfo)
         print_generic: If True, print ops in generic form (--mlir-print-op-generic)
 
@@ -314,57 +363,25 @@ def apply_complete_knob_pipeline(
     # flat pass list that the driver actually runs.
     passes = _expand_pass_groups(passes)
 
+    if stop_after is not None and stop_before is not None:
+        raise ValueError("stop_after and stop_before are mutually exclusive")
+
     # Slice passes if stop_after is provided
     if stop_after is not None:
         if isinstance(stop_after, int):
             passes = passes[:stop_after]
         elif isinstance(stop_after, str):
-            # Support "name:N" to select the Nth occurrence (1-indexed).
-            # "py:<name>" is also recognized — disambiguate by checking if
-            # the tail after the final ":" is an integer.
-            name = stop_after
-            nth = 1
-            if ':' in stop_after:
-                head, tail = stop_after.rsplit(':', 1)
-                if tail.isdigit():
-                    name, nth = head, int(tail)
-
-            # stop_after='<group-name>' means "stop after the last member
-            # of that group."  Resolve to the last member's name.
-            req_name = name[len('py:'):] if name.startswith('py:') else name
-            if req_name in PASS_GROUPS:
-                members = PASS_GROUPS[req_name]
-                if not members:
-                    raise ValueError(
-                        f"Pass group '{req_name}' is empty"
-                    )
-                req_name = members[-1]
-
-            occurrence = 0
-            found_idx = None
-            for i, p in enumerate(passes):
-                # Strip `py:` prefix for matching so users can request the
-                # same pass by either `py:linalg-to-nisa` or `linalg-to-nisa`.
-                raw = p[len('py:'):] if p.startswith('py:') else p
-                base_name = raw.split('=')[0].split('"')[0].strip()
-                if base_name == req_name:
-                    occurrence += 1
-                    if occurrence == nth:
-                        found_idx = i
-                        break
-            if found_idx is None:
-                available = [
-                    (p[len('py:'):] if p.startswith('py:') else p)
-                    .split('=')[0].split('"')[0].strip()
-                    for p in passes
-                ] + list(PASS_GROUPS)
-                raise ValueError(
-                    f"Pass '{stop_after}' not found in pipeline. "
-                    f"Available passes: {available}"
-                )
-            passes = passes[:found_idx + 1]
+            idx = _resolve_pass_index(passes, stop_after)
+            passes = passes[:idx + 1]
         else:
             raise TypeError(f"stop_after must be int, str, or None, got {type(stop_after)}")
+
+    # Slice passes if stop_before is provided (exclude the named pass).
+    if stop_before is not None:
+        if not isinstance(stop_before, str):
+            raise TypeError(f"stop_before must be str or None, got {type(stop_before)}")
+        idx = _resolve_pass_index(passes, stop_before)
+        passes = passes[:idx]
 
     return _run_passes_with_python_dispatch(
         mlir_module,

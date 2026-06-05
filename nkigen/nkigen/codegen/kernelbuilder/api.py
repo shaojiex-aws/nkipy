@@ -63,15 +63,31 @@ class KernelBuilderAPI(Protocol):
     def dma_copy(self, dst: str, src: str) -> str:
         ...
 
+    def tensor_copy(self, dst: str, src: str) -> str:
+        ...
+
     # -- compute -----------------------------------------------------------
 
     def tensor_tensor_arith(self, dst: str, lhs: str, rhs: str, op: str) -> str:
         ...
 
-    def activation(self, dst: str, src: str, func: str) -> str:
+    def activation(self, dst: str, src: str, func: str,
+                   bias: str = "0.0", scale: str = "1.0") -> str:
         ...
 
     def matmul(self, dst: str, stationary: str, moving: str, accum: bool) -> str:
+        ...
+
+    def tensor_reduce_arith(self, dst: str, src: str, op: str) -> str:
+        ...
+
+    def tensor_scalar_arith(self, dst: str, src: str, scalar: str, op: str) -> str:
+        ...
+
+    def dma_transpose(self, dst: str, src: str, permutation: list[int]) -> str:
+        ...
+
+    def memset(self, dst: str, value: str) -> str:
         ...
 
 
@@ -163,18 +179,37 @@ class KernelBuilderV1:
     def dma_copy(self, dst: str, src: str) -> str:
         return f"{self.NISA}.dma_copy({dst}, {src})"
 
+    def tensor_copy(self, dst: str, src: str) -> str:
+        return f"{self.NISA}.tensor_copy({dst}, {src})"
+
     # -- compute -----------------------------------------------------------
 
     def tensor_tensor_arith(self, dst: str, lhs: str, rhs: str, op: str) -> str:
         return f"{self.NISA}.tensor_tensor_arith({dst}, {lhs}, {rhs}, op={op})"
 
-    def activation(self, dst: str, src: str, func: str) -> str:
-        return f"{self.NISA}.activation({dst}, {src}, op={func})"
+    def activation(self, dst: str, src: str, func: str,
+                   bias: str = "0.0", scale: str = "1.0") -> str:
+        return (
+            f"{self.NISA}.activation({dst}, {src}, "
+            f"bias={bias}, scale={scale}, op={func})"
+        )
 
     def matmul(self, dst: str, stationary: str, moving: str, accum: bool) -> str:
         return (
             f"{self.NISA}.matmul({dst}, {stationary}, {moving}, accum={accum})"
         )
+
+    def tensor_reduce_arith(self, dst: str, src: str, op: str) -> str:
+        return f"{self.NISA}.tensor_reduce_arith({dst}, {src}, op={op})"
+
+    def tensor_scalar_arith(self, dst: str, src: str, scalar: str, op: str) -> str:
+        return f"{self.NISA}.tensor_scalar_arith({dst}, {src}, {scalar}, op0={op})"
+
+    def dma_transpose(self, dst: str, src: str, permutation: list[int]) -> str:
+        return f"{self.NISA}.dma_transpose({dst}, {src}, permutation={list(permutation)})"
+
+    def memset(self, dst: str, value: str) -> str:
+        return f"{self.NISA}.memset({dst}, {value})"
 
 
 _API_VERSIONS: dict[str, type] = {

@@ -65,6 +65,7 @@ class Mode(enum.Flag):
         enum.auto()
     )  # check_ir_contains / check_ir_not_contains on compiled IR
     FILECHECK = enum.auto()  # check_patterns via external FileCheck tool on compiled IR
+    CODEGEN = enum.auto()  # kernelbuilder codegen round-trip: gen kb Python, simulate, compare to NumPy
 
 
 # ============================================================================
@@ -75,6 +76,7 @@ class Mode(enum.Flag):
 DEFAULT_TOLERANCES = {
     Mode.LLVM: {"rtol": 1e-5, "atol": 1e-8},
     Mode.HW: {"rtol": 1e-3, "atol": 1e-3},
+    Mode.CODEGEN: {"rtol": 1e-3, "atol": 1e-3},
 }
 
 # dtype string -> numpy dtype mapping
@@ -131,6 +133,7 @@ def _validate_params(
     has_hw = Mode.HW in modes
     has_filecheck = Mode.FILECHECK in modes
     has_string_check = Mode.STRING_CHECK in modes
+    has_codegen = Mode.CODEGEN in modes
 
     # LLVM requires stop_after (LLVM JIT cannot execute NISA IR)
     if has_llvm and stop_after is None:
@@ -144,6 +147,20 @@ def _validate_params(
     if has_hw and stop_after is not None:
         raise ValueError(
             "Mode.HW requires full pipeline (stop_after must not be specified)."
+        )
+
+    # CODEGEN drives its own trace -> tiled-IR -> kernelbuilder pipeline
+    # internally, so it cannot share an intermediate stop_after with LLVM.
+    if has_codegen and stop_after is not None:
+        raise ValueError(
+            "Mode.CODEGEN runs the full pipeline internally "
+            "(stop_after must not be specified)."
+        )
+    if has_codegen and has_llvm:
+        raise ValueError(
+            "Mode.CODEGEN cannot be combined with Mode.LLVM "
+            "(LLVM needs an intermediate stop_after; CODEGEN needs the full "
+            "pipeline). Use separate tests."
         )
 
     # LLVM is mutually exclusive with HW
@@ -264,6 +281,7 @@ def _compile_pipeline(
     target: Optional[str] = None,
     dump_dir=None,
     print_generic: bool = False,
+    stop_before: Optional[str] = None,
 ) -> str:
     """Compile a traced function through the pipeline.
 
@@ -272,6 +290,9 @@ def _compile_pipeline(
         stop_after: "trace" for trace-only, pass name for intermediate, None for full pipeline
         target: Hardware target (trn1, trn2, trn3)
         dump_dir: Optional directory to save intermediate MLIR
+        stop_before: Stop just before the named pass (full pipeline minus the
+            tail). Used by Mode.CODEGEN to obtain the tiled linalg-level IR the
+            kernelbuilder backend consumes (stop_before='linalg-to-nisa').
 
     Returns:
         Compiled MLIR/NISA IR as string
@@ -296,7 +317,8 @@ def _compile_pipeline(
         )
 
     else:
-        # Full pipeline to NISA
+        # Full pipeline (optionally stopping just before a pass, e.g. NISA
+        # lowering for Mode.CODEGEN).
         if target is None:
             target = _default_target()
         from pass_utils import trace_to_mlir_with_preprocessing
@@ -304,7 +326,8 @@ def _compile_pipeline(
 
         mlir_str = trace_to_mlir_with_preprocessing(traced_func)
         return apply_complete_knob_pipeline(
-            mlir_str, target=target, dump_dir=dump_dir, print_generic=print_generic
+            mlir_str, target=target, dump_dir=dump_dir,
+            print_generic=print_generic, stop_before=stop_before,
         )
 
 
@@ -341,6 +364,73 @@ def _run_llvm_verification(compiled_ir: str, traced_func, rtol: float, atol: flo
     from pass_utils import verify_tiled_mlir_with_numpy
 
     verify_tiled_mlir_with_numpy(compiled_ir, traced_func, rtol=rtol, atol=atol)
+
+
+def _run_codegen_verification(
+    compiled_ir: str,
+    traced_func,
+    inputs: List[np.ndarray],
+    reference_output: List[np.ndarray],
+    rtol: float,
+    atol: float,
+    target: Optional[str],
+    dump_dir: Optional[str],
+):
+    """Generate kernelbuilder code from the tiled IR, simulate, compare to NumPy.
+
+    ``compiled_ir`` is the tiled linalg-level IR (the pipeline stopped just
+    before NISA lowering — the same input the kernelbuilder backend consumes).
+    This mirrors Mode.HW, which takes the *full* NISA IR and lowers it to a
+    NEFF; here the terminal step is ``linalg_to_kernelbuilder`` + simulation.
+
+    Proves the generated code is *semantically* correct (runs and matches the
+    reference), not merely that it parses.
+    """
+    import nki.compiler.kernel_builder as nb
+    from nkigen.codegen.kernelbuilder import linalg_to_kernelbuilder
+
+    if target is None:
+        target = _default_target()
+
+    kernel_name = traced_func.__wrapped__.__name__
+    code = linalg_to_kernelbuilder(compiled_ir, kernel_name=kernel_name, target=target)
+    if dump_dir:
+        os.makedirs(dump_dir, exist_ok=True)
+        with open(os.path.join(dump_dir, "kernelbuilder.py"), "w") as f:
+            f.write(code)
+
+    # Execute the generated source to recover the kernel function.
+    namespace: dict = {}
+    try:
+        exec(compile(code, "<kernelbuilder>", "exec"), namespace)
+    except SyntaxError as exc:
+        raise AssertionError(
+            f"Generated kernelbuilder code does not parse: {exc}\n\n{code}"
+        ) from exc
+    kernel_fn = namespace[kernel_name]
+
+    # Allocate output buffers matching the reference shapes/dtypes.
+    out_arrays = [np.zeros_like(ref) for ref in reference_output]
+    input_dict = {f"input_{i}": arr for i, arr in enumerate(inputs)}
+    output_dict = {f"output_{i}": arr for i, arr in enumerate(out_arrays)}
+
+    nb.simulate_kernel(
+        kernel_fn,
+        inputs=input_dict,
+        outputs=output_dict,
+        target=target,
+    )
+
+    for i, expected in enumerate(reference_output):
+        result = out_arrays[i]
+        if result.dtype != expected.dtype:
+            expected = expected.astype(result.dtype)
+        max_diff = float(np.max(np.abs(result - expected))) if result.size else 0.0
+        assert np.allclose(result, expected, rtol=rtol, atol=atol), (
+            f"Mode.CODEGEN: generated kernel output {i} differs from NumPy "
+            f"reference with max_diff={max_diff:.2e} (rtol={rtol}, atol={atol})."
+            + (f" Generated code dumped to {dump_dir}/kernelbuilder.py" if dump_dir else "")
+        )
 
 def _compile_nisa_to_neff(
     compiled_ir: str,
@@ -591,12 +681,18 @@ def run_kernel_test(
         else:
             reference_output = [reference_output]
 
-    # 5. Compile through pipeline
+    # 5. Compile through the pipeline to the IR the modes consume.
+    #    Mode.CODEGEN consumes the tiled linalg-level IR (pipeline stopped just
+    #    before NISA lowering — the kernelbuilder backend's input); all other
+    #    modes consume the full NISA IR. This mirrors Mode.HW, which lowers
+    #    NISA -> NEFF as its terminal step.
     #    On failure: if no dump_dir was set, re-run pass-by-pass into a temp
     #    directory so the user gets intermediate IR for debugging.
+    stop_before = "linalg-to-nisa" if Mode.CODEGEN in modes else None
     try:
         compiled_ir = _compile_pipeline(
-            traced_func, stop_after, target=target, dump_dir=dump_dir
+            traced_func, stop_after, target=target, dump_dir=dump_dir,
+            stop_before=stop_before,
         )
     except Exception as exc:
         if dump_dir:
@@ -608,7 +704,8 @@ def run_kernel_test(
         print(f"\n[dump-ir] Compilation failed — dumping intermediate IR to: {fallback_dir}")
         try:
             _compile_pipeline(
-                traced_func, stop_after, target=target, dump_dir=fallback_dir
+                traced_func, stop_after, target=target, dump_dir=fallback_dir,
+                stop_before=stop_before,
             )
         except Exception:
             pass  # expected to fail again; we just want the IR files
@@ -625,6 +722,18 @@ def run_kernel_test(
     if Mode.LLVM in modes:
         tol = _resolve_tolerances(Mode.LLVM, rtol, atol)
         _run_llvm_verification(compiled_ir, traced_func, **tol)
+
+    if Mode.CODEGEN in modes:
+        tol = _resolve_tolerances(Mode.CODEGEN, rtol, atol)
+        _run_codegen_verification(
+            compiled_ir,
+            traced_func,
+            inputs,
+            reference_output,
+            target=target,
+            dump_dir=dump_dir,
+            **tol,
+        )
 
     if Mode.HW in modes:
         try:
