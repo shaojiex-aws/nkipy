@@ -14,6 +14,8 @@ Public entry point: :func:`linalg_to_kernelbuilder`.
 
 from __future__ import annotations
 
+import os
+
 from mlir import ir as up_ir  # type: ignore[import-not-found]
 
 from .api import get_api
@@ -91,7 +93,6 @@ def trace_to_kernelbuilder(
         ir, kernel_name=name, target=target, api_version=api_version
     )
     if dump_dir:
-        import os
         os.makedirs(dump_dir, exist_ok=True)
         with open(os.path.join(dump_dir, "kb_code.py"), "w") as f:
             f.write(code)
@@ -113,7 +114,7 @@ class _ModuleEmitter:
         # whose offset depends on one of these must render as nb.ds(...) rather
         # than a Python slice (kb rejects Reg-valued Python slices).
         self.loop_regs: set = set()
-        # Written-value -> role-name hint (e.g. exp_out), built per function.
+        # alloc-result value -> role-name hint (e.g. exp_out), built per function.
         self._tile_roles: dict = {}
 
     def run(self) -> str:
