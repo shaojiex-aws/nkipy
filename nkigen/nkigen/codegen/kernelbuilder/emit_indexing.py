@@ -45,6 +45,20 @@ def _defining_op(value):
     return owner.opview if hasattr(owner, "opview") else owner
 
 
+def _depends_on_loop_reg(gen, value) -> bool:
+    """True if ``value`` transitively derives from a fori_loop induction Reg.
+
+    Slices with such an offset must use ``nb.ds(...)`` (kb forbids Python
+    slices indexed by a runtime Reg).
+    """
+    if value in gen.loop_regs:
+        return True
+    op = _defining_op(value)
+    if op is None or op.operation.name not in _ARITH_BINOP:
+        return False
+    return any(_depends_on_loop_reg(gen, o) for o in op.operation.operands)
+
+
 def index_expr(gen, value, parent_prec: int = 0) -> str:
     """Render an index/integer SSA value as a Python expression.
 
@@ -75,22 +89,22 @@ def index_expr(gen, value, parent_prec: int = 0) -> str:
 
 
 def _subview_components(op):
-    """Return (static_offsets, static_sizes, static_strides, dyn_offset_values).
+    """Return ``(static_offsets, static_sizes, dyn_offset_values)``.
 
     ``dyn_offset_values`` are the SSA operands that fill the sentinel slots in
-    static_offsets, in order.
+    ``static_offsets``, in order. Strides are static (1) in the IR we consume,
+    so they are not returned.
     """
     def ints(attr_name):
         return [int(x) for x in op.operation.attributes[attr_name]]
 
     static_offsets = ints("static_offsets")
     static_sizes = ints("static_sizes")
-    static_strides = ints("static_strides")
     # operands[0] is the source memref; the rest are dynamic offsets, then
     # dynamic sizes, then dynamic strides (per operandSegmentSizes). We only
     # consume dynamic offsets here; sizes/strides are static in practice.
     dyn_offsets = list(op.operation.operands)[1:]
-    return static_offsets, static_sizes, static_strides, dyn_offsets
+    return static_offsets, static_sizes, dyn_offsets
 
 
 def _dim_slices(gen, op, squeeze: bool) -> list[str]:
@@ -107,21 +121,29 @@ def _dim_slices(gen, op, squeeze: bool) -> list[str]:
     that the compute ops consume (see the 4D-layout doc): the unit block dims
     are squeezed, the partition/free dims stay full.
     """
-    static_offsets, static_sizes, _strides, dyn_offsets = _subview_components(op)
+    static_offsets, static_sizes, dyn_offsets = _subview_components(op)
     src_shape = irutils.memref_shape(op.operation.operands[0].type)
     dyn_iter = iter(dyn_offsets)
 
     dims: list[str] = []
     for i, (off, size) in enumerate(zip(static_offsets, static_sizes)):
-        off_expr = (
-            index_expr(gen, next(dyn_iter), _PREC["+"])
-            if off == DYN_SENTINEL else str(off)
-        )
+        if off == DYN_SENTINEL:
+            dyn_val = next(dyn_iter)
+            off_expr = index_expr(gen, dyn_val, _PREC["+"])
+            on_reg = _depends_on_loop_reg(gen, dyn_val)
+        else:
+            off_expr = str(off)
+            on_reg = False
+
         full = off != DYN_SENTINEL and off == 0 and i < len(src_shape) and size == src_shape[i]
         if squeeze and size == 1:
-            dims.append(off_expr)            # integer index -> kb squeezes the dim
+            # Integer index -> kb squeezes the dim. A Reg index stays a Reg.
+            dims.append(off_expr)
         elif full:
             dims.append(":")
+        elif on_reg:
+            # Runtime Reg offset: kb forbids Python slices, use a dynamic slice.
+            dims.append(f"nb.ds({off_expr}, {size})")
         elif off_expr == "0":
             dims.append(f"0:{size}")
         else:
@@ -165,7 +187,7 @@ def _compose_subview_chain(gen, value):
     if base_op is not None and base_op.operation.name == "memref.subview":
         base, base_offsets = _compose_subview_chain(gen, base)
 
-    static_offsets, static_sizes, _strides, dyn_offsets = _subview_components(op)
+    static_offsets, static_sizes, dyn_offsets = _subview_components(op)
     dyn_iter = iter(dyn_offsets)
 
     # This subview's offsets are expressed in its *source*'s dim space. When the

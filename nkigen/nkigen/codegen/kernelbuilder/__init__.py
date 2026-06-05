@@ -97,6 +97,10 @@ class _ModuleEmitter:
         self.em = Emitter()
         # SSA value -> generated Python variable name, rebuilt per function.
         self.names: dict = {}
+        # Loop induction variables that are fori_loop Regs at runtime. Slices
+        # whose offset depends on one of these must render as nb.ds(...) rather
+        # than a Python slice (kb rejects Reg-valued Python slices).
+        self.loop_regs: set = set()
 
     def run(self) -> str:
         for stmt in self.api.imports():
@@ -114,6 +118,7 @@ class _ModuleEmitter:
 
     def _emit_func(self, func) -> None:
         self.names = {}
+        self.loop_regs = set()
         name = self.kernel_name or irutils.func_name(func)
 
         block = func.regions[0].blocks[0]

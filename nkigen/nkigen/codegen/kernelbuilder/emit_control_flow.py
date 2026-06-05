@@ -1,40 +1,45 @@
-"""Emit control flow: scf.for (loops).
+"""Emit control flow: scf.for -> nb.fori_loop.
 
-Phase 2 provides a provisional rendering as a plain Python ``for`` loop so the
-walker descends into loop bodies and memory/compute ops inside loops get
-emitted. Phase 4 replaces this with ``nb.fori_loop`` and proper loop-carried
-value handling.
+The pipeline's canonicalize-loop-step pass normalizes every loop to
+``0..N step 1``, which maps directly onto ``nb.fori_loop(N, body_fn)``. We emit
+the decorator form::
+
+    @nb.fori_loop(N)
+    def _(i):
+        <body>
+
+Inside a fori_loop the induction variable is a runtime ``Reg``, so plain Python
+slices (``i*128 : i*128+128``) are rejected by kb — the indexing layer renders
+IV-dependent offsets as ``nb.ds(offset, size)`` instead (see emit_indexing).
 """
 
 from __future__ import annotations
 
 from . import irutils
-from .emit_indexing import index_expr
 
 
 def _emit_for(gen, op) -> bool:
-    """``scf.for %iv = %lb to %ub step %s { body }`` -> a Python ``for`` loop.
+    """``scf.for %iv = 0 to %n step 1 { body }`` -> ``@nb.fori_loop(n)`` + body.
 
-    Provisional (Phase 2): emits ``for iv in range(lb, ub, step):`` and recurses
-    into the body. Loop-carried iter_args are not yet handled.
+    Loops are normalized to lb=0, step=1 by canonicalize-loop-step, so only the
+    upper bound ``n`` is emitted. (A non-normalized loop would need explicit
+    start/step handling, which the current pipeline never produces.)
     """
-    lb, ub, step = op.operation.operands[0], op.operation.operands[1], op.operation.operands[2]
+    ub = op.operation.operands[1]
     body = op.regions[0].blocks[0]
     iv = body.arguments[0]
 
+    n = irutils.const_int(ub)
+    n_expr = str(n) if n is not None else "  # TODO: dynamic loop bound"
+
     iv_name = gen.em.fresh_name("i")
     gen.names[iv] = iv_name
+    # Mark the IV as a fori_loop Reg so the indexing layer emits nb.ds(...) for
+    # slices whose offset depends on it.
+    gen.loop_regs.add(iv)
 
-    lb_e = index_expr(gen, lb)
-    ub_e = index_expr(gen, ub)
-    step_e = index_expr(gen, step)
-    # Drop a redundant step of 1 for readability.
-    if step_e == "1":
-        range_args = f"{lb_e}, {ub_e}" if lb_e != "0" else f"{ub_e}"
-    else:
-        range_args = f"{lb_e}, {ub_e}, {step_e}"
-
-    gen.em.line(f"for {iv_name} in range({range_args}):")
+    gen.em.line(f"@nb.fori_loop({n_expr})")
+    gen.em.line(f"def _{iv_name}({iv_name}):")
     with gen.em.indent():
         gen.emit_block(body)
     return True
