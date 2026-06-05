@@ -13,9 +13,10 @@
   deleted the duplicate `_index_const` in favor of `access._emit_const_index`).
 - ✅ **Phase 1: Foundation — IR Analysis & Code Emitter Skeleton** — complete (commit `3acd0cb`). Uses upstream `mlir.ir` (no NKI wheel dep); 20 Emitter unit tests; full suite 332 pass.
 - ✅ **Phase 2: Memory Operations** — complete (commit `e9cfdd8`). alloc/release/dma_copy + subview→slice indexing; 7 unit tests; full suite 339.
-- 🔄 **Phase 3: Compute Operations** — in progress
-- ⬜ Phase 4: Control Flow
-- ⬜ Phase 5: Integration & Pipeline Hookup
+- 🟡 **Phase 3: Compute Operations** — mostly done (commit `905fc68`). Arithmetic, activation, matmul, reduction, fill, transpose all emit; round-trip (Mode.CODEGEN) green for elementwise/activation/single-tile matmul. Remaining: multi-block matmul K-loop PSUM accumulation (needs Phase 4 fori_loop). Also fixed legalize-layout's 4D-physical-layout indexing (see `2026-06-05-kernelbuilder-4d-layout-conflict.md`). Test strategy changed: no separate kb test files — round-trip via Mode.CODEGEN on existing e2e tests.
+- ✅ **Phase 4: Control Flow** — done (commit `1d7c8f6`). scf.for -> nb.fori_loop (decorator form) + nb.ds dynamic slices for loop-Reg offsets; nested loops via recursive walker. scf.if -> nb.if_else N/A (pipeline produces no scf.if).
+- 🔄 **Phase 5: Integration & Pipeline Hookup** — in progress
+- ⬜ Phase 6: Variable Naming & Readability
 - ⬜ Phase 6: Variable Naming & Readability
 - ⬜ Phase 7: Validation & Testing
 - ⬜ Phase 8: Documentation & Examples
@@ -356,20 +357,20 @@ Split the 2767-line monolith along its natural section boundaries:
 
 ---
 
-### Phase 4: Control Flow (`emit_control_flow.py`)
+### Phase 4: Control Flow (`emit_control_flow.py`) ✅ DONE
 
-#### Task 4.1: Emit `fori_loop`
+#### Task 4.1: Emit `fori_loop` ✅
 
 - Map `scf.for(lb, ub, step) { body }` to `nb.fori_loop(start, stop, step, body_fn)`.
 - Emit loop body as a nested function or lambda.
 - Handle loop-carried values (iter_args → function parameters + return).
 
-#### Task 4.2: Emit nested loops
+#### Task 4.2: Emit nested loops ✅
 
 - Handle multi-level loop nests with proper indentation.
 - Track induction variable names per nesting level.
 
-#### Task 4.3: Emit conditionals (if applicable)
+#### Task 4.3: Emit conditionals (if applicable) ⬜ N/A (no scf.if produced)
 
 - Map `scf.if` to `nb.if_else(cond, true_fn, false_fn)`.
 
