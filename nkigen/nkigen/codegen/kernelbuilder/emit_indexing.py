@@ -107,19 +107,17 @@ def _subview_components(op):
     return static_offsets, static_sizes, dyn_offsets
 
 
-def _dim_slices(gen, op, squeeze: bool) -> list[str]:
-    """Per-dim index expressions for a ``memref.subview``.
+def subview_slice(gen, op) -> str:
+    """Render a ``memref.subview`` as a ``[d0, d1, ...]`` slice string.
 
     Each dim renders as one of:
-      - ``":"``              full extent (offset 0, size == src dim)
-      - ``"<expr>"``         a squeezed unit dim (size 1) -> integer index,
-                             so kb drops the dim (only when ``squeeze``)
-      - ``"<expr>:<expr>+n"``a sliced range otherwise
+      - ``":"``               full extent (offset 0, size == src dim)
+      - ``"nb.ds(off, n)"``   a runtime-Reg offset (kb forbids Python slices
+                              indexed by a fori_loop Reg)
+      - ``"off:off + n"``     a static/constant-offset range otherwise
 
-    ``squeeze`` collapses size-1 dims to integer indices. This is how a 4-D
-    physical SBUF block ``[128, 1, 1, 128]`` becomes the 2-D ``[128, 128]`` tile
-    that the compute ops consume (see the 4D-layout doc): the unit block dims
-    are squeezed, the partition/free dims stay full.
+    (Unit block dims are *not* squeezed here — that collapse happens in
+    :func:`_collapse_to_2d_expr` for the legalize-layout 4-D pattern.)
     """
     static_offsets, static_sizes, dyn_offsets = _subview_components(op)
     src_shape = irutils.memref_shape(op.operation.operands[0].type)
@@ -135,25 +133,13 @@ def _dim_slices(gen, op, squeeze: bool) -> list[str]:
             off_expr = str(off)
             on_reg = False
 
-        full = off != DYN_SENTINEL and off == 0 and i < len(src_shape) and size == src_shape[i]
-        if squeeze and size == 1:
-            # Integer index -> kb squeezes the dim. A Reg index stays a Reg.
-            dims.append(off_expr)
-        elif full:
+        if off != DYN_SENTINEL and off == 0 and i < len(src_shape) and size == src_shape[i]:
             dims.append(":")
         elif on_reg:
-            # Runtime Reg offset: kb forbids Python slices, use a dynamic slice.
             dims.append(f"nb.ds({off_expr}, {size})")
-        elif off_expr == "0":
-            dims.append(f"0:{size}")
         else:
             dims.append(f"{off_expr}:{off_expr} + {size}")
-    return dims
-
-
-def subview_slice(gen, op, squeeze: bool = False) -> str:
-    """Render a ``memref.subview`` as a ``[d0, d1, ...]`` slice string."""
-    return "[" + ", ".join(_dim_slices(gen, op, squeeze)) + "]"
+    return "[" + ", ".join(dims) + "]"
 
 
 # View ops that reinterpret storage without reindexing — passed through to the

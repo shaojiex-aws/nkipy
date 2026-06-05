@@ -68,20 +68,20 @@ class KernelBuilderAPI(Protocol):
 
     # -- compute -----------------------------------------------------------
 
-    def tensor_tensor_arith(self, dst: str, lhs: str, rhs: str, op: str) -> str:
+    def tensor_tensor_arith(self, dst: str, lhs: str, rhs: str, arith_op: str) -> str:
         ...
 
-    def activation(self, dst: str, src: str, func: str,
+    def tensor_scalar_arith(self, dst: str, src: str, scalar: str, arith_op: str) -> str:
+        ...
+
+    def tensor_reduce_arith(self, dst: str, src: str, arith_op: str) -> str:
+        ...
+
+    def activation(self, dst: str, src: str, activation: str,
                    bias: str = "0.0", scale: str = "1.0") -> str:
         ...
 
     def matmul(self, dst: str, stationary: str, moving: str, accum: bool) -> str:
-        ...
-
-    def tensor_reduce_arith(self, dst: str, src: str, op: str) -> str:
-        ...
-
-    def tensor_scalar_arith(self, dst: str, src: str, scalar: str, op: str) -> str:
         ...
 
     def dma_transpose(self, dst: str, src: str, permutation: list[int]) -> str:
@@ -128,29 +128,6 @@ class KernelBuilderV1:
         MEMSPACE_SHARED_HBM: "nb.shared_hbm",
     }
 
-    # linalg op name -> nisa.arith_op member.
-    ARITH_OPS = {
-        "linalg.add": "nisa.arith_op.Add",
-        "linalg.sub": "nisa.arith_op.Subtract",
-        "linalg.mul": "nisa.arith_op.Multiply",
-        "linalg.max": "nisa.arith_op.Max",
-        "linalg.min": "nisa.arith_op.Min",
-        "linalg.div": "nisa.arith_op.Divide",
-    }
-
-    # linalg unary op name -> nisa.activation_function member.
-    ACTIVATION_FUNCS = {
-        "linalg.exp": "nisa.activation_function.exp",
-        "linalg.tanh": "nisa.activation_function.tanh",
-        "linalg.log": "nisa.activation_function.log",
-        "linalg.sqrt": "nisa.activation_function.sqrt",
-        "linalg.abs": "nisa.activation_function.abs",
-        "linalg.square": "nisa.activation_function.square",
-        "linalg.reciprocal": "nisa.activation_function.reciprocal",
-        "linalg.rsqrt": "nisa.activation_function.rsqrt",
-        "linalg.sigmoid": "nisa.activation_function.sigmoid",
-    }
-
     def imports(self) -> list[str]:
         return [
             "import nki.compiler.kernel_builder as nb",
@@ -183,27 +160,43 @@ class KernelBuilderV1:
         return f"{self.NISA}.tensor_copy({dst}, {src})"
 
     # -- compute -----------------------------------------------------------
+    #
+    # ``arith_op`` / ``activation`` args are bare enum member names (e.g. "Add",
+    # "exp") from ops.OpInfo.member; this layer adds the nisa.arith_op. /
+    # nisa.activation_function. prefix so the emit layer never spells nisa.*.
 
-    def tensor_tensor_arith(self, dst: str, lhs: str, rhs: str, op: str) -> str:
-        return f"{self.NISA}.tensor_tensor_arith({dst}, {lhs}, {rhs}, op={op})"
+    def _arith_op(self, member: str) -> str:
+        return f"{self.NISA}.arith_op.{member}"
 
-    def activation(self, dst: str, src: str, func: str,
+    def _activation_fn(self, member: str) -> str:
+        return f"{self.NISA}.activation_function.{member}"
+
+    def tensor_tensor_arith(self, dst: str, lhs: str, rhs: str, arith_op: str) -> str:
+        return (
+            f"{self.NISA}.tensor_tensor_arith("
+            f"{dst}, {lhs}, {rhs}, op={self._arith_op(arith_op)})"
+        )
+
+    def tensor_scalar_arith(self, dst: str, src: str, scalar: str, arith_op: str) -> str:
+        return (
+            f"{self.NISA}.tensor_scalar_arith("
+            f"{dst}, {src}, {scalar}, op0={self._arith_op(arith_op)})"
+        )
+
+    def tensor_reduce_arith(self, dst: str, src: str, arith_op: str) -> str:
+        return f"{self.NISA}.tensor_reduce_arith({dst}, {src}, op={self._arith_op(arith_op)})"
+
+    def activation(self, dst: str, src: str, activation: str,
                    bias: str = "0.0", scale: str = "1.0") -> str:
         return (
             f"{self.NISA}.activation({dst}, {src}, "
-            f"bias={bias}, scale={scale}, op={func})"
+            f"bias={bias}, scale={scale}, op={self._activation_fn(activation)})"
         )
 
     def matmul(self, dst: str, stationary: str, moving: str, accum: bool) -> str:
         return (
             f"{self.NISA}.matmul({dst}, {stationary}, {moving}, accum={accum})"
         )
-
-    def tensor_reduce_arith(self, dst: str, src: str, op: str) -> str:
-        return f"{self.NISA}.tensor_reduce_arith({dst}, {src}, op={op})"
-
-    def tensor_scalar_arith(self, dst: str, src: str, scalar: str, op: str) -> str:
-        return f"{self.NISA}.tensor_scalar_arith({dst}, {src}, {scalar}, op0={op})"
 
     def dma_transpose(self, dst: str, src: str, permutation: list[int]) -> str:
         return f"{self.NISA}.dma_transpose({dst}, {src}, permutation={list(permutation)})"

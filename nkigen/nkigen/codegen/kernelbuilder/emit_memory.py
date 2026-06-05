@@ -28,11 +28,10 @@ def _emit_alloc(gen, op) -> bool:
 
     ty = result.type
     shape = tuple(irutils.memref_shape(ty))
-    memspace = irutils.memref_memspace(ty)
     dtype = gen.api.dtype(irutils.memref_elem_type(ty))
-    space = gen.api.memory_space(memspace)
+    space = gen.api.memory_space(irutils.memref_memspace(ty))
 
-    name = gen.em.fresh_name(gen.tile_hint(op, memspace))
+    name = gen.em.fresh_name(gen.tile_name(op))
     gen.names[result] = name
     gen.em.line(f"{name} = {gen.api.alloc(shape, dtype, space)}")
     return True

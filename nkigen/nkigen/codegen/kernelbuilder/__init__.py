@@ -19,6 +19,7 @@ from mlir import ir as up_ir  # type: ignore[import-not-found]
 from .api import get_api
 from .emitter import Emitter
 from . import irutils
+from . import ops
 
 
 def linalg_to_kernelbuilder(
@@ -172,20 +173,22 @@ class _ModuleEmitter:
                 return list(op.operation.operands)
         return []
 
-    # -- naming hints ------------------------------------------------------
+    # -- naming -----------------------------------------------------------
 
-    def tile_hint(self, op, memspace) -> str:
-        """A readable variable-name hint for the tile allocated by ``op``.
+    def tile_name(self, alloc_op) -> str:
+        """Variable-name hint for the tile produced by a ``memref.alloc``.
 
-        Prefers a role derived from the op that *writes* this tile (its
-        producer), e.g. ``exp_out``, ``add_out``, ``mm_psum`` — falling back to
-        the memory space (``sbuf``/``psum``/``hbm``) when no producer role is
-        known. The per-function writer map is built lazily in :meth:`_emit_func`.
+        Prefers a role from the op that *writes* this tile (``exp_out``,
+        ``add_out``, ``matmul_out``, …), falling back to the memory space
+        (``sbuf``/``psum``/``hbm``). The writer-role map is built per function
+        in :meth:`_emit_func`.
         """
         from .api import MEMSPACE_PSUM, MEMSPACE_SBUF
-        role = self._tile_roles.get(op.operation.results[0])
+        result = alloc_op.operation.results[0]
+        role = self._tile_roles.get(result)
         if role is not None:
             return role
+        memspace = irutils.memref_memspace(result.type)
         if memspace == MEMSPACE_SBUF:
             return "sbuf"
         if memspace == MEMSPACE_PSUM:
@@ -193,11 +196,11 @@ class _ModuleEmitter:
         return "hbm"
 
     def _build_tile_roles(self, func) -> dict:
-        """Map each written memref value -> a role name from its writer op.
+        """Map each alloc result -> a role name from the op that writes it.
 
-        The writer is the op whose *destination* operand is that value. We name
-        the tile after the op's semantics so the variable reads like what it
-        holds (the result of an exp, an add, a matmul, ...).
+        A writer's destination is often a view (subview/collapse_shape) of the
+        alloc, so we trace the destination back to its backing alloc and key
+        the role there — that is what :meth:`tile_name` looks up.
         """
         roles: dict = {}
 
@@ -205,8 +208,9 @@ class _ModuleEmitter:
             role = _writer_role(op_handle.opview)
             if role is not None:
                 dst = _dst_operand(op_handle.opview)
-                if dst is not None:
-                    roles.setdefault(dst, role)
+                alloc = _backing_alloc(dst) if dst is not None else None
+                if alloc is not None:
+                    roles.setdefault(alloc, role)
             return up_ir.WalkResult.ADVANCE
 
         func.operation.walk(visit)
@@ -245,58 +249,25 @@ class _ModuleEmitter:
         return False
 
 
-# Op name -> role stem for the tile it writes (its destination). The tile is
-# named ``<role>_out`` (e.g. ``exp_out``), or ``<role>`` directly when the
-# suffix would be redundant. linalg.generic is resolved from its body below.
-_OP_ROLE = {
-    "linalg.add": "add",
-    "linalg.sub": "sub",
-    "linalg.mul": "mul",
-    "linalg.max": "max",
-    "linalg.min": "min",
-    "linalg.exp": "exp",
-    "linalg.tanh": "tanh",
-    "linalg.log": "log",
-    "linalg.sqrt": "sqrt",
-    "linalg.abs": "abs",
-    "linalg.square": "square",
-    "linalg.reciprocal": "recip",
-    "linalg.rsqrt": "rsqrt",
-    "linalg.sigmoid": "sigmoid",
-    "linalg.matmul_transpose_a": "matmul",
-    "linalg.transpose": "transpose",
-    "linalg.fill": "fill",
-}
-
-
-# Single-op linalg.generic bodies -> role stem (matches emit_compute's maps).
-_GENERIC_BODY_ROLE = {
-    "arith.addf": "add", "arith.addi": "add",
-    "arith.subf": "sub", "arith.subi": "sub",
-    "arith.mulf": "mul", "arith.muli": "mul",
-    "arith.divf": "div",
-    "arith.maximumf": "max", "arith.minimumf": "min",
-}
-
-
 def _writer_role(op) -> str | None:
-    """Role-name stem for the tile written by ``op`` (None if not a writer)."""
+    """Role-name stem for the tile written by ``op`` (None if not a writer).
+
+    Looks the op up in the shared ``ops`` registry, so role names track the
+    same single source of truth the emitters use. The tile is named
+    ``<role>_out``. linalg.generic is classified from its single body op.
+    """
     name = op.operation.name
-    role = _OP_ROLE.get(name)
-    if role is not None:
-        return f"{role}_out"
+    info = ops.LINALG_OPS.get(name)
+    if info is not None:
+        return f"{info.role}_out"
     if name == "linalg.generic":
-        # Classify by the single arith op in the body, if any (reduction vs
-        # elementwise both read like ``<op>_out`` for naming purposes).
         try:
             body = [o for o in op.regions[0].blocks[0].operations
                     if o.name != "linalg.yield"]
         except (IndexError, AttributeError):
             body = []
-        if len(body) == 1:
-            stem = _GENERIC_BODY_ROLE.get(body[0].name)
-            if stem is not None:
-                return f"{stem}_out"
+        if len(body) == 1 and body[0].name in ops.ARITH_BODY_OPS:
+            return f"{ops.ARITH_BODY_OPS[body[0].name].role}_out"
         return "tile"
     return None
 
@@ -316,6 +287,27 @@ def _dst_operand(op):
         return operands[1] if len(operands) > 1 else None
     # linalg destination-passing ops: outs is the last operand.
     return operands[-1]
+
+
+_VIEW_OPS = (
+    "memref.subview", "memref.collapse_shape",
+    "memref.expand_shape", "memref.reinterpret_cast",
+)
+
+
+def _backing_alloc(value):
+    """Trace ``value`` through view ops to the ``memref.alloc`` result backing
+    it, or None (e.g. a function argument or a value with no alloc)."""
+    owner = getattr(value, "owner", None)
+    op = owner.opview if hasattr(owner, "opview") else owner
+    if op is None:
+        return None
+    name = getattr(op, "name", None)
+    if name == "memref.alloc":
+        return op.operation.results[0]
+    if name in _VIEW_OPS:
+        return _backing_alloc(op.operation.operands[0])
+    return None
 
 
 def _build_dispatch() -> dict:
