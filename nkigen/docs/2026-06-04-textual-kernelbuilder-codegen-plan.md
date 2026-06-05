@@ -11,8 +11,8 @@
   truth for the nki-wheel import paths, and relocated misplaced shared helpers
   (`_pad_shape_to_2d` → `patterns`, `_fold_reinterpret_casts` → `finalize`,
   deleted the duplicate `_index_const` in favor of `access._emit_const_index`).
-- 🔄 **Phase 1: Foundation — IR Analysis & Code Emitter Skeleton** — in progress
-- ⬜ Phase 2: Memory Operations
+- ✅ **Phase 1: Foundation — IR Analysis & Code Emitter Skeleton** — complete (commit `3acd0cb`). Uses upstream `mlir.ir` (no NKI wheel dep); 20 Emitter unit tests; full suite 332 pass.
+- 🔄 **Phase 2: Memory Operations** — in progress
 - ⬜ Phase 3: Compute Operations
 - ⬜ Phase 4: Control Flow
 - ⬜ Phase 5: Integration & Pipeline Hookup
@@ -241,9 +241,9 @@ Split the 2767-line monolith along its natural section boundaries:
 
 ---
 
-### Phase 1: Foundation — IR Analysis & Code Emitter Skeleton
+### Phase 1: Foundation — IR Analysis & Code Emitter Skeleton ✅ DONE
 
-#### Task 1.1: Create the `codegen/kernelbuilder/` module structure
+#### Task 1.1: Create the `codegen/kernelbuilder/` module structure ✅
 
 - Create `codegen/kernelbuilder/__init__.py` with public entry point:
   ```python
@@ -251,7 +251,7 @@ Split the 2767-line monolith along its natural section boundaries:
   ```
 - Return type is a string containing valid Python source code.
 
-#### Task 1.2: Build IR walker infrastructure
+#### Task 1.2: Build IR walker infrastructure ✅
 
 - Parse the post-Phase-4 MLIR using upstream `mlir.ir` (same as NISA codegen)
 - Walk the `func.func` to extract:
@@ -263,7 +263,7 @@ Split the 2767-line monolith along its natural section boundaries:
   - `memref.subview` → tile slicing
   - `memref.dealloc` → release calls
 
-#### Task 1.3: Implement `emitter.py` (Emitter)
+#### Task 1.3: Implement `emitter.py` (Emitter) ✅
 
 - Create an `Emitter` class that manages:
   - Indentation tracking
@@ -280,7 +280,7 @@ Split the 2767-line monolith along its natural section boundaries:
       ...
   ```
 
-#### Task 1.4: Implement `api.py` (API surface abstraction)
+#### Task 1.4: Implement `api.py` (API surface abstraction) ✅
 
 - Define an abstraction layer that maps logical operations (alloc, copy,
   matmul, etc.) to concrete kernel_builder API call strings.
