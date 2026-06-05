@@ -145,9 +145,9 @@ def trace(
                 custom_ops = _get_registry()
                 b.emit_custom_op_declarations(custom_ops)
 
-                b.run_canonicalize()
-                module = b.module
-                return module
+                # Returns canonicalized IR as text (not a Module); callers
+                # stringify it anyway.  See docs/2026-06-05-nkipy-block-no-terminator-error.md.
+                return b.run_canonicalize()
             finally:
                 _clear_registry()
                 b.cleanup()

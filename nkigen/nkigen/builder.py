@@ -207,9 +207,13 @@ class IRBuilder:
             ir.DictAttr.get({k: ir.StringAttr.get(v) for k, v in bodies.items()})
         )
 
-    def run_canonicalize(self):
-        pm = passmanager.PassManager.parse("builtin.module(func.func(canonicalize))")
-        pm.run(self._module.operation)
+    def run_canonicalize(self) -> str:
+        # Canonicalize out-of-process via nkipy-opt (not the in-process
+        # bindings, which can't verify nkipy.yield) and return text.
+        # See docs/2026-06-05-nkipy-block-no-terminator-error.md.
+        from nkigen.transforms.nkipy_opt import run_nkipy_opt_passes
+
+        return run_nkipy_opt_passes(self._module, ["canonicalize"])
 
     def get_ir_text(self) -> str:
         return str(self._module)

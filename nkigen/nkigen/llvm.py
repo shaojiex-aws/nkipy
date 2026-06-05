@@ -93,6 +93,17 @@ def extract_and_clean_func_from_module(mlir_module_str: str):
     mlir_module_str = re.sub(r',\s*#nisa\.mem<[^>]+>', '', mlir_module_str)
     mlir_module_str = re.sub(r',\s*\d+\s*:\s*i32>', '>', mlir_module_str)
 
+    # Inline nkipy reference_impl regions (e.g. nkipy.gather) to plain
+    # linalg/tensor ops via nkipy-opt BEFORE the in-process Module.parse below:
+    # the in-process bindings can't verify nkipy.yield-terminated regions.
+    # (Also folds tensor.extract(to_tensor) → memref.load left after inlining.)
+    # See docs/2026-06-05-nkipy-block-no-terminator-error.md.
+    from nkigen.transforms.nkipy_opt import run_nkipy_opt_passes
+    mlir_module_str = run_nkipy_opt_passes(
+        mlir_module_str,
+        ["inline-nkipy-reference", "canonicalize"],
+    )
+
     with Context() as ctx:
         # Register nkipy dialect to handle nkipy operations
         nkipy_d.register_dialect(ctx)
@@ -100,23 +111,10 @@ def extract_and_clean_func_from_module(mlir_module_str: str):
         # Allow unregistered dialects temporarily to parse the module
         ctx.allow_unregistered_dialects = True
 
-        # Parse the MLIR module and clean it in-place (preserving all
-        # module-level declarations like memref.global that the function
-        # may reference).
+        # Parse the (now nkipy-free) MLIR module and clean it in-place,
+        # preserving all module-level declarations like memref.global that the
+        # function may reference.
         new_module = Module.parse(mlir_module_str, ctx)
-
-        # Inline reference_impl regions from nkipy ops (e.g. nkipy.gather)
-        # so the LLVM JIT only sees standard linalg/tensor ops.
-        # The inline pass also folds tensor.extract(to_tensor(memref)) →
-        # memref.load(memref) patterns left after inlining into post-
-        # bufferization IR.  Canonicalize then folds remaining
-        # to_buffer(to_tensor(x)) chains.
-        from nkigen.transforms.nkipy_opt import run_nkipy_opt_passes
-        inlined_str = run_nkipy_opt_passes(
-            str(new_module),
-            ["inline-nkipy-reference", "canonicalize"],
-        )
-        new_module = Module.parse(inlined_str, ctx)
 
         # Strip the transform.with_named_sequence module attribute if present
         module_op = new_module.operation
