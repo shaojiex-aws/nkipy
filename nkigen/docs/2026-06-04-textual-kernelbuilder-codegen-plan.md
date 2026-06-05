@@ -1,7 +1,19 @@
 # Textual KernelBuilder Code Generation for NKIGen
 
 **Date**: 2026-06-04
-**Status**: Proposed
+**Status**: In Progress
+
+## Progress
+
+- ✅ **Phase 0: Package Restructuring** — complete (commit `5f27d4d`). All 312 tests pass.
+- 🔄 **Phase 1: Foundation — IR Analysis & Code Emitter Skeleton** — in progress
+- ⬜ Phase 2: Memory Operations
+- ⬜ Phase 3: Compute Operations
+- ⬜ Phase 4: Control Flow
+- ⬜ Phase 5: Integration & Pipeline Hookup
+- ⬜ Phase 6: Variable Naming & Readability
+- ⬜ Phase 7: Validation & Testing
+- ⬜ Phase 8: Documentation & Examples
 
 ## Goal
 
@@ -57,7 +69,7 @@ Key APIs to emit:
 
 ## Step-by-Step Plan
 
-### Phase 0: Package Restructuring
+### Phase 0: Package Restructuring ✅ DONE
 
 The current `nkigen/nkigen/` layout is flat and uses a `transforms/` folder
 name that conflates three different roles: compiler driver orchestration,
@@ -159,24 +171,24 @@ nkigen/nkigen/
 └── utils.py                     (stays — shared utilities)
 ```
 
-#### Task 0.1: Create sub-package directories
+#### Task 0.1: Create sub-package directories ✅
 
 - Create `frontend/`, `driver/`, `codegen/`, `codegen/nisa/`, `codegen/kernelbuilder/`, `execution/`
 - Add `__init__.py` for each.
 
-#### Task 0.2: Move frontend files
+#### Task 0.2: Move frontend files ✅
 
 - Move `trace.py`, `traced_array.py`, `op_vtable.py`, `builder.py`,
   `control_flow.py`, `knob.py`, `custom_op.py` → `frontend/`
 - Update `frontend/__init__.py` to re-export public symbols.
 
-#### Task 0.3: Move driver files
+#### Task 0.3: Move driver files ✅
 
 - Move `transforms/nkipy_opt.py` → `driver/pipeline.py`
 - Move `pass_manager.py` → `driver/pass_manager.py`
 - Update `driver/__init__.py`.
 
-#### Task 0.4: Split `linalg_to_nisa_py.py` into `codegen/nisa/` modules
+#### Task 0.4: Split `linalg_to_nisa_py.py` into `codegen/nisa/` modules ✅
 
 Split the 2767-line monolith along its natural section boundaries:
 
@@ -200,23 +212,23 @@ Split the 2767-line monolith along its natural section boundaries:
 | 2444–2730 | `custom_ops.py` | `_resolve_custom_ops`, `_clone_op_with_map` |
 | 2731–2767 | `__init__.py` | `linalg_to_nisa` entry point, `_finalize_for_nki` |
 
-#### Task 0.5: Move execution files
+#### Task 0.5: Move execution files ✅
 
 - Move `compile.py`, `llvm.py`, `execution.py` → `execution/`
 - Update `execution/__init__.py`.
 
-#### Task 0.6: Update all internal imports
+#### Task 0.6: Update all internal imports ✅
 
 - Grep for all `from .transforms import`, `from .trace import`, etc.
 - Update to new paths (`from .frontend.trace import`, `from .driver.pipeline import`, etc.)
 - Add compatibility re-exports in top-level `__init__.py` if needed for external consumers.
 
-#### Task 0.7: Update test imports
+#### Task 0.7: Update test imports ✅
 
 - Update all `tests/` imports to match new package structure.
 - Run full test suite to verify nothing broke.
 
-#### Task 0.8: Delete old `transforms/` directory
+#### Task 0.8: Delete old `transforms/` directory ✅
 
 - Once all tests pass with new structure, remove `transforms/` and the orphaned top-level files.
 
