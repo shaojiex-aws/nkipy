@@ -17,7 +17,6 @@
 - ✅ **Phase 4: Control Flow** — done (commit `1d7c8f6`). scf.for -> nb.fori_loop (decorator form) + nb.ds dynamic slices for loop-Reg offsets; nested loops via recursive walker. scf.if -> nb.if_else N/A (pipeline produces no scf.if).
 - 🔄 **Phase 5: Integration & Pipeline Hookup** — in progress
 - ⬜ Phase 6: Variable Naming & Readability
-- ⬜ Phase 6: Variable Naming & Readability
 - ⬜ Phase 7: Validation & Testing
 - ⬜ Phase 8: Documentation & Examples
 
