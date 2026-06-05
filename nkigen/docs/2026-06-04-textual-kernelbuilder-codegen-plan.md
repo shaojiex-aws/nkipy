@@ -15,8 +15,8 @@
 - ✅ **Phase 2: Memory Operations** — complete (commit `e9cfdd8`). alloc/release/dma_copy + subview→slice indexing; 7 unit tests; full suite 339.
 - 🟡 **Phase 3: Compute Operations** — mostly done (commit `905fc68`). Arithmetic, activation, matmul, reduction, fill, transpose all emit; round-trip (Mode.CODEGEN) green for elementwise/activation/single-tile matmul. Remaining: multi-block matmul K-loop PSUM accumulation (needs Phase 4 fori_loop). Also fixed legalize-layout's 4D-physical-layout indexing (see `2026-06-05-kernelbuilder-4d-layout-conflict.md`). Test strategy changed: no separate kb test files — round-trip via Mode.CODEGEN on existing e2e tests.
 - ✅ **Phase 4: Control Flow** — done (commit `1d7c8f6`). scf.for -> nb.fori_loop (decorator form) + nb.ds dynamic slices for loop-Reg offsets; nested loops via recursive walker. scf.if -> nb.if_else N/A (pipeline produces no scf.if).
-- 🔄 **Phase 5: Integration & Pipeline Hookup** — in progress
-- ⬜ Phase 6: Variable Naming & Readability
+- ✅ **Phase 5: Integration & Pipeline Hookup** — done (commit `255a810`). Public `trace(fn).to_kernel_builder(target=...)`; dump to `<dump_dir>/kb_code.py`. Task 5.1 (py:linalg-to-kernelbuilder pass) superseded by pipeline `stop_before=` + `trace_to_kernelbuilder` (the backend emits Python text, not MLIR, so it isn't a pass).
+- 🔄 **Phase 6: Variable Naming & Readability** — in progress
 - ⬜ Phase 7: Validation & Testing
 - ⬜ Phase 8: Documentation & Examples
 
@@ -375,9 +375,9 @@ Split the 2767-line monolith along its natural section boundaries:
 
 ---
 
-### Phase 5: Integration & Pipeline Hookup
+### Phase 5: Integration & Pipeline Hookup ✅ DONE
 
-#### Task 5.1: Add pipeline entry point in `driver/pipeline.py`
+#### Task 5.1: Add pipeline entry point in `driver/pipeline.py` ⬜ superseded by `stop_before=` + `trace_to_kernelbuilder`
 
 - Add `"py:linalg-to-kernelbuilder"` as a Python-phase pass.
 - Wire it so the user can call:
@@ -388,12 +388,12 @@ Split the 2767-line monolith along its natural section boundaries:
 - Internally: `apply_complete_knob_pipeline(stop_after="canonicalize:6")` +
   call `linalg_to_kernelbuilder()` on the result.
 
-#### Task 5.2: Expose in public API (`nkigen/__init__.py`)
+#### Task 5.2: Expose in public API (`nkigen/__init__.py`) ✅ (as `trace(fn).to_kernel_builder()`)
 
 - Add `to_kernel_builder()` method or parameter to the traced function interface.
 - Document the new output mode.
 
-#### Task 5.3: Add dump support
+#### Task 5.3: Add dump support ✅
 
 - When `dump_dir` is set, also save `24_kernelbuilder.py` alongside the MLIR dumps.
 - The file should be directly executable (with appropriate imports).
