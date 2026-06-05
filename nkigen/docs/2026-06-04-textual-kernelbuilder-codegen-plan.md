@@ -12,8 +12,8 @@
   (`_pad_shape_to_2d` → `patterns`, `_fold_reinterpret_casts` → `finalize`,
   deleted the duplicate `_index_const` in favor of `access._emit_const_index`).
 - ✅ **Phase 1: Foundation — IR Analysis & Code Emitter Skeleton** — complete (commit `3acd0cb`). Uses upstream `mlir.ir` (no NKI wheel dep); 20 Emitter unit tests; full suite 332 pass.
-- 🔄 **Phase 2: Memory Operations** — in progress
-- ⬜ Phase 3: Compute Operations
+- ✅ **Phase 2: Memory Operations** — complete (commit `e9cfdd8`). alloc/release/dma_copy + subview→slice indexing; 7 unit tests; full suite 339.
+- 🔄 **Phase 3: Compute Operations** — in progress
 - ⬜ Phase 4: Control Flow
 - ⬜ Phase 5: Integration & Pipeline Hookup
 - ⬜ Phase 6: Variable Naming & Readability
@@ -301,9 +301,9 @@ Split the 2767-line monolith along its natural section boundaries:
 
 ---
 
-### Phase 2: Memory Operations (`emit_memory.py`)
+### Phase 2: Memory Operations (`emit_memory.py`) ✅ DONE
 
-#### Task 2.1: Emit `alloc` / `release`
+#### Task 2.1: Emit `alloc` / `release` ✅
 
 - Map `memref.alloc` with memspace annotations to `nb.compiler.alloc(shape, dtype, space=...)`:
   - memspace 3 → `nb.sbuf`
@@ -311,13 +311,13 @@ Split the 2767-line monolith along its natural section boundaries:
 - Map `memref.dealloc` → `nb.compiler.release(tile)`
 - Track SSA value → variable name mapping.
 
-#### Task 2.2: Emit DMA copies
+#### Task 2.2: Emit DMA copies ✅
 
 - Map `memref.copy` between different memspaces to `nisa.dma_copy(dst, src)`.
 - Handle subview chains: trace back to base memref and emit appropriate tile
   slicing syntax (`tile[par_start:par_end, free_start:free_end]`).
 
-#### Task 2.3: Emit tile indexing/slicing (`emit_indexing.py`)
+#### Task 2.3: Emit tile indexing/slicing (`emit_indexing.py`) ✅
 
 - Map `memref.subview` to Python slice expressions on tiles.
 - Handle affine offset computations (from loop IVs) as index expressions.
