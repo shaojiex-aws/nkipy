@@ -98,7 +98,7 @@ def extract_and_clean_func_from_module(mlir_module_str: str):
     # the in-process bindings can't verify nkipy.yield-terminated regions.
     # (Also folds tensor.extract(to_tensor) → memref.load left after inlining.)
     # See docs/2026-06-05-nkipy-block-no-terminator-error.md.
-    from nkigen.transforms.nkipy_opt import run_nkipy_opt_passes
+    from nkigen.driver.pipeline import run_nkipy_opt_passes
     mlir_module_str = run_nkipy_opt_passes(
         mlir_module_str,
         ["inline-nkipy-reference", "canonicalize"],

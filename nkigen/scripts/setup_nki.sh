@@ -56,7 +56,7 @@
 
 # Activate the project virtualenv if not already in one.
 # Override by exporting NKIPY_VENV before sourcing this script.
-: "${NKIPY_VENV:=${HOME}/nkipy-opensource-venv}"
+: "${NKIPY_VENV:=${HOME}/.venv/nkidev}"
 if [ -z "${VIRTUAL_ENV:-}" ] && [ -f "${NKIPY_VENV}/bin/activate" ]; then
     source "${NKIPY_VENV}/bin/activate"
 fi
@@ -115,10 +115,11 @@ fi
 # Export paths that the CMake build and the Python phase consume.
 # ---------------------------------------------------------------------------
 export LLVM_INST="${LLVM_INSTALL_PREFIX}"
+export LLVM_BUILD_DIR="${LLVM_INSTALL_PREFIX}"
 export LLVM_DIR="${LLVM_INSTALL_PREFIX}/lib/cmake/llvm"
 export MLIR_DIR="${LLVM_INSTALL_PREFIX}/lib/cmake/mlir"
 export PATH="${LLVM_INSTALL_PREFIX}/bin:${PATH}"
-export LD_LIBRARY_PATH="${LLVM_INSTALL_PREFIX}/lib:${LD_LIBRARY_PATH}"
+export LD_LIBRARY_PATH="${LLVM_INSTALL_PREFIX}/lib:${LD_LIBRARY_PATH:-}"
 
 # Put nkipy-opt (built under build/bin) on PATH once built.
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"

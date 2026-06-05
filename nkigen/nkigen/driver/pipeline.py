@@ -454,7 +454,7 @@ def _run_python_pass(
         # Imported lazily because the NKI wheel and upstream `mlir` are only
         # required for this pass; tests that stop before phase 5 do not need
         # either installed.
-        from .linalg_to_nisa_py import linalg_to_nisa
+        from ..codegen.nisa import linalg_to_nisa
         return linalg_to_nisa(mlir_text, target=target, print_generic=print_generic)
     raise ValueError(f"Unknown Python pass: {name!r}")
 

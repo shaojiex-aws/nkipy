@@ -5,7 +5,7 @@ Verifies that kernels returning tuples of tensors compile and produce
 correct results through LLVM JIT, BIR simulation, and hardware execution.
 """
 
-from nkigen.trace import trace
+from nkigen.frontend.trace import trace
 from harness import run_kernel_test, Mode
 
 

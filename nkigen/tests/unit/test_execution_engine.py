@@ -9,7 +9,7 @@ import pytest
 
 import numpy as np
 from mlir.ir import Context, Module
-from nkigen.llvm import LLVMModule
+from nkigen.execution.llvm import LLVMModule
 
 
 class TestExecutionEngine:

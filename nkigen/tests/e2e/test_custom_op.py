@@ -12,7 +12,7 @@ import pytest
 import numpy as np
 
 from nkigen import trace, knob
-from nkigen.custom_op import CustomOp
+from nkigen.frontend.custom_op import CustomOp
 from harness import run_kernel_test, Mode
 
 import nki.compiler.kernel_builder as nb

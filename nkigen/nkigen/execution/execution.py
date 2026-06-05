@@ -4,7 +4,7 @@ Execution engine for running MLIR on CPU and verifying against NumPy.
 
 import numpy as np
 from typing import Callable, List, Tuple, Any
-from nkigen.llvm import LLVMModule
+from nkigen.execution.llvm import LLVMModule
 
 
 def verify_against_numpy(

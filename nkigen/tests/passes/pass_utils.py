@@ -13,11 +13,11 @@ from typing import List, Optional
 import numpy as np
 
 from nkigen import apply_passes
-from nkigen.transforms.nkipy_opt import (
+from nkigen.driver.pipeline import (
     run_nkipy_opt_passes,
     apply_complete_knob_pipeline,
 )
-from nkigen.llvm import LLVMModule, extract_and_clean_func_from_module
+from nkigen.execution.llvm import LLVMModule, extract_and_clean_func_from_module
 
 
 # ============================================================================

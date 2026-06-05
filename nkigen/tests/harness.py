@@ -300,7 +300,7 @@ def _compile_pipeline(
         if target is None:
             target = _default_target()
         from pass_utils import trace_to_mlir_with_preprocessing
-        from nkigen.transforms.nkipy_opt import apply_complete_knob_pipeline
+        from nkigen.driver.pipeline import apply_complete_knob_pipeline
 
         mlir_str = trace_to_mlir_with_preprocessing(traced_func)
         return apply_complete_knob_pipeline(

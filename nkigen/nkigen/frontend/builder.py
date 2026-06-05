@@ -211,7 +211,7 @@ class IRBuilder:
         # Canonicalize out-of-process via nkipy-opt (not the in-process
         # bindings, which can't verify nkipy.yield) and return text.
         # See docs/2026-06-05-nkipy-block-no-terminator-error.md.
-        from nkigen.transforms.nkipy_opt import run_nkipy_opt_passes
+        from nkigen.driver.pipeline import run_nkipy_opt_passes
 
         return run_nkipy_opt_passes(self._module, ["canonicalize"])
 
@@ -1793,7 +1793,7 @@ def apply_custom_op(kernel_builder, reference_fn, input_specs, output_specs, arg
         Result from the custom op call.
     """
     import nki.compiler.kernel_builder as nb
-    from nkigen.custom_op import CustomOp
+    from nkigen.frontend.custom_op import CustomOp
 
     _dtype_map = {"f32": nb.float32, "f16": nb.float16, "bf16": nb.bfloat16}
     nb_input_specs = {

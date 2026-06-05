@@ -40,7 +40,7 @@ def compile_to_neff(
         artifacts_dir: Optional directory for intermediate compilation artifacts.
         neuronx_cc_args: Extra arguments forwarded to ``neuronx-cc``.
     """
-    from nkigen.transforms.nkipy_opt import apply_complete_knob_pipeline
+    from nkigen.driver.pipeline import apply_complete_knob_pipeline
 
     dump_dir = f"{artifacts_dir}/mlir_passes" if artifacts_dir else None
     nisa_mlir = apply_complete_knob_pipeline(

@@ -11,7 +11,7 @@ from mlir import ir
 from mlir.dialects import func
 
 from .traced_array import TracedArray
-from .mlir_utils import to_mlir_type, ranked_tensor_of
+from ..mlir_utils import to_mlir_type, ranked_tensor_of
 
 # Module-level registry for custom ops used during tracing.
 # No thread safety needed -- tracing is always single-threaded.

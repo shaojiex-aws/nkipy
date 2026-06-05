@@ -11,7 +11,7 @@ import pytest
 import numpy as np
 
 from nkigen import trace
-from nkigen.custom_op import (
+from nkigen.frontend.custom_op import (
     CustomOp,
     emit_custom_op_declaration,
 )

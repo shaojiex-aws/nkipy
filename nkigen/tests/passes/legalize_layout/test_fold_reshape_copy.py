@@ -16,7 +16,7 @@ Run with: python -m pytest tests/passes/legalize_layout/test_fold_reshape_copy.p
 
 import pytest
 
-from nkigen.transforms.nkipy_opt import run_nkipy_opt_passes
+from nkigen.driver.pipeline import run_nkipy_opt_passes
 from passes.pass_utils import run_filecheck
 
 

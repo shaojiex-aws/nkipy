@@ -21,7 +21,7 @@ import pytest
 from nki.compiler._internal import ir as nk_ir
 from nki.compiler._internal._mlir_libs import _nki
 
-from nkigen.transforms.linalg_to_nisa_py import _resolve_custom_ops
+from nkigen.codegen.nisa import _resolve_custom_ops
 from passes.pass_utils import run_filecheck
 
 

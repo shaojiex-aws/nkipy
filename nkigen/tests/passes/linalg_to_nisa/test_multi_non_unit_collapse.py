@@ -15,8 +15,8 @@ Run with: python -m pytest tests/passes/linalg_to_nisa/test_multi_non_unit_colla
 
 import pytest
 
-from nkigen.transforms.nkipy_opt import run_nkipy_opt_passes
-from nkigen.transforms.linalg_to_nisa_py import linalg_to_nisa
+from nkigen.driver.pipeline import run_nkipy_opt_passes
+from nkigen.codegen.nisa import linalg_to_nisa
 from passes.pass_utils import run_filecheck
 
 
