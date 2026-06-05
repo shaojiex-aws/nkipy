@@ -63,8 +63,16 @@ def _emit_transpose(gen, op) -> bool:
 
 
 def _emit_fill(gen, op) -> bool:
-    """``linalg.fill ins(scalar) outs(dst)`` -> ``nisa.memset(dst, value)``."""
+    """``linalg.fill ins(scalar) outs(dst)`` -> ``nisa.memset(dst, value)``.
+
+    Skips fills targeting HBM: memset is an on-chip (SBUF/PSUM) op, and an
+    HBM fill is redundant here anyway — the buffer is staged into SBUF and
+    overwritten before use. This mirrors the NISA backend, which only lowers
+    SBUF/PSUM fills.
+    """
     scalar, dst = op.operands[0], op.operands[1]
+    if not irutils.is_on_chip(dst.type):
+        return False
     val = irutils.const_scalar(scalar)
     value_expr = repr(val) if val is not None else index_expr(gen, scalar)
     gen.em.line(gen.api.memset(memref_expr(gen, dst), value_expr))
@@ -76,8 +84,8 @@ def _emit_fill(gen, op) -> bool:
 # ---------------------------------------------------------------------------
 
 
-def _has_reduction(op) -> bool:
-    return any("reduction" in str(t) for t in op.operation.attributes["iterator_types"])
+def _num_reduction_dims(op) -> int:
+    return sum("reduction" in str(t) for t in op.operation.attributes["iterator_types"])
 
 
 def _body_ops(op) -> list:
@@ -88,7 +96,7 @@ def _body_ops(op) -> list:
 
 def _emit_generic(gen, op) -> bool:
     """Dispatch a ``linalg.generic`` by iterator types and body shape."""
-    return (_emit_reduction if _has_reduction(op) else _emit_elementwise)(gen, op)
+    return (_emit_reduction if _num_reduction_dims(op) else _emit_elementwise)(gen, op)
 
 
 def _emit_reduction(gen, op) -> bool:
@@ -101,6 +109,7 @@ def _emit_reduction(gen, op) -> bool:
         return False
     gen.em.line(gen.api.tensor_reduce_arith(
         memref_expr(gen, dst), memref_expr(gen, src), info.member,
+        num_r_dim=_num_reduction_dims(op),
     ))
     return True
 

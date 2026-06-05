@@ -10,7 +10,7 @@ Handlers are wired into the walker's dispatch table by :func:`register`.
 from __future__ import annotations
 
 from . import irutils
-from .api import MEMSPACE_HBM, MEMSPACE_PSUM, MEMSPACE_SBUF, MEMSPACE_SHARED_HBM
+from .irutils import MEMSPACE_PSUM, MEMSPACE_SBUF
 from .emit_indexing import memref_expr
 
 
@@ -28,6 +28,11 @@ def _emit_alloc(gen, op) -> bool:
 
     ty = result.type
     shape = tuple(irutils.memref_shape(ty))
+    # On-chip tiles must be >= 2-D (SBUF/PSUM are partition x free); a 1-D
+    # reduction result becomes (N, 1). HBM tiles keep their rank. A dma_copy
+    # between the padded 2-D tile and a 1-D HBM buffer is handled by kb.
+    if irutils.is_on_chip(ty) and len(shape) == 1:
+        shape = (shape[0], 1)
     dtype = gen.api.dtype(irutils.memref_elem_type(ty))
     space = gen.api.memory_space(irutils.memref_memspace(ty))
 
@@ -42,10 +47,6 @@ def _emit_dealloc(gen, op) -> bool:
     target = op.operation.operands[0]
     gen.em.line(gen.api.release(memref_expr(gen, target)))
     return True
-
-
-def _is_hbm(ms) -> bool:
-    return ms in (MEMSPACE_HBM, MEMSPACE_SHARED_HBM)
 
 
 def _emit_copy(gen, op) -> bool:
@@ -69,7 +70,7 @@ def _emit_copy(gen, op) -> bool:
     src_expr = memref_expr(gen, src)
     dst_expr = memref_expr(gen, dst)
 
-    src_hbm, dst_hbm = _is_hbm(src_ms), _is_hbm(dst_ms)
+    src_hbm, dst_hbm = irutils.is_hbm(src.type), irutils.is_hbm(dst.type)
     needs_psum_hop = (
         (src_hbm and dst_ms == MEMSPACE_PSUM)
         or (src_ms == MEMSPACE_PSUM and dst_hbm)

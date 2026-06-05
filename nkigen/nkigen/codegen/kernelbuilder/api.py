@@ -20,13 +20,9 @@ from __future__ import annotations
 
 from typing import Protocol
 
-
-# Integer memory-space markers as they appear in post-Phase-4 memref types
-# (matching MemSpaceEnum in NkipyAttrs.td; enum starts at 1).
-MEMSPACE_HBM = 1
-MEMSPACE_PSUM = 2
-MEMSPACE_SBUF = 3
-MEMSPACE_SHARED_HBM = 4
+from .irutils import (
+    MEMSPACE_HBM, MEMSPACE_PSUM, MEMSPACE_SBUF, MEMSPACE_SHARED_HBM,
+)
 
 
 class KernelBuilderAPI(Protocol):
@@ -74,7 +70,8 @@ class KernelBuilderAPI(Protocol):
     def tensor_scalar_arith(self, dst: str, src: str, scalar: str, arith_op: str) -> str:
         ...
 
-    def tensor_reduce_arith(self, dst: str, src: str, arith_op: str) -> str:
+    def tensor_reduce_arith(self, dst: str, src: str, arith_op: str,
+                            num_r_dim: int) -> str:
         ...
 
     def activation(self, dst: str, src: str, activation: str,
@@ -183,8 +180,12 @@ class KernelBuilderV1:
             f"{dst}, {src}, {scalar}, op0={self._arith_op(arith_op)})"
         )
 
-    def tensor_reduce_arith(self, dst: str, src: str, arith_op: str) -> str:
-        return f"{self.NISA}.tensor_reduce_arith({dst}, {src}, op={self._arith_op(arith_op)})"
+    def tensor_reduce_arith(self, dst: str, src: str, arith_op: str,
+                            num_r_dim: int) -> str:
+        return (
+            f"{self.NISA}.tensor_reduce_arith("
+            f"{dst}, {src}, op={self._arith_op(arith_op)}, num_r_dim={num_r_dim})"
+        )
 
     def activation(self, dst: str, src: str, activation: str,
                    bias: str = "0.0", scale: str = "1.0") -> str:

@@ -14,7 +14,14 @@ import re
 from mlir import ir as up_ir  # type: ignore[import-not-found]
 
 
-# "<n> : i32" memory-space marker -> int (matches MemSpaceEnum in NkipyAttrs.td).
+# Integer memory-space markers in post-Phase-4 memref types (matching
+# MemSpaceEnum in NkipyAttrs.td; the enum starts at 1).
+MEMSPACE_HBM = 1
+MEMSPACE_PSUM = 2
+MEMSPACE_SBUF = 3
+MEMSPACE_SHARED_HBM = 4
+
+# "<n> : i32" memory-space marker -> int.
 _MEMSPACE_RE = re.compile(r"(\d+)\s*:\s*i32")
 
 
@@ -39,6 +46,20 @@ def memref_memspace(ty: up_ir.Type) -> int | None:
         return None
     m = _MEMSPACE_RE.search(str(ms))
     return int(m.group(1)) if m else None
+
+
+def is_on_chip(ty: up_ir.Type) -> bool:
+    """True if a memref lives in on-chip memory (SBUF or PSUM).
+
+    Compute ops (memset, tensor_*) require on-chip operands — they cannot read
+    or write HBM directly.
+    """
+    return memref_memspace(ty) in (MEMSPACE_SBUF, MEMSPACE_PSUM)
+
+
+def is_hbm(ty: up_ir.Type) -> bool:
+    """True if a memref lives in HBM (private or shared)."""
+    return memref_memspace(ty) in (MEMSPACE_HBM, MEMSPACE_SHARED_HBM)
 
 
 def func_ops(module: up_ir.Module) -> list[up_ir.OpView]:
