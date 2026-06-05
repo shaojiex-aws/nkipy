@@ -1,14 +1,61 @@
-"""Post-pass: fold HBM collapse_shape/expand_shape into the nisa.alloc."""
+"""Post-pass cleanups run after the per-op rewrites: fold reinterpret_cast on
+fresh allocs and fold HBM collapse_shape/expand_shape into the nisa.alloc."""
 
 from __future__ import annotations
 
-from nki.compiler._internal import ir as nk_ir  # type: ignore[import-not-found]
-from nki.compiler._internal.dialects import nisa  # type: ignore[import-not-found]
+from ._vendor import nk_ir, nisa
 
 from .patterns import _RewriteContext, _is_hbm
 
+
 # ---------------------------------------------------------------------------
-# Post-pass: fold HBM collapse_shape/expand_shape into the nisa.alloc.
+# Fold reinterpret_cast(nisa.alloc) -> a single nisa.alloc of the cast type.
+# ---------------------------------------------------------------------------
+
+
+def _fold_reinterpret_casts(rctx: _RewriteContext) -> None:
+    casts: list[nk_ir.OpView] = []
+
+    def visit(op_handle: nk_ir.Operation) -> nk_ir.WalkResult:
+        if op_handle.name == "memref.reinterpret_cast":
+            casts.append(op_handle.opview)
+        return nk_ir.WalkResult.ADVANCE
+
+    rctx.module.operation.walk(visit)
+
+    for cast_op in casts:
+        src = cast_op.operation.operands[0]
+        src_owner = getattr(src, "owner", None)
+        if src_owner is None:
+            continue
+        src_op = src_owner.opview if hasattr(src_owner, "opview") else src_owner
+        if getattr(src_op, "name", None) != "nisa.alloc":
+            continue
+        try:
+            st_off = [int(x) for x in cast_op.operation.attributes["static_offsets"]]
+            if any(x != 0 for x in st_off):
+                continue
+        except (KeyError, ValueError):
+            continue
+
+        new_ty = cast_op.operation.results[0].type
+
+        alignment = 0
+        if "alignment" in src_op.attributes:
+            alignment = nk_ir.IntegerAttr(src_op.attributes["alignment"]).value
+
+        with nk_ir.InsertionPoint(src_op), rctx.loc:
+            new_alloc = nisa.alloc(memref_type=new_ty, alignment=alignment)
+
+        cast_op.operation.results[0].replace_all_uses_with(new_alloc)
+        cast_op.operation.erase()
+        if list(src.uses):
+            src.replace_all_uses_with(new_alloc)
+        src_op.erase()
+
+
+# ---------------------------------------------------------------------------
+# Fold HBM collapse_shape/expand_shape into the nisa.alloc.
 # ---------------------------------------------------------------------------
 
 

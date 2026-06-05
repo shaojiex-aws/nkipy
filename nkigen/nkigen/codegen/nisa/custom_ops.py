@@ -3,7 +3,7 @@ bodies at each call site."""
 
 from __future__ import annotations
 
-from nki.compiler._internal import ir as nk_ir  # type: ignore[import-not-found]
+from ._vendor import nk_ir
 
 def _resolve_custom_ops(module: nk_ir.Module, ctx: nk_ir.Context) -> None:
     """Python port of the deleted C++ ResolveCustomOpsPass.

@@ -3,8 +3,7 @@ identity copies, type casts, powf -> NISA ops."""
 
 from __future__ import annotations
 
-from nki.compiler._internal import ir as nk_ir  # type: ignore[import-not-found]
-from nki.compiler._internal.dialects import nisa  # type: ignore[import-not-found]
+from ._vendor import nk_ir, nisa
 
 from .access import _get_base_and_offsets
 from .affine_map import (
@@ -13,7 +12,7 @@ from .affine_map import (
     _operand_kwargs,
     _scalar_operand_kwargs,
 )
-from .codegen_activation import _emit_activation
+from .activation import _emit_activation
 from .patterns import (
     _ARITH_TO_CROSS_LANE,
     _REDUCE_BODY_OP_TO_ARITH,

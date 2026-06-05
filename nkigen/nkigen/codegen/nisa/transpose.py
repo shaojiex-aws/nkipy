@@ -3,8 +3,7 @@ helpers and a small index-constant emitter."""
 
 from __future__ import annotations
 
-from nki.compiler._internal import ir as nk_ir  # type: ignore[import-not-found]
-from nki.compiler._internal.dialects import nisa  # type: ignore[import-not-found]
+from ._vendor import nk_ir, nisa
 
 from .access import _Access, _get_base_and_offsets
 from .affine_map import _build_nisa_map, _operand_kwargs
@@ -134,21 +133,3 @@ def _rewrite_linalg_transpose(rctx: _RewriteContext, op: nk_ir.OpView) -> None:
             )
             op.operation.erase()
             return
-
-
-# ---------------------------------------------------------------------------
-# linalg.matmul_transpose_a
-# ---------------------------------------------------------------------------
-
-
-def _index_const(rctx: _RewriteContext, value: int) -> nk_ir.Value:
-    with rctx.loc:
-        idx_ty = nk_ir.IndexType.get(rctx.ctx)
-        attr = nk_ir.IntegerAttr.get(idx_ty, value)
-        const_op = nk_ir.Operation.create(
-            "arith.constant",
-            results=[idx_ty],
-            attributes={"value": attr},
-            loc=rctx.loc,
-        )
-    return const_op.result

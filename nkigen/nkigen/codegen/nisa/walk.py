@@ -2,10 +2,9 @@
 
 from __future__ import annotations
 
-from nki.compiler._internal import ir as nk_ir  # type: ignore[import-not-found]
+from ._vendor import nk_ir
 
-from .codegen_alloc import _fold_reinterpret_casts
-from .finalize import _fold_hbm_reshapes
+from .finalize import _fold_hbm_reshapes, _fold_reinterpret_casts
 from .patterns import _PATTERNS, _RewriteContext
 
 # ---------------------------------------------------------------------------

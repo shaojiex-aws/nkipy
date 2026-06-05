@@ -7,7 +7,7 @@ import re
 
 from mlir import ir as up_ir  # type: ignore[import-not-found]
 
-from nki.compiler._internal import ir as nk_ir  # type: ignore[import-not-found]
+from ._vendor import nk_ir
 from nki.compiler._internal._mlir_libs import _nki  # type: ignore[import-not-found]
 
 # NKIPy emits memref memory-space annotations as `N : i32` integers (matching

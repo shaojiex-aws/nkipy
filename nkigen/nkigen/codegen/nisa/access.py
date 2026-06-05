@@ -5,7 +5,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from nki.compiler._internal import ir as nk_ir  # type: ignore[import-not-found]
+from ._vendor import nk_ir
 
 DYN_SENTINEL = -(1 << 63)
 

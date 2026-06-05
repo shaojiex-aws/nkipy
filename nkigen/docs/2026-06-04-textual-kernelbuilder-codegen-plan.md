@@ -6,6 +6,11 @@
 ## Progress
 
 - ✅ **Phase 0: Package Restructuring** — complete (commit `5f27d4d`). All 312 tests pass.
+  Followed by a cleanup pass: dropped the `codegen_` filename prefix
+  (`nisa/elementwise.py` etc.), added `nisa/_vendor.py` as the single source of
+  truth for the nki-wheel import paths, and relocated misplaced shared helpers
+  (`_pad_shape_to_2d` → `patterns`, `_fold_reinterpret_casts` → `finalize`,
+  deleted the duplicate `_index_const` in favor of `access._emit_const_index`).
 - 🔄 **Phase 1: Foundation — IR Analysis & Code Emitter Skeleton** — in progress
 - ⬜ Phase 2: Memory Operations
 - ⬜ Phase 3: Compute Operations
@@ -133,23 +138,25 @@ nkigen/nkigen/
 ├── codegen/                     # Backends (IR → target)
 │   ├── __init__.py
 │   ├── nisa/                    # NISA MLIR codegen (split from linalg_to_nisa_py.py)
-│   │   ├── __init__.py          (exports: linalg_to_nisa)
+│   │   ├── __init__.py          (entry point linalg_to_nisa + @pattern side-effect imports)
+│   │   ├── _vendor.py           (single source of truth for nki wheel imports: nk_ir, nisa)
 │   │   ├── context.py           (module parsing, memspace rewrite, _to_nki_module)
-│   │   ├── access.py            (_Access class, _get_base_and_offsets, offset helpers)
+│   │   ├── access.py            (_Access class, _get_base_and_offsets, offset/const helpers)
 │   │   ├── affine_map.py        (_create_standard_nisa_map, _build_nisa_map, _operand_kwargs)
-│   │   ├── patterns.py          (pattern registry, _RewriteContext, decorator)
-│   │   ├── codegen_elementwise.py  (_rewrite_elementwise, _rewrite_linalg_generic)
-│   │   ├── codegen_copy.py     (_rewrite_memref_copy, _rewrite_linalg_copy)
-│   │   ├── codegen_alloc.py    (_rewrite_memref_alloc, _fold_reinterpret_casts, _rewrite_memref_dealloc)
-│   │   ├── codegen_transpose.py   (_rewrite_linalg_transpose)
-│   │   ├── codegen_matmul.py   (_rewrite_matmul_transpose_a)
-│   │   ├── codegen_activation.py  (_emit_activation, _rewrite_linalg_activation, _rewrite_reciprocal)
-│   │   ├── codegen_fill.py     (_rewrite_linalg_fill)
-│   │   ├── codegen_reduction.py   (_classify_reduction, _rewrite_linalg_generic_reduction)
-│   │   ├── codegen_gather.py   (_rewrite_nkipy_gather, _emit_gather_iteration, DMA indirect)
+│   │   ├── patterns.py          (pattern registry, _RewriteContext, predicates, shape helpers)
+│   │   ├── elementwise.py       (_rewrite_elementwise)
+│   │   ├── copy.py              (_rewrite_memref_copy, _rewrite_linalg_copy)
+│   │   ├── alloc.py             (_rewrite_memref_alloc, _rewrite_memref_dealloc)
+│   │   ├── transpose.py         (_rewrite_linalg_transpose)
+│   │   ├── matmul.py            (_rewrite_matmul_transpose_a)
+│   │   ├── activation.py        (_emit_activation, _rewrite_linalg_activation, _rewrite_reciprocal)
+│   │   ├── fill.py              (_rewrite_linalg_fill)
+│   │   ├── reduction.py         (_classify_reduction, _rewrite_linalg_generic_reduction, generic dispatch)
+│   │   ├── gather.py            (_rewrite_nkipy_gather, _emit_gather_iteration, DMA indirect)
 │   │   ├── custom_ops.py        (_resolve_custom_ops)
-│   │   ├── finalize.py          (_finalize_for_nki, _fold_hbm_reshapes, _dce_dead_view_ops)
-│   │   └── walk.py              (_walk_and_rewrite — top-level orchestration)
+│   │   ├── finalize.py          (_fold_reinterpret_casts, _fold_hbm_reshapes — post-pass cleanups)
+│   │   └── walk.py              (_walk_and_rewrite + _dce_dead_view_ops — top-level orchestration)
+│   │   # _finalize_for_nki lives in __init__.py alongside the entry point.
 │   │
 │   └── kernelbuilder/                 # [NEW] kernel_builder Python codegen
 │       ├── __init__.py          (exports: linalg_to_kernelbuilder)

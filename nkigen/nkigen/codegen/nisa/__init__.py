@@ -1,11 +1,10 @@
-"""NISA MLIR codegen backend (split from the former monolithic
-transforms/linalg_to_nisa_py.py).
+"""NISA MLIR codegen backend.
 
 Reads post-Phase-4 MLIR (linalg+memref+scf+arith+func, integer-encoded
 nkipy memory spaces) and emits NISA MLIR via the nki wheel's Python
 bindings. See the per-module docstrings for the section breakdown.
 
-IMPORTANT: every codegen_* module is imported below so that its
+IMPORTANT: every op-rewriter module is imported below so that its
 @pattern(...) decorators run and populate the shared _PATTERNS registry
 before _walk_and_rewrite dispatches on it."""
 
@@ -13,7 +12,7 @@ from __future__ import annotations
 
 import re
 
-from nki.compiler._internal import ir as nk_ir  # type: ignore[import-not-found]
+from ._vendor import nk_ir
 
 from .context import _to_nki_module
 from .patterns import _RewriteContext, pattern
@@ -21,15 +20,15 @@ from .walk import _walk_and_rewrite
 from .custom_ops import _resolve_custom_ops
 
 # Import for @pattern side effects: populate _PATTERNS.
-from . import codegen_elementwise  # noqa: F401
-from . import codegen_copy  # noqa: F401
-from . import codegen_alloc  # noqa: F401
-from . import codegen_transpose  # noqa: F401
-from . import codegen_matmul  # noqa: F401
-from . import codegen_activation  # noqa: F401
-from . import codegen_fill  # noqa: F401
-from . import codegen_reduction  # noqa: F401
-from . import codegen_gather  # noqa: F401
+from . import elementwise  # noqa: F401
+from . import copy  # noqa: F401
+from . import alloc  # noqa: F401
+from . import transpose  # noqa: F401
+from . import matmul  # noqa: F401
+from . import activation  # noqa: F401
+from . import fill  # noqa: F401
+from . import reduction  # noqa: F401
+from . import gather  # noqa: F401
 
 def _finalize_for_nki(module: nk_ir.Module, ctx: nk_ir.Context, target: str) -> None:
     def strip_nkipy_attrs(op: nk_ir.Operation) -> nk_ir.WalkResult:

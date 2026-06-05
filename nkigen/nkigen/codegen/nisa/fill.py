@@ -2,8 +2,7 @@
 
 from __future__ import annotations
 
-from nki.compiler._internal import ir as nk_ir  # type: ignore[import-not-found]
-from nki.compiler._internal.dialects import nisa  # type: ignore[import-not-found]
+from ._vendor import nk_ir, nisa
 
 from .access import _get_base_and_offsets
 from .affine_map import _build_nisa_map, _operand_kwargs

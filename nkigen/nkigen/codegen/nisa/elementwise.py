@@ -2,8 +2,7 @@
 
 from __future__ import annotations
 
-from nki.compiler._internal import ir as nk_ir  # type: ignore[import-not-found]
-from nki.compiler._internal.dialects import nisa  # type: ignore[import-not-found]
+from ._vendor import nk_ir, nisa
 
 from .access import _get_base_and_offsets
 from .affine_map import _build_nisa_map, _operand_kwargs
@@ -43,14 +42,3 @@ def _rewrite_elementwise(rctx: _RewriteContext, op: nk_ir.OpView) -> None:
             op=arith_kind, engine=nisa.Engine.Vector, **kwargs
         )
     op.operation.erase()
-
-
-# ---------------------------------------------------------------------------
-# memref.copy + linalg.copy
-# ---------------------------------------------------------------------------
-
-
-def _pad_shape_to_2d(shape: list[int]) -> list[int]:
-    if len(shape) < 2:
-        return shape + [1] * (2 - len(shape))
-    return shape

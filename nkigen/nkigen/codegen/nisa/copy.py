@@ -2,17 +2,16 @@
 
 from __future__ import annotations
 
-from nki.compiler._internal import ir as nk_ir  # type: ignore[import-not-found]
-from nki.compiler._internal.dialects import nisa  # type: ignore[import-not-found]
+from ._vendor import nk_ir, nisa
 
 from .access import _get_base_and_offsets
 from .affine_map import _build_nisa_map, _operand_kwargs
-from .codegen_elementwise import _pad_shape_to_2d
 from .patterns import (
     _RewriteContext,
     _is_hbm,
     _is_psum,
     _is_sbuf,
+    _pad_shape_to_2d,
     _static_shape,
     pattern,
 )

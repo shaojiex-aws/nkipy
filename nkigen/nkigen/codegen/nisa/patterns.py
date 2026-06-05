@@ -5,8 +5,7 @@ from __future__ import annotations
 
 from typing import Callable
 
-from nki.compiler._internal import ir as nk_ir  # type: ignore[import-not-found]
-from nki.compiler._internal.dialects import nisa  # type: ignore[import-not-found]
+from ._vendor import nk_ir, nisa
 
 _Pattern = Callable[["_RewriteContext", nk_ir.OpView], None]
 _PATTERNS: dict[str, _Pattern] = {}
@@ -105,4 +104,10 @@ def _static_shape(ty: nk_ir.Type) -> list[int] | None:
     shape = list(getattr(ty, "shape", ()))
     if any(s < 0 for s in shape):
         return None
+    return shape
+
+
+def _pad_shape_to_2d(shape: list[int]) -> list[int]:
+    if len(shape) < 2:
+        return shape + [1] * (2 - len(shape))
     return shape

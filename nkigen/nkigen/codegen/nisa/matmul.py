@@ -2,12 +2,10 @@
 
 from __future__ import annotations
 
-from nki.compiler._internal import ir as nk_ir  # type: ignore[import-not-found]
-from nki.compiler._internal.dialects import nisa  # type: ignore[import-not-found]
+from ._vendor import nk_ir, nisa
 
-from .access import _get_base_and_offsets
+from .access import _emit_const_index, _get_base_and_offsets
 from .affine_map import _build_nisa_map, _operand_kwargs
-from .codegen_transpose import _index_const
 from .patterns import (
     _RewriteContext,
     _is_psum,
@@ -48,8 +46,8 @@ def _rewrite_matmul_transpose_a(rctx: _RewriteContext, op: nk_ir.OpView) -> None
         b_map = _build_nisa_map(rctx.ctx, 2, b_acc)
         c_map = _build_nisa_map(rctx.ctx, 2, c_acc)
 
-        row_pos = _index_const(rctx, 0)
-        col_pos = _index_const(rctx, 0)
+        row_pos = _emit_const_index(rctx.ctx, 0, rctx.loc)
+        col_pos = _emit_const_index(rctx.ctx, 0, rctx.loc)
         nisa.matmul(
             **_operand_kwargs("dst", c_acc, c_map, [M, N]),
             **_operand_kwargs("stationary", a_acc, a_map, [K, M]),

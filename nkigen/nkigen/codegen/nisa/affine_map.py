@@ -3,8 +3,7 @@ operand-kwargs builders handed to the nisa.<op> Python builders."""
 
 from __future__ import annotations
 
-from nki.compiler._internal import ir as nk_ir  # type: ignore[import-not-found]
-from nki.compiler._internal.dialects import nisa  # type: ignore[import-not-found]
+from ._vendor import nk_ir, nisa
 
 from .access import _Access
 
