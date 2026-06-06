@@ -13,11 +13,11 @@
   deleted the duplicate `_index_const` in favor of `access._emit_const_index`).
 - ✅ **Phase 1: Foundation — IR Analysis & Code Emitter Skeleton** — complete (commit `3acd0cb`). Uses upstream `mlir.ir` (no NKI wheel dep); 20 Emitter unit tests; full suite 332 pass.
 - ✅ **Phase 2: Memory Operations** — complete (commit `e9cfdd8`). alloc/release/dma_copy + subview→slice indexing; 7 unit tests; full suite 339.
-- 🟡 **Phase 3: Compute Operations** — mostly done (commit `905fc68`). Arithmetic, activation, matmul, reduction, fill, transpose all emit; round-trip (Mode.CODEGEN) green for elementwise/activation/single-tile matmul. Remaining: multi-block matmul K-loop PSUM accumulation (needs Phase 4 fori_loop). Also fixed legalize-layout's 4D-physical-layout indexing (see `2026-06-05-kernelbuilder-4d-layout-conflict.md`). Test strategy changed: no separate kb test files — round-trip via Mode.CODEGEN on existing e2e tests.
+- ✅ **Phase 3: Compute Operations** — done (commits `905fc68`, `97229ea`, `205f9c3`). Arithmetic, activation, matmul, reduction, fill, transpose all emit and round-trip (Mode.CODEGEN). Multi-block matmul K-loop PSUM accumulation fixed (`accum=(k!=0)`); reductions fixed (num_r_dim + 2-D on-chip alloc + skip HBM fill); subview chains composed into one base-relative slice. 4D-layout indexing fix: `2026-06-05-kernelbuilder-4d-layout-conflict.md`. Round-trip green for matmul 128³–512³ (sq + non-sq), feedforward, reductions, elementwise, activation. No separate kb test files — round-trip via Mode.CODEGEN on existing e2e tests.
 - ✅ **Phase 4: Control Flow** — done (commit `1d7c8f6`). scf.for -> nb.fori_loop (decorator form) + nb.ds dynamic slices for loop-Reg offsets; nested loops via recursive walker. scf.if -> nb.if_else N/A (pipeline produces no scf.if).
 - ✅ **Phase 5: Integration & Pipeline Hookup** — done (commit `255a810`). Public `trace(fn).to_kernel_builder(target=...)`; dump to `<dump_dir>/kb_code.py`. Task 5.1 (py:linalg-to-kernelbuilder pass) superseded by pipeline `stop_before=` + `trace_to_kernelbuilder` (the backend emits Python text, not MLIR, so it isn't a pass).
-- 🔄 **Phase 6: Variable Naming & Readability** — in progress
-- ⬜ Phase 7: Validation & Testing
+- ✅ **Phase 6: Variable Naming & Readability** — done. 6.1 role-based tile names (`f4b5e41`); 6.2 optional `comments=True` op annotations + 6.3 `black` formatting (`cb5c19e`).
+- 🔄 **Phase 7: Validation & Testing** — in progress (Mode.CODEGEN round-trip is the harness; wire it into existing e2e tests)
 - ⬜ Phase 8: Documentation & Examples
 
 ## Goal
@@ -325,9 +325,9 @@ Split the 2767-line monolith along its natural section boundaries:
 
 ---
 
-### Phase 3: Compute Operations (`emit_compute.py`)
+### Phase 3: Compute Operations (`emit_compute.py`) ✅ DONE
 
-#### Task 3.1: Emit arithmetic operations
+#### Task 3.1: Emit arithmetic operations ✅
 
 - Map `linalg.generic` with known body patterns to `nisa.tensor_tensor_arith`:
   - `arith.addf` → `nisa.arith_op.Add`
@@ -336,7 +336,7 @@ Split the 2767-line monolith along its natural section boundaries:
   - `arith.maximumf` → `nisa.arith_op.Maximum`
 - Handle broadcast patterns (scalar-tensor, tensor-tensor).
 
-#### Task 3.2: Emit activation/unary operations
+#### Task 3.2: Emit activation/unary operations ✅
 
 - Map unary `linalg.generic` bodies to `nisa.activation`:
   - `math.exp` → `nisa.activation_function.exp`
@@ -344,12 +344,12 @@ Split the 2767-line monolith along its natural section boundaries:
   - `math.log` → `nisa.activation_function.log`
   - `math.sqrt` → `nisa.activation_function.sqrt`
 
-#### Task 3.3: Emit matmul
+#### Task 3.3: Emit matmul ✅ (incl. K-loop accumulation)
 
 - Map `linalg.matmul` / batched-matmul patterns to `nisa.matmul(dst, stationary, moving)`.
 - Handle accumulate flag based on whether dst is pre-zeroed.
 
-#### Task 3.4: Emit reductions
+#### Task 3.4: Emit reductions ✅
 
 - Map reduction `linalg.generic` ops (with iterators `[parallel, reduction]`)
   to appropriate NISA reduce operations.
@@ -400,22 +400,22 @@ Split the 2767-line monolith along its natural section boundaries:
 
 ---
 
-### Phase 6: Variable Naming & Readability
+### Phase 6: Variable Naming & Readability ✅ DONE
 
-#### Task 6.1: Intelligent variable naming
+#### Task 6.1: Intelligent variable naming ✅
 
 - Use op metadata (`nkipy.op_id`, source location) to generate meaningful names.
 - Name tiles by their role: `sbuf_matmul_lhs`, `psum_acc`, `hbm_output`, etc.
 - Name loop variables: `i_tile`, `j_block`, etc.
 
-#### Task 6.2: Comment generation (optional, behind flag)
+#### Task 6.2: Comment generation (optional, behind flag) ✅
 
 - Optionally annotate generated code with:
   - Original source line references
   - Tile shapes and memory space info
   - Which nkigen pass produced each pattern
 
-#### Task 6.3: Code formatting
+#### Task 6.3: Code formatting ✅
 
 - Run output through a formatter (or emit pre-formatted).
 - Ensure generated code passes `ruff check` / basic linting.
