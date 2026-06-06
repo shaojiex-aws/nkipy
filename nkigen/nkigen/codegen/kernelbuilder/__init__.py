@@ -29,6 +29,8 @@ def linalg_to_kernelbuilder(
     kernel_name: str,
     target: str = "trn2",
     api_version: str = "v1",
+    fmt: bool = True,
+    comments: bool = False,
 ) -> str:
     """Translate post-Phase-4 MLIR to kernel_builder Python source (text -> text).
 
@@ -38,6 +40,11 @@ def linalg_to_kernelbuilder(
             own ``sym_name`` is used if this is falsy.
         target: hardware target tag (recorded in a header comment for now).
         api_version: which :class:`~.api.KernelBuilderAPI` version to render.
+        fmt: run the result through ``black`` for PEP8 formatting (blank lines
+            around nested loop bodies, wrapped long calls). Falls back to the
+            unformatted source if ``black`` is unavailable.
+        comments: annotate each emitted op with a ``# <op>  <shape> <space>``
+            comment (and its ``nkipy.op_id`` when present) for traceability.
 
     Returns:
         A string of valid Python source defining one function per ``func.func``
@@ -50,8 +57,23 @@ def linalg_to_kernelbuilder(
     ctx.allow_unregistered_dialects = True
     with ctx:
         module = up_ir.Module.parse(mlir_text)
-        gen = _ModuleEmitter(module, api, kernel_name, target)
-        return gen.run()
+        gen = _ModuleEmitter(module, api, kernel_name, target, comments=comments)
+        code = gen.run()
+    return _format_source(code) if fmt else code
+
+
+def _format_source(code: str) -> str:
+    """Format generated Python with black; return as-is if black is missing.
+
+    black gives the emitted code idiomatic spacing (blank lines around the
+    nested ``@nb.fori_loop`` bodies) and wraps over-long calls. It is an
+    optional dev dependency, so a missing/failed black never breaks codegen.
+    """
+    try:
+        import black
+        return black.format_str(code, mode=black.Mode())
+    except Exception:
+        return code
 
 
 # The pass that lowers linalg -> NISA. The IR the kernelbuilder backend walks
@@ -80,6 +102,7 @@ def trace_to_kernelbuilder(
     target: str = "trn2",
     api_version: str = "v1",
     dump_dir: str | None = None,
+    comments: bool = False,
 ) -> str:
     """Trace -> tiled IR -> kernel_builder Python source (end to end).
 
@@ -90,7 +113,8 @@ def trace_to_kernelbuilder(
     ir = compile_to_tiled_ir(traced_func, target=target, dump_dir=dump_dir)
     name = traced_func.__wrapped__.__name__
     code = linalg_to_kernelbuilder(
-        ir, kernel_name=name, target=target, api_version=api_version
+        ir, kernel_name=name, target=target, api_version=api_version,
+        comments=comments,
     )
     if dump_dir:
         os.makedirs(dump_dir, exist_ok=True)
@@ -102,11 +126,13 @@ def trace_to_kernelbuilder(
 class _ModuleEmitter:
     """Drives emission for one module: header, imports, one fn per func.func."""
 
-    def __init__(self, module, api, kernel_name: str, target: str) -> None:
+    def __init__(self, module, api, kernel_name: str, target: str,
+                 comments: bool = False) -> None:
         self.module = module
         self.api = api
         self.kernel_name = kernel_name
         self.target = target
+        self.comments = comments
         self.em = Emitter()
         # SSA value -> generated Python variable name, rebuilt per function.
         self.names: dict = {}
@@ -173,6 +199,25 @@ class _ModuleEmitter:
             if op.operation.name == "func.return":
                 return list(op.operation.operands)
         return []
+
+    def _annotate(self, op) -> None:
+        """Emit a ``# <op>  <shape> <space>  [op_id=N]`` traceability comment."""
+        name = op.operation.name
+        bits = [name]
+        operands = list(op.operation.operands)
+        if operands:
+            ty = operands[-1].type  # destination operand
+            if irutils.is_memref(ty):
+                shape = "x".join(str(s) for s in irutils.memref_shape(ty))
+                ms = {
+                    irutils.MEMSPACE_SBUF: "sbuf", irutils.MEMSPACE_PSUM: "psum",
+                    irutils.MEMSPACE_HBM: "hbm", irutils.MEMSPACE_SHARED_HBM: "shared_hbm",
+                }.get(irutils.memref_memspace(ty), "?")
+                bits.append(f"{shape} {ms}")
+        oid = irutils.op_id(op)
+        if oid is not None:
+            bits.append(f"op_id={oid}")
+        self.em.comment("  ".join(bits))
 
     # -- naming -----------------------------------------------------------
 
@@ -242,6 +287,8 @@ class _ModuleEmitter:
         name = op.operation.name
         handler = _DISPATCH.get(name)
         if handler is not None:
+            if self.comments and name not in _UNANNOTATED:
+                self._annotate(op)
             return handler(self, op)
         # Terminators / structural ops we intentionally skip without noise.
         if name in _SILENT_SKIP:
@@ -327,6 +374,15 @@ _SILENT_SKIP = {
     "memref.collapse_shape",
     "memref.expand_shape",
     "memref.reinterpret_cast",
+}
+
+# Ops not worth a `--comments` annotation: alloc/dealloc (the role-named
+# variable already says what the tile is) and the loop op (its bound is on the
+# line itself). Compute and copy ops carry the useful shape/op_id annotation.
+_UNANNOTATED = {
+    "memref.alloc",
+    "memref.dealloc",
+    "scf.for",
 }
 
 

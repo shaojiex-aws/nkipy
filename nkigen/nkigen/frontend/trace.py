@@ -153,17 +153,20 @@ def trace(
                 b.cleanup()
 
         def to_kernel_builder(target: str = "trn2", api_version: str = "v1",
-                              dump_dir: Optional[str] = None) -> str:
+                              dump_dir: Optional[str] = None,
+                              comments: bool = False) -> str:
             """Generate readable ``kernel_builder`` Python source for this kernel.
 
             Runs the full nkigen pipeline up to (but not including) NISA
             lowering, then emits equivalent kernel_builder code as text. The
             result is directly executable/compilable through the standard NKI
-            flow. See ``nkigen.codegen.kernelbuilder``.
+            flow. Pass ``comments=True`` to annotate each op with its shape /
+            memory space / op_id. See ``nkigen.codegen.kernelbuilder``.
             """
             from ..codegen.kernelbuilder import trace_to_kernelbuilder
             return trace_to_kernelbuilder(
-                wrapper, target=target, api_version=api_version, dump_dir=dump_dir
+                wrapper, target=target, api_version=api_version,
+                dump_dir=dump_dir, comments=comments,
             )
 
         wrapper.to_mlir = to_mlir

@@ -57,6 +57,26 @@ def is_on_chip(ty: up_ir.Type) -> bool:
     return memref_memspace(ty) in (MEMSPACE_SBUF, MEMSPACE_PSUM)
 
 
+def is_memref(ty: up_ir.Type) -> bool:
+    """True if ``ty`` is a memref type."""
+    try:
+        up_ir.MemRefType(ty)
+        return True
+    except (ValueError, TypeError):
+        return False
+
+
+def op_id(op: up_ir.OpView) -> int | None:
+    """The ``nkipy.op_id`` integer stamped on an op, if present."""
+    attrs = op.operation.attributes
+    if "nkipy.op_id" not in attrs:
+        return None
+    try:
+        return up_ir.IntegerAttr(attrs["nkipy.op_id"]).value
+    except (ValueError, TypeError):
+        return None
+
+
 def is_hbm(ty: up_ir.Type) -> bool:
     """True if a memref lives in HBM (private or shared)."""
     return memref_memspace(ty) in (MEMSPACE_HBM, MEMSPACE_SHARED_HBM)
