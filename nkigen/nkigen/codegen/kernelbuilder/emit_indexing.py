@@ -39,10 +39,12 @@ _ARITH_BINOP = {
 
 
 def _defining_op(value):
+    """The op that defines ``value``, or None if it is a block argument."""
     owner = getattr(value, "owner", None)
-    if owner is None:
+    # A block argument's owner is a Block (no defining op).
+    if owner is None or not hasattr(owner, "opview"):
         return None
-    return owner.opview if hasattr(owner, "opview") else owner
+    return owner.opview
 
 
 def _depends_on_loop_reg(gen, value) -> bool:
@@ -107,41 +109,6 @@ def _subview_components(op):
     return static_offsets, static_sizes, dyn_offsets
 
 
-def subview_slice(gen, op) -> str:
-    """Render a ``memref.subview`` as a ``[d0, d1, ...]`` slice string.
-
-    Each dim renders as one of:
-      - ``":"``               full extent (offset 0, size == src dim)
-      - ``"nb.ds(off, n)"``   a runtime-Reg offset (kb forbids Python slices
-                              indexed by a fori_loop Reg)
-      - ``"off:off + n"``     a static/constant-offset range otherwise
-
-    (Unit block dims are *not* squeezed here — that collapse happens in
-    :func:`_collapse_to_2d_expr` for the legalize-layout 4-D pattern.)
-    """
-    static_offsets, static_sizes, dyn_offsets = _subview_components(op)
-    src_shape = irutils.memref_shape(op.operation.operands[0].type)
-    dyn_iter = iter(dyn_offsets)
-
-    dims: list[str] = []
-    for i, (off, size) in enumerate(zip(static_offsets, static_sizes)):
-        if off == DYN_SENTINEL:
-            dyn_val = next(dyn_iter)
-            off_expr = index_expr(gen, dyn_val, _PREC["+"])
-            on_reg = _depends_on_loop_reg(gen, dyn_val)
-        else:
-            off_expr = str(off)
-            on_reg = False
-
-        if off != DYN_SENTINEL and off == 0 and i < len(src_shape) and size == src_shape[i]:
-            dims.append(":")
-        elif on_reg:
-            dims.append(f"nb.ds({off_expr}, {size})")
-        else:
-            dims.append(f"{off_expr}:{off_expr} + {size}")
-    return "[" + ", ".join(dims) + "]"
-
-
 # View ops that reinterpret storage without reindexing — passed through to the
 # underlying value (the kb tile model has no equivalent op to emit).
 _PASSTHROUGH_VIEW_OPS = (
@@ -150,73 +117,124 @@ _PASSTHROUGH_VIEW_OPS = (
 )
 
 
+class _Dim:
+    """One composed base-memref dim: an offset expression, its size, and
+    whether the offset depends on a runtime fori_loop Reg.
+
+    ``offset`` is None for a full-extent (offset-0) dim. Offsets compose
+    *additively* down a subview chain (each inner subview's offset is relative
+    to its source), so two stacked subviews on dim d sum to one expression.
+    """
+    __slots__ = ("offset", "size", "on_reg")
+
+    def __init__(self, offset, size, on_reg):
+        self.offset = offset
+        self.size = size
+        self.on_reg = on_reg
+
+
+def _add_offsets(a: str | None, b: str | None) -> str | None:
+    if a is None:
+        return b
+    if b is None:
+        return a
+    return f"{a} + {b}"
+
+
 def _compose_subview_chain(gen, value):
-    """Resolve a (possibly nested) subview chain to ``(base_value, offsets)``.
+    """Resolve a (possibly nested) ``memref.subview`` chain to ``(base, dims)``.
 
-    legalize-layout can feed a compute operand through *two* stacked subviews
-    (an outer one that picks one block dim and keeps another full, then an
-    inner one that picks the remaining block dim). Chaining ``__getitem__`` in
-    the generated Python does not compose correctly, so we instead walk the
-    chain and accumulate, per base-memref dim, the index expression selecting
-    that dim — yielding a single index list against the base alloc.
+    Stacked subviews are composed into a *single* index list against the base
+    memref — offsets summed per dim — rather than chained ``[...][...]`` (kb
+    does not compose relative offsets across chained slices the way MLIR does).
 
-    Returns ``(base_value, offsets)`` where ``offsets[d]`` is the index
-    expression for base dim ``d`` (``None`` means "full extent / not narrowed").
+    Returns ``(base_value, list[_Dim])``, or ``(value, None)`` if ``value`` is
+    not produced by a subview.
     """
     op = _defining_op(value)
     if op is None or op.operation.name != "memref.subview":
         return value, None
 
-    base = op.operation.operands[0]
-    base_offsets = None
-    base_op = _defining_op(base)
-    if base_op is not None and base_op.operation.name == "memref.subview":
-        base, base_offsets = _compose_subview_chain(gen, base)
+    source = op.operation.operands[0]
+    base, base_dims = _compose_subview_chain(gen, source)
 
     static_offsets, static_sizes, dyn_offsets = _subview_components(op)
     dyn_iter = iter(dyn_offsets)
 
-    # This subview's offsets are expressed in its *source*'s dim space. When the
-    # source was itself a subview, its non-full dims line up with the same base
-    # dims (the chain only ever narrows), so we merge index-wise: a dim narrowed
-    # here overrides one left full by the outer subview.
-    n = len(static_offsets)
-    offsets = list(base_offsets) if base_offsets is not None else [None] * n
-    if len(offsets) < n:
-        offsets += [None] * (n - len(offsets))
-
+    dims: list[_Dim] = []
     for i, (off, size) in enumerate(zip(static_offsets, static_sizes)):
         if off == DYN_SENTINEL:
-            offsets[i] = index_expr(gen, next(dyn_iter), _PREC["+"])
-        elif off != 0 or size == 1:
-            # A non-zero static offset, or a size-1 selector, narrows this dim.
-            if offsets[i] is None:
-                offsets[i] = str(off)
-    return base, offsets
+            dyn_val = next(dyn_iter)
+            this_off = index_expr(gen, dyn_val, _PREC["+"])
+            this_reg = _depends_on_loop_reg(gen, dyn_val)
+        elif off != 0:
+            this_off, this_reg = str(off), False
+        else:
+            this_off, this_reg = None, False
+
+        if base_dims is not None and i < len(base_dims):
+            outer = base_dims[i]
+            dims.append(_Dim(
+                _add_offsets(outer.offset, this_off),
+                size,                       # innermost size wins
+                outer.on_reg or this_reg,
+            ))
+        else:
+            dims.append(_Dim(this_off, size, this_reg))
+    return base, dims
+
+
+def _render_dim(dim: _Dim, full_size: int, squeeze: bool) -> str:
+    """Render one composed dim as a slice token.
+
+    ``squeeze`` drops a size-1 dim to a bare integer index (kb squeezes it) —
+    used for the 4-D physical SBUF -> 2-D tile collapse.
+    """
+    off = dim.offset
+    if squeeze and dim.size == 1:
+        return off if off is not None else "0"
+    if off is None and dim.size == full_size:
+        return ":"
+    if dim.on_reg:
+        return f"nb.ds({off}, {dim.size})"
+    base = off if off is not None else "0"
+    return f"{base}:{base} + {dim.size}"
+
+
+def _render_subview(gen, base, dims, squeeze: bool) -> str:
+    base_expr = memref_expr(gen, base)
+    base_shape = irutils.memref_shape(base.type)
+    tokens = [
+        _render_dim(d, base_shape[i] if i < len(base_shape) else -1, squeeze)
+        for i, d in enumerate(dims)
+    ]
+    return f"{base_expr}[{', '.join(tokens)}]"
+
+
+def subview_slice(gen, op) -> str:
+    """Render a ``memref.subview`` (and any outer subviews) as one slice.
+
+    Each dim is ``":"`` (full extent), ``"nb.ds(off, n)"`` (runtime-Reg offset),
+    or ``"off:off + n"``.
+    """
+    base, dims = _compose_subview_chain(gen, op.operation.results[0])
+    return _render_subview(gen, base, dims, squeeze=False)
 
 
 def _collapse_to_2d_expr(gen, op) -> str:
     """Render ``memref.collapse_shape`` of a physical SBUF block as a 2-D tile.
 
     legalize-layout wraps each compute operand as
-    ``collapse_shape(subview*(4D alloc))`` where the (possibly stacked)
-    subviews select one block per block-dim and the collapse folds the unit
-    block dims away to a 2-D ``[partTile, freeTile]`` tile. We reproduce that by
-    composing the subview chain into one index list against the base alloc and
-    squeezing the size-1 block dims to integer indices, which kb collapses for
-    us — no reshape op needed.
+    ``collapse_shape(subview*(4D alloc))``; the subviews select one block per
+    block dim and the collapse folds the unit block dims to a 2-D
+    ``[partTile, freeTile]`` tile. We compose the subview chain and squeeze the
+    size-1 block dims to integer indices, which kb collapses for us — no
+    reshape op needed.
     """
-    base, offsets = _compose_subview_chain(gen, op.operation.operands[0])
-    if offsets is None:
-        # Collapse not fed by a subview (e.g. directly on an alloc).
+    base, dims = _compose_subview_chain(gen, op.operation.operands[0])
+    if dims is None:
         return memref_expr(gen, op.operation.operands[0])
-
-    base_expr = memref_expr(gen, base)
-    # Squeeze: a narrowed block dim -> integer index (kb drops it); a full dim
-    # (partition / free) -> ``:``. When every block dim is squeezed, the
-    # remaining ``:`` dims are the 2-D tile the compute op consumes.
-    dims = [off if off is not None else ":" for off in offsets]
-    return f"{base_expr}[{', '.join(dims)}]"
+    return _render_subview(gen, base, dims, squeeze=True)
 
 
 def memref_expr(gen, value) -> str:
@@ -228,8 +246,7 @@ def memref_expr(gen, value) -> str:
     if op is not None:
         name = op.operation.name
         if name == "memref.subview":
-            base = memref_expr(gen, op.operation.operands[0])
-            return f"{base}{subview_slice(gen, op)}"
+            return subview_slice(gen, op)
         if name == "memref.collapse_shape":
             return _collapse_to_2d_expr(gen, op)
         if name in _PASSTHROUGH_VIEW_OPS:

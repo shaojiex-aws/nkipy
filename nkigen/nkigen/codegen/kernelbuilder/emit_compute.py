@@ -41,15 +41,46 @@ def _emit_matmul(gen, op) -> bool:
     """``linalg.matmul_transpose_a ins(A, B) outs(C)`` -> nisa.matmul.
 
     Computes ``C = Aᵀ · B`` — A is the stationary operand (already transposed
-    into the NISA contraction layout), B the moving operand. accum=False (the
-    matmul zeroes PSUM); K-loop accumulation is a known TODO.
+    into the NISA contraction layout), B the moving operand.
+
+    When the matmul sits in a K-reduction loop (its PSUM accumulator is
+    allocated *outside* the enclosing loop), each iteration must accumulate:
+    the first (k==0) zeroes PSUM (accum=False), the rest add (accum=True). We
+    emit ``accum=(<k> != 0)`` keyed on the enclosing loop IV. A standalone
+    (single-block) matmul has its accumulator in the same scope -> accum=False.
     """
     a, b, c = op.operands[0], op.operands[1], op.operands[2]
     gen.em.line(gen.api.matmul(
         memref_expr(gen, c), memref_expr(gen, a), memref_expr(gen, b),
-        accum=False,
+        accum=_accum_expr(gen, op, c),
     ))
     return True
+
+
+def _accum_expr(gen, op, psum_dst):
+    """The ``accum=`` value for a matmul: ``"<iv> != 0"`` if it accumulates
+    across its enclosing K-loop, else ``False``.
+
+    Accumulation is detected structurally: the matmul accumulates iff its PSUM
+    destination's backing alloc lives *outside* the matmul's enclosing
+    ``scf.for`` (so the same PSUM tile persists across loop iterations).
+    """
+    parent = op.operation.parent
+    if parent is None or parent.name != "scf.for":
+        return False
+    alloc = irutils.backing_alloc(psum_dst)
+    if alloc is None:
+        return False
+    alloc_parent = getattr(alloc.owner.operation, "parent", None)
+    # Accumulator allocated in the loop body -> fresh each iteration -> no
+    # accumulation. Allocated outside -> persists across iterations.
+    if alloc_parent == parent:
+        return False
+    iv_value = parent.opview.regions[0].blocks[0].arguments[0]
+    iv_name = gen.names.get(iv_value)
+    if iv_name is None:
+        return False
+    return f"{iv_name} != 0"
 
 
 def _emit_transpose(gen, op) -> bool:

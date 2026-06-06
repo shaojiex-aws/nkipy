@@ -62,6 +62,27 @@ def is_hbm(ty: up_ir.Type) -> bool:
     return memref_memspace(ty) in (MEMSPACE_HBM, MEMSPACE_SHARED_HBM)
 
 
+_VIEW_OPS = (
+    "memref.subview", "memref.collapse_shape",
+    "memref.expand_shape", "memref.reinterpret_cast",
+)
+
+
+def backing_alloc(value: up_ir.Value):
+    """Trace ``value`` through view ops to the ``memref.alloc`` result backing
+    it, or None (e.g. a function argument or a value with no alloc)."""
+    owner = getattr(value, "owner", None)
+    op = owner.opview if hasattr(owner, "opview") else owner
+    if op is None:
+        return None
+    name = getattr(op, "name", None)
+    if name == "memref.alloc":
+        return op.operation.results[0]
+    if name in _VIEW_OPS:
+        return backing_alloc(op.operation.operands[0])
+    return None
+
+
 def func_ops(module: up_ir.Module) -> list[up_ir.OpView]:
     """All ``func.func`` ops at the top of ``module``."""
     return [

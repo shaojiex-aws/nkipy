@@ -209,7 +209,7 @@ class _ModuleEmitter:
             role = _writer_role(op_handle.opview)
             if role is not None:
                 dst = _dst_operand(op_handle.opview)
-                alloc = _backing_alloc(dst) if dst is not None else None
+                alloc = irutils.backing_alloc(dst) if dst is not None else None
                 if alloc is not None:
                     roles.setdefault(alloc, role)
             return up_ir.WalkResult.ADVANCE
@@ -288,27 +288,6 @@ def _dst_operand(op):
         return operands[1] if len(operands) > 1 else None
     # linalg destination-passing ops: outs is the last operand.
     return operands[-1]
-
-
-_VIEW_OPS = (
-    "memref.subview", "memref.collapse_shape",
-    "memref.expand_shape", "memref.reinterpret_cast",
-)
-
-
-def _backing_alloc(value):
-    """Trace ``value`` through view ops to the ``memref.alloc`` result backing
-    it, or None (e.g. a function argument or a value with no alloc)."""
-    owner = getattr(value, "owner", None)
-    op = owner.opview if hasattr(owner, "opview") else owner
-    if op is None:
-        return None
-    name = getattr(op, "name", None)
-    if name == "memref.alloc":
-        return op.operation.results[0]
-    if name in _VIEW_OPS:
-        return _backing_alloc(op.operation.operands[0])
-    return None
 
 
 def _build_dispatch() -> dict:
