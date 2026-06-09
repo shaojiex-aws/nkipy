@@ -118,22 +118,31 @@ _PASSTHROUGH_VIEW_OPS = (
 
 
 class _Dim:
-    """One composed base-memref dim: an offset expression, its size, and
-    whether the offset depends on a runtime fori_loop Reg.
+    """One composed dim of the base memref's index space.
 
-    ``offset`` is None for a full-extent (offset-0) dim. Offsets compose
-    *additively* down a subview chain (each inner subview's offset is relative
-    to its source), so two stacked subviews on dim d sum to one expression.
+    - ``offset``: index expression for the dim's start (None == 0 / full).
+    - ``size``:   sliced extent.
+    - ``on_reg``: offset depends on a fori_loop Reg (-> render as ``nb.ds``).
+    - ``squeeze``: this is a unit dim to drop to a bare integer index so kb
+      collapses it (the 4-D physical SBUF -> 2-D tile case).
+
+    Offsets compose *additively* down a subview chain (each inner subview's
+    offset is relative to its source).
     """
-    __slots__ = ("offset", "size", "on_reg")
+    __slots__ = ("offset", "size", "on_reg", "squeeze")
 
-    def __init__(self, offset, size, on_reg):
+    def __init__(self, offset, size, on_reg=False, squeeze=False):
         self.offset = offset
         self.size = size
         self.on_reg = on_reg
+        self.squeeze = squeeze
 
 
-def _add_offsets(a: str | None, b: str | None) -> str | None:
+def _full_dim(size: int) -> _Dim:
+    return _Dim(None, size)
+
+
+def _add_offsets(a, b):
     if a is None:
         return b
     if b is None:
@@ -141,57 +150,187 @@ def _add_offsets(a: str | None, b: str | None) -> str | None:
     return f"{a} + {b}"
 
 
-def _compose_subview_chain(gen, value):
-    """Resolve a (possibly nested) ``memref.subview`` chain to ``(base, dims)``.
+def _subview_dim(gen, off, size, dyn_iter) -> _Dim:
+    """Build a _Dim from one (static_offset, size) entry of a subview."""
+    if off == DYN_SENTINEL:
+        dyn_val = next(dyn_iter)
+        return _Dim(index_expr(gen, dyn_val, _PREC["+"]), size,
+                    on_reg=_depends_on_loop_reg(gen, dyn_val))
+    if off != 0:
+        return _Dim(str(off), size)
+    return _Dim(None, size)
 
-    Stacked subviews are composed into a *single* index list against the base
-    memref — offsets summed per dim — rather than chained ``[...][...]`` (kb
-    does not compose relative offsets across chained slices the way MLIR does).
 
-    Returns ``(base_value, list[_Dim])``, or ``(value, None)`` if ``value`` is
-    not produced by a subview.
+def _reassoc_groups(op) -> list[list[int]]:
+    """Reassociation index groups of an expand/collapse_shape op."""
+    return [[int(x) for x in g] for g in op.operation.attributes["reassociation"]]
+
+
+def _group_sizes(shape, group):
+    return [shape[i] for i in group]
+
+
+def _cross_collapse(op, result_dims):
+    """Map result-space dims of a ``collapse_shape`` back to its source dims.
+
+    Each source group merges to one result dim. With ≤1 non-unit dim per group
+    the result index carries through to that dim (others are unit). For a true
+    multi-dim merge it splits via div/mod over the group's sizes.
+    """
+    src_shape = irutils.memref_shape(op.operation.operands[0].type)
+    src_dims = [None] * len(src_shape)
+    for rdim, group in enumerate(_reassoc_groups(op)):
+        d = result_dims[rdim] if rdim < len(result_dims) else _full_dim(0)
+        sizes = _group_sizes(src_shape, group)
+        non_unit = [g for g in group if src_shape[g] != 1]
+        if len(non_unit) <= 1:
+            carrier = non_unit[0] if non_unit else group[-1]
+            for g in group:
+                if g == carrier:
+                    src_dims[g] = d
+                else:
+                    # A unit source dim merged into the result -> drop it (kb
+                    # squeezes an integer index), so the carrier alone forms the
+                    # 2-D tile the compute op consumes.
+                    src_dims[g] = _Dim(None, 1, squeeze=True)
+            continue
+        # True merge: split d.offset across the group via div/mod. Only a full
+        # (offset None) or pure-expression offset is splittable; sliced sizes
+        # other than the whole result dim are not handled.
+        if d.offset is None:
+            for g in group:
+                src_dims[g] = _full_dim(src_shape[g])
+            continue
+        idx = f"({d.offset})"
+        for pos, g in enumerate(group):
+            stride = 1
+            for s in sizes[pos + 1:]:
+                stride *= s
+            comp = f"{idx} // {stride}" if stride != 1 else idx
+            if pos != 0:
+                comp = f"({comp}) % {src_shape[g]}"
+            src_dims[g] = _Dim(comp, 1, on_reg=d.on_reg, squeeze=(src_shape[g] != 1))
+    return src_dims
+
+
+def _cross_expand(op, result_dims):
+    """Map result-space dims of an ``expand_shape`` back to its source dims.
+
+    Each source dim splits into a result group. With ≤1 non-unit result dim per
+    group the non-unit result index carries through. For a true multi-dim split
+    the source index is ``i0*s1*.. + i1*s2*.. + ..`` over the group.
+    """
+    res_shape = irutils.memref_shape(op.operation.results[0].type)
+    src_shape = irutils.memref_shape(op.operation.operands[0].type)
+    src_dims = [None] * len(src_shape)
+    for sdim, group in enumerate(_reassoc_groups(op)):
+        non_unit = [r for r in group if res_shape[r] != 1]
+        if len(non_unit) <= 1:
+            carrier = non_unit[0] if non_unit else group[-1]
+            src_dims[sdim] = result_dims[carrier] if carrier < len(result_dims) else _full_dim(src_shape[sdim])
+            continue
+        terms, on_reg = [], False
+        for pos, r in enumerate(group):
+            d = result_dims[r]
+            on_reg = on_reg or d.on_reg
+            if d.offset is None:
+                continue
+            stride = 1
+            for later in group[pos + 1:]:
+                stride *= res_shape[later]
+            terms.append(f"{d.offset} * {stride}" if stride != 1 else d.offset)
+        merged = " + ".join(terms) if terms else None
+        src_dims[sdim] = _Dim(merged, src_shape[sdim], on_reg=on_reg)
+    return src_dims
+
+
+def _compose_chain(gen, value):
+    """Resolve a subview / reshape chain to ``(base, dims)``.
+
+    Walks subview, collapse_shape and expand_shape ops, composing them into a
+    single index list (``list[_Dim]``) against ``base`` — a value that is *not*
+    itself a view op (an alloc, block arg, or anything ``memref_expr`` renders
+    directly). This keeps ``memref_expr`` from re-entering the chain, so there
+    is no mutual recursion.
+
+    Returns ``(base, dims)``; ``dims`` is None if ``value`` isn't a view op or a
+    reshape we can't remap (caller then renders ``value`` plainly).
     """
     op = _defining_op(value)
-    if op is None or op.operation.name != "memref.subview":
+    if op is None:
         return value, None
+    name = op.operation.name
 
-    source = op.operation.operands[0]
-    base, base_dims = _compose_subview_chain(gen, source)
+    if name == "memref.subview":
+        source = op.operation.operands[0]
+        base, base_dims = _compose_chain(gen, source)
+        static_offsets, static_sizes, dyn_offsets = _subview_components(op)
+        dyn_iter = iter(dyn_offsets)
+        here = [_subview_dim(gen, off, size, dyn_iter)
+                for off, size in zip(static_offsets, static_sizes)]
+        if base_dims is None:
+            return base, here
+        # base_dims is in the *source* index space; this subview indexes the
+        # same space (subview preserves rank), so merge per-dim.
+        merged = []
+        for i, d in enumerate(here):
+            outer = base_dims[i] if i < len(base_dims) else None
+            if outer is None:
+                merged.append(d)
+            else:
+                merged.append(_Dim(_add_offsets(outer.offset, d.offset), d.size,
+                                   on_reg=outer.on_reg or d.on_reg,
+                                   squeeze=outer.squeeze))
+        return base, merged
 
-    static_offsets, static_sizes, dyn_offsets = _subview_components(op)
-    dyn_iter = iter(dyn_offsets)
+    if name == "memref.collapse_shape":
+        # Data flows source -> result. Compose the source; the source_dims
+        # already carry any subview block offsets. The collapse only tells us
+        # which *unit* source dims are merged away -> squeeze them. (This is the
+        # common case: the collapse result feeds a compute op directly. A true
+        # multi-dim merge that is then re-sliced is not handled here.)
+        base, src_dims = _compose_chain(gen, op.operation.operands[0])
+        src_shape = irutils.memref_shape(op.operation.operands[0].type)
+        if src_dims is None:
+            src_dims = [_full_dim(s) for s in src_shape]
+        out = list(src_dims)
+        for group in _reassoc_groups(op):
+            non_unit = [g for g in group if src_shape[g] != 1]
+            if len(non_unit) > 1:
+                return value, None  # true merge feeding a slice — unsupported
+            carrier = non_unit[0] if non_unit else group[-1]
+            for g in group:
+                if g != carrier and src_shape[g] == 1:
+                    out[g] = _Dim(out[g].offset, 1, on_reg=out[g].on_reg, squeeze=True)
+        return base, out
 
-    dims: list[_Dim] = []
-    for i, (off, size) in enumerate(zip(static_offsets, static_sizes)):
-        if off == DYN_SENTINEL:
-            dyn_val = next(dyn_iter)
-            this_off = index_expr(gen, dyn_val, _PREC["+"])
-            this_reg = _depends_on_loop_reg(gen, dyn_val)
-        elif off != 0:
-            this_off, this_reg = str(off), False
-        else:
-            this_off, this_reg = None, False
+    if name == "memref.expand_shape":
+        # Inverse: result has more dims. Compose the source; map each source
+        # dim's index onto its result group's single non-unit dim.
+        base, src_dims = _compose_chain(gen, op.operation.operands[0])
+        src_shape = irutils.memref_shape(op.operation.operands[0].type)
+        res_shape = irutils.memref_shape(op.operation.results[0].type)
+        if src_dims is None:
+            src_dims = [_full_dim(s) for s in src_shape]
+        out: list[_Dim] = []
+        for sdim, group in enumerate(_reassoc_groups(op)):
+            non_unit = [r for r in group if res_shape[r] != 1]
+            if len(non_unit) > 1:
+                return value, None  # true split — unsupported
+            for r in group:
+                out.append(src_dims[sdim] if res_shape[r] != 1
+                           else _Dim(None, 1, squeeze=True))
+        return base, out
 
-        if base_dims is not None and i < len(base_dims):
-            outer = base_dims[i]
-            dims.append(_Dim(
-                _add_offsets(outer.offset, this_off),
-                size,                       # innermost size wins
-                outer.on_reg or this_reg,
-            ))
-        else:
-            dims.append(_Dim(this_off, size, this_reg))
-    return base, dims
+    if name == "memref.reinterpret_cast":
+        return _compose_chain(gen, op.operation.operands[0])
+
+    return value, None
 
 
-def _render_dim(dim: _Dim, full_size: int, squeeze: bool) -> str:
-    """Render one composed dim as a slice token.
-
-    ``squeeze`` drops a size-1 dim to a bare integer index (kb squeezes it) —
-    used for the 4-D physical SBUF -> 2-D tile collapse.
-    """
+def _render_dim(dim: _Dim, full_size: int) -> str:
     off = dim.offset
-    if squeeze and dim.size == 1:
+    if dim.squeeze:
         return off if off is not None else "0"
     if off is None and dim.size == full_size:
         return ":"
@@ -201,40 +340,9 @@ def _render_dim(dim: _Dim, full_size: int, squeeze: bool) -> str:
     return f"{base}:{base} + {dim.size}"
 
 
-def _render_subview(gen, base, dims, squeeze: bool) -> str:
-    base_expr = memref_expr(gen, base)
-    base_shape = irutils.memref_shape(base.type)
-    tokens = [
-        _render_dim(d, base_shape[i] if i < len(base_shape) else -1, squeeze)
-        for i, d in enumerate(dims)
-    ]
-    return f"{base_expr}[{', '.join(tokens)}]"
-
-
 def subview_slice(gen, op) -> str:
-    """Render a ``memref.subview`` (and any outer subviews) as one slice.
-
-    Each dim is ``":"`` (full extent), ``"nb.ds(off, n)"`` (runtime-Reg offset),
-    or ``"off:off + n"``.
-    """
-    base, dims = _compose_subview_chain(gen, op.operation.results[0])
-    return _render_subview(gen, base, dims, squeeze=False)
-
-
-def _collapse_to_2d_expr(gen, op) -> str:
-    """Render ``memref.collapse_shape`` of a physical SBUF block as a 2-D tile.
-
-    legalize-layout wraps each compute operand as
-    ``collapse_shape(subview*(4D alloc))``; the subviews select one block per
-    block dim and the collapse folds the unit block dims to a 2-D
-    ``[partTile, freeTile]`` tile. We compose the subview chain and squeeze the
-    size-1 block dims to integer indices, which kb collapses for us — no
-    reshape op needed.
-    """
-    base, dims = _compose_subview_chain(gen, op.operation.operands[0])
-    if dims is None:
-        return memref_expr(gen, op.operation.operands[0])
-    return _render_subview(gen, base, dims, squeeze=True)
+    """Render a ``memref.subview`` (composed with any outer views) as a slice."""
+    return memref_expr(gen, op.operation.results[0])
 
 
 def memref_expr(gen, value) -> str:
@@ -242,16 +350,21 @@ def memref_expr(gen, value) -> str:
     if value in gen.names:
         return gen.names[value]
 
-    op = _defining_op(value)
-    if op is not None:
-        name = op.operation.name
-        if name == "memref.subview":
-            return subview_slice(gen, op)
-        if name == "memref.collapse_shape":
-            return _collapse_to_2d_expr(gen, op)
-        if name in _PASSTHROUGH_VIEW_OPS:
-            # TODO: emit an explicit reshape when kb gains one; for now defer to
-            # the source storage.
+    base, dims = _compose_chain(gen, value)
+    if dims is None:
+        # Not a view op (or an unsupported reshape): render the base directly.
+        op = _defining_op(value)
+        if op is not None and op.operation.name in _PASSTHROUGH_VIEW_OPS:
             return memref_expr(gen, op.operation.operands[0])
+        if base is not value:
+            return memref_expr(gen, base)
+        # A reshape we can't remap (e.g. a true multi-dim split/merge then
+        # sliced). Emit a parseable sentinel so the rest of the module still
+        # parses; it surfaces as a NameError at exec, pinpointing the gap.
+        return "UNSUPPORTED_RESHAPE"
 
-    return "None  # TODO: unresolved memref"
+    base_expr = memref_expr(gen, base)
+    base_shape = irutils.memref_shape(base.type)
+    tokens = [_render_dim(d, base_shape[i] if i < len(base_shape) else -1)
+              for i, d in enumerate(dims)]
+    return f"{base_expr}[{', '.join(tokens)}]"
