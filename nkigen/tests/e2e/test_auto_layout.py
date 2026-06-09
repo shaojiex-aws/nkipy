@@ -32,7 +32,7 @@ def test_exp_no_annotations():
 
     run_kernel_test(
         kernel,
-        modes=Mode.HW,
+        modes=Mode.HW | Mode.CODEGEN,
     )
 
 
@@ -51,7 +51,7 @@ def test_elementwise_chain_no_annotations():
 
     run_kernel_test(
         kernel,
-        modes=Mode.HW,
+        modes=Mode.HW | Mode.CODEGEN,
     )
 
 
@@ -68,7 +68,7 @@ def test_sigmoid_no_annotations():
 
     run_kernel_test(
         kernel,
-        modes=Mode.HW,
+        modes=Mode.HW | Mode.CODEGEN,
         rtol=1e-5,
         atol=1e-5,
     )
@@ -96,7 +96,7 @@ def test_matmul_no_annotations():
 
     run_kernel_test(
         kernel,
-        modes=Mode.HW,
+        modes=Mode.HW | Mode.CODEGEN,
         rtol=1e-3,
         atol=1e-3,
     )
@@ -121,7 +121,7 @@ def test_matmul_add_no_annotations():
 
     run_kernel_test(
         kernel,
-        modes=Mode.HW,
+        modes=Mode.HW | Mode.CODEGEN,
         rtol=1e-3,
         atol=1e-3,
     )

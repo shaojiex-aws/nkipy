@@ -367,7 +367,6 @@ def _run_llvm_verification(compiled_ir: str, traced_func, rtol: float, atol: flo
 
 
 def _run_codegen_verification(
-    compiled_ir: str,
     traced_func,
     inputs: List[np.ndarray],
     reference_output: List[np.ndarray],
@@ -376,28 +375,22 @@ def _run_codegen_verification(
     target: Optional[str],
     dump_dir: Optional[str],
 ):
-    """Generate kernelbuilder code from the tiled IR, simulate, compare to NumPy.
+    """Generate kernelbuilder code, simulate it, and compare to the NumPy ref.
 
-    ``compiled_ir`` is the tiled linalg-level IR (the pipeline stopped just
-    before NISA lowering — the same input the kernelbuilder backend consumes).
-    This mirrors Mode.HW, which takes the *full* NISA IR and lowers it to a
-    NEFF; here the terminal step is ``linalg_to_kernelbuilder`` + simulation.
-
-    Proves the generated code is *semantically* correct (runs and matches the
-    reference), not merely that it parses.
+    Compiles the traced function to the tiled (pre-NISA) IR the kernelbuilder
+    backend consumes, emits kernel_builder Python, executes it to recover the
+    kernel function, simulates via ``nb.simulate_kernel``, and asserts each
+    output matches. Proves the generated code is *semantically* correct, not
+    merely that it parses.
     """
     import nki.compiler.kernel_builder as nb
-    from nkigen.codegen.kernelbuilder import linalg_to_kernelbuilder
+    from nkigen.codegen.kernelbuilder import trace_to_kernelbuilder
 
     if target is None:
         target = _default_target()
 
     kernel_name = traced_func.__wrapped__.__name__
-    code = linalg_to_kernelbuilder(compiled_ir, kernel_name=kernel_name, target=target)
-    if dump_dir:
-        os.makedirs(dump_dir, exist_ok=True)
-        with open(os.path.join(dump_dir, "kb_code.py"), "w") as f:
-            f.write(code)
+    code = trace_to_kernelbuilder(traced_func, target=target, dump_dir=dump_dir)
 
     # Execute the generated source to recover the kernel function.
     namespace: dict = {}
@@ -681,36 +674,34 @@ def run_kernel_test(
         else:
             reference_output = [reference_output]
 
-    # 5. Compile through the pipeline to the IR the modes consume.
-    #    Mode.CODEGEN consumes the tiled linalg-level IR (pipeline stopped just
-    #    before NISA lowering — the kernelbuilder backend's input); all other
-    #    modes consume the full NISA IR. This mirrors Mode.HW, which lowers
-    #    NISA -> NEFF as its terminal step.
+    # 5. Compile the IR at the requested stop point. STRING_CHECK, FILECHECK,
+    #    LLVM and HW all verify this — full NISA when stop_after is None, an
+    #    intermediate otherwise. Mode.CODEGEN is the exception: it compiles its
+    #    own tiled (pre-NISA) IR in step 6, so a CODEGEN-only run skips this.
     #    On failure: if no dump_dir was set, re-run pass-by-pass into a temp
     #    directory so the user gets intermediate IR for debugging.
-    stop_before = "linalg-to-nisa" if Mode.CODEGEN in modes else None
-    try:
-        compiled_ir = _compile_pipeline(
-            traced_func, stop_after, target=target, dump_dir=dump_dir,
-            stop_before=stop_before,
-        )
-    except Exception as exc:
-        if dump_dir:
-            # dump_dir was already set — IR files are already there
-            _print_dump_dir_listing(dump_dir)
-            raise
-        # No dump_dir: re-run pass-by-pass to capture intermediate IR
-        fallback_dir = tempfile.mkdtemp(prefix="nkipy_fail_dump_")
-        print(f"\n[dump-ir] Compilation failed — dumping intermediate IR to: {fallback_dir}")
+    compiled_ir = None
+    if modes & ~Mode.CODEGEN:
         try:
-            _compile_pipeline(
-                traced_func, stop_after, target=target, dump_dir=fallback_dir,
-                stop_before=stop_before,
+            compiled_ir = _compile_pipeline(
+                traced_func, stop_after, target=target, dump_dir=dump_dir,
             )
-        except Exception:
-            pass  # expected to fail again; we just want the IR files
-        _print_dump_dir_listing(fallback_dir)
-        raise exc
+        except Exception as exc:
+            if dump_dir:
+                # dump_dir was already set — IR files are already there
+                _print_dump_dir_listing(dump_dir)
+                raise
+            # No dump_dir: re-run pass-by-pass to capture intermediate IR
+            fallback_dir = tempfile.mkdtemp(prefix="nkipy_fail_dump_")
+            print(f"\n[dump-ir] Compilation failed — dumping intermediate IR to: {fallback_dir}")
+            try:
+                _compile_pipeline(
+                    traced_func, stop_after, target=target, dump_dir=fallback_dir,
+                )
+            except Exception:
+                pass  # expected to fail again; we just want the IR files
+            _print_dump_dir_listing(fallback_dir)
+            raise exc
 
     # 6. Run each verification mode
     if Mode.STRING_CHECK in modes:
@@ -726,7 +717,6 @@ def run_kernel_test(
     if Mode.CODEGEN in modes:
         tol = _resolve_tolerances(Mode.CODEGEN, rtol, atol)
         _run_codegen_verification(
-            compiled_ir,
             traced_func,
             inputs,
             reference_output,

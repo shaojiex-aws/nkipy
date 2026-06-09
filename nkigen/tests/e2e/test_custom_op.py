@@ -177,7 +177,7 @@ def test_matmul_custom_activation_string_check():
         ],
         rtol=1e-3,
         atol=1e-3,
-        modes=Mode.HW | Mode.STRING_CHECK,
+        modes=Mode.HW | Mode.STRING_CHECK | Mode.CODEGEN,
     )
 
 
@@ -305,7 +305,7 @@ def test_kernel_builder_silu():
         ],
         rtol=1e-3,
         atol=1e-3,
-        modes=Mode.HW | Mode.STRING_CHECK,
+        modes=Mode.HW | Mode.STRING_CHECK | Mode.CODEGEN,
     )
 
 

@@ -83,7 +83,7 @@ def test_matmul_sbuf_add_hbm(M, N, K, matmul_tile, matmul_reduction_tile, add_ti
             "nisa.dma_transpose", "nisa.dma_copy", "nisa.target",
         ],
         check_ir_not_contains=["transform.named_sequence"],
-        modes=Mode.HW | Mode.STRING_CHECK,
+        modes=Mode.HW | Mode.STRING_CHECK | Mode.CODEGEN,
     )
 
 
@@ -107,7 +107,7 @@ def test_matmul_hbm_add_hbm(M, N, K, matmul_tile, matmul_reduction_tile, add_til
     run_kernel_test(
         matmul_add_kernel_hbm,
         check_ir_contains=["nisa.alloc", "nisa.matmul", "nisa.target"],
-        modes=Mode.HW | Mode.STRING_CHECK,
+        modes=Mode.HW | Mode.STRING_CHECK | Mode.CODEGEN,
     )
 
 

@@ -81,7 +81,7 @@ def test_reduce_sum_sim():
     run_kernel_test(
         kernel,
         check_ir_contains=["nisa.tensor_reduce_arith", "nisa.tensor_tensor_arith"],
-        modes=Mode.HW | Mode.STRING_CHECK,
+        modes=Mode.HW | Mode.STRING_CHECK | Mode.CODEGEN,
         rtol=1e-3,
         atol=1e-3,
     )
@@ -115,7 +115,7 @@ def test_reduce_mean_sim():
             "nisa.tensor_tensor_arith",
             "nisa.tensor_scalar_arith",
         ],
-        modes=Mode.HW | Mode.STRING_CHECK,
+        modes=Mode.HW | Mode.STRING_CHECK | Mode.CODEGEN,
         rtol=1e-3,
         atol=1e-3,
     )

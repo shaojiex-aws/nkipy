@@ -54,7 +54,7 @@ def test_3d_add_chain():
             "nisa.alloc", "nisa.tensor_tensor_arith", "nisa.target",
         ],
         check_ir_not_contains=["transform.named_sequence"],
-        modes=Mode.HW | Mode.STRING_CHECK,
+        modes=Mode.HW | Mode.STRING_CHECK | Mode.CODEGEN,
     )
 
 
@@ -82,7 +82,7 @@ def test_3d_add_hbm_only():
     run_kernel_test(
         add_chain_3d_hbm,
         check_ir_contains=["nisa.alloc", "nisa.target"],
-        modes=Mode.HW | Mode.STRING_CHECK,
+        modes=Mode.HW | Mode.STRING_CHECK | Mode.CODEGEN,
     )
 
 

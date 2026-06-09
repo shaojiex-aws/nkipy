@@ -100,7 +100,7 @@ def test_add_and_sub_hw(request):
     """Two-output kernel through full pipeline on hardware."""
     run_kernel_test(
         add_and_sub,
-        modes=Mode.HW,
+        modes=Mode.HW | Mode.CODEGEN,
         request=request,
     )
 
@@ -109,6 +109,6 @@ def test_add_and_mul_hw(request):
     """Two-output kernel through full pipeline on hardware."""
     run_kernel_test(
         add_and_mul,
-        modes=Mode.HW,
+        modes=Mode.HW | Mode.CODEGEN,
         request=request,
     )

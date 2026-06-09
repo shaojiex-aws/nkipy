@@ -63,7 +63,7 @@ def test_softmax(M, N, tile_size):
         check_ir_not_contains=["transform.named_sequence"],
         rtol=1e-3,
         atol=1e-3,
-        modes=Mode.HW | Mode.STRING_CHECK,
+        modes=Mode.HW | Mode.STRING_CHECK | Mode.CODEGEN,
     )
 
 
@@ -103,7 +103,7 @@ def test_qkv_projection(M, hidden_size, matmul_tile, reduction_tile, elementwise
         qkv_kernel,
         check_ir_contains=["nisa.alloc", "nisa.matmul", "nisa.target"],
         check_ir_not_contains=["transform.named_sequence"],
-        modes=Mode.HW | Mode.STRING_CHECK,
+        modes=Mode.HW | Mode.STRING_CHECK | Mode.CODEGEN,
     )
 
 
@@ -173,7 +173,7 @@ def test_attention_scores_loop(batch, n_heads, seq_len, head_dim, tile_size):
         check_ir_not_contains=["memref.reshape", "transform.named_sequence"],
         rtol=1e-3,
         atol=1e-3,
-        modes=Mode.HW | Mode.STRING_CHECK,
+        modes=Mode.HW | Mode.STRING_CHECK | Mode.CODEGEN,
     )
 
 

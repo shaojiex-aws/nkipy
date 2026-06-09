@@ -89,7 +89,7 @@ def test_rope():
             "nisa.alloc", "nisa.tensor_tensor_arith", "nisa.target",
         ],
         check_ir_not_contains=["transform.named_sequence"],
-        modes=Mode.HW | Mode.STRING_CHECK,
+        modes=Mode.HW | Mode.STRING_CHECK | Mode.CODEGEN,
     )
 
 
@@ -155,7 +155,7 @@ def test_rope_3d_multi_partition():
             "nisa.alloc", "nisa.tensor_tensor_arith", "nisa.target",
         ],
         check_ir_not_contains=["transform.named_sequence"],
-        modes=Mode.HW | Mode.STRING_CHECK,
+        modes=Mode.HW | Mode.STRING_CHECK | Mode.CODEGEN,
     )
 
 
@@ -228,7 +228,7 @@ def test_rope_3d_compound(pdim):
     run_kernel_test(
         kernel,
         check_ir_contains=["nisa.alloc", "nisa.tensor_tensor_arith"],
-        modes=Mode.HW | Mode.STRING_CHECK,
+        modes=Mode.HW | Mode.STRING_CHECK | Mode.CODEGEN,
     )
 
 

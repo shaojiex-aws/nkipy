@@ -78,7 +78,7 @@ def test_head_deconcat(request):
         head_deconcat_kernel,
         check_ir_contains=["nisa.matmul", "nisa.alloc"],
         check_ir_not_contains=["transform.named_sequence"],
-        modes=Mode.HW | Mode.STRING_CHECK,
+        modes=Mode.HW | Mode.STRING_CHECK | Mode.CODEGEN,
         request=request,
     )
 

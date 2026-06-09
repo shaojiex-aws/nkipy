@@ -67,7 +67,7 @@ def test_rmsnorm(M, N, tile_size):
 
     run_kernel_test(
         rmsnorm_kernel,
-        modes=Mode.HW,
+        modes=Mode.HW | Mode.CODEGEN,
         rtol=1e-3,
         atol=1e-3,
     )

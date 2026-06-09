@@ -85,7 +85,7 @@ def test_feedforward_sbuf(batch_size, hidden_size, intermediate_size,
         check_ir_not_contains=["transform.named_sequence"],
         rtol=1e-3,  # Relaxed due to accumulated errors across many ops
         atol=1e-3,
-        modes=Mode.HW | Mode.STRING_CHECK,
+        modes=Mode.HW | Mode.STRING_CHECK | Mode.CODEGEN,
     )
 
 
@@ -133,7 +133,7 @@ def test_feedforward_sbuf_compact_silu(batch_size, hidden_size, intermediate_siz
         check_ir_not_contains=["transform.named_sequence"],
         rtol=1e-3,
         atol=1e-3,
-        modes=Mode.HW | Mode.STRING_CHECK,
+        modes=Mode.HW | Mode.STRING_CHECK | Mode.CODEGEN,
     )
 
 

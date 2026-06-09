@@ -40,7 +40,7 @@ def test_exp_partition_dim_1():
         kernel,
 
         check_ir_contains=["nisa.activation", "op=exp"],
-        modes=Mode.HW | Mode.STRING_CHECK,
+        modes=Mode.HW | Mode.STRING_CHECK | Mode.CODEGEN,
     )
 
 
@@ -81,7 +81,7 @@ def test_sigmoid_partition_dim_1():
         kernel,
 
         check_ir_contains=["nisa.activation", "op=exp"],
-        modes=Mode.HW | Mode.STRING_CHECK,
+        modes=Mode.HW | Mode.STRING_CHECK | Mode.CODEGEN,
     )
 
 

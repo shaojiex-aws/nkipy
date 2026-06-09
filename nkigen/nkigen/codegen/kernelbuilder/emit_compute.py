@@ -130,18 +130,55 @@ def _emit_generic(gen, op) -> bool:
     return (_emit_reduction if _num_reduction_dims(op) else _emit_elementwise)(gen, op)
 
 
+def _reduction_accumulates(op) -> bool:
+    """True if the reduction body reads its ``outs`` accumulator (``out op in``).
+
+    Such a generic means ``dst = dst op reduce(src)`` — the running accumulator
+    persists across reduction-block iterations — rather than a plain overwrite.
+    """
+    block = op.regions[0].blocks[0]
+    body = _body_ops(op)
+    if len(body) != 1:
+        return False
+    out_arg = block.arguments[-1]  # the outs block argument
+    return any(o == out_arg for o in body[0].operands)
+
+
 def _emit_reduction(gen, op) -> bool:
-    """A reduction generic -> nisa.tensor_reduce_arith, op from the body."""
+    """A reduction generic -> nisa.tensor_reduce_arith.
+
+    ``nisa.tensor_reduce_arith`` overwrites its dst, so an *accumulating*
+    reduction (body ``dst = dst + reduce(src)``, e.g. summing over tiled
+    reduction blocks) is lowered as reduce-into-temp + tensor_tensor_arith,
+    matching the NISA backend. A plain reduction writes the dst directly.
+    """
     src, dst = op.operands[0], op.operands[1]
     info = next((ops.ARITH_BODY_OPS[o.name] for o in _body_ops(op)
                  if o.name in ops.ARITH_BODY_OPS), None)
     if info is None:
         gen.em.comment(f"TODO reduction body={[o.name for o in _body_ops(op)]}")
         return False
-    gen.em.line(gen.api.tensor_reduce_arith(
-        memref_expr(gen, dst), memref_expr(gen, src), info.member,
-        num_r_dim=_num_reduction_dims(op),
-    ))
+
+    dst_expr = memref_expr(gen, dst)
+    src_expr = memref_expr(gen, src)
+    num_r_dim = _num_reduction_dims(op)
+
+    if not _reduction_accumulates(op):
+        gen.em.line(gen.api.tensor_reduce_arith(dst_expr, src_expr, info.member, num_r_dim))
+        return True
+
+    # Accumulating: reduce into a fresh temp shaped like dst, then dst op= temp.
+    ty = dst.type
+    shape = tuple(irutils.memref_shape(ty))
+    if irutils.is_on_chip(ty) and len(shape) == 1:
+        shape = (shape[0], 1)
+    dtype = gen.api.dtype(irutils.memref_elem_type(ty))
+    space = gen.api.memory_space(irutils.memref_memspace(ty))
+    temp = gen.em.fresh_name("reduce_tmp")
+    gen.em.line(f"{temp} = {gen.api.alloc(shape, dtype, space)}")
+    gen.em.line(gen.api.tensor_reduce_arith(temp, src_expr, info.member, num_r_dim))
+    gen.em.line(gen.api.tensor_tensor_arith(dst_expr, dst_expr, temp, info.member))
+    gen.em.line(gen.api.release(temp))
     return True
 
 

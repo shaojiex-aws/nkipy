@@ -45,7 +45,7 @@ def test_exp_activation():
         exp_kernel,
 
         check_ir_contains=["nisa.activation", "op=exp"],
-        modes=Mode.HW | Mode.STRING_CHECK,
+        modes=Mode.HW | Mode.STRING_CHECK | Mode.CODEGEN,
     )
 
 
@@ -73,7 +73,7 @@ def test_tensor_add_scalar():
             "nisa.alloc", "nisa.target",
             "nisa.tensor_scalar_arith", "op0=add",
         ],
-        modes=Mode.HW | Mode.STRING_CHECK,
+        modes=Mode.HW | Mode.STRING_CHECK | Mode.CODEGEN,
     )
 
 
@@ -113,7 +113,7 @@ def test_sigmoid():
         sigmoid_kernel,
 
         check_ir_contains=["nisa.activation", "op=exp"],
-        modes=Mode.HW | Mode.STRING_CHECK,
+        modes=Mode.HW | Mode.STRING_CHECK | Mode.CODEGEN,
     )
 
 
@@ -141,7 +141,7 @@ def test_scalar_minus_tensor():
         check_ir_contains=[
             "nisa.tensor_scalar_arith", "op0=subtract", "reverse_operands=first",
         ],
-        modes=Mode.HW | Mode.STRING_CHECK,
+        modes=Mode.HW | Mode.STRING_CHECK | Mode.CODEGEN,
     )
 
 
@@ -164,7 +164,7 @@ def test_division_to_reciprocal():
 
     run_kernel_test(
         div_kernel,
-        modes=Mode.HW,
+        modes=Mode.HW | Mode.CODEGEN,
     )
 
 

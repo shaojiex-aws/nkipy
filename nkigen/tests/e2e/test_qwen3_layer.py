@@ -294,7 +294,7 @@ def test_qwen3_layer(request):
 
     run_kernel_test(
         kernel,
-        modes=Mode.HW,
+        modes=Mode.HW | Mode.CODEGEN,
         rtol=1e-3,
         atol=1e-3,
         request=request,
