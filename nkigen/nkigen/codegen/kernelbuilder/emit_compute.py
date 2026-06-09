@@ -16,6 +16,20 @@ from . import ops
 from .emit_indexing import index_expr, memref_expr
 
 
+def _scalar_literal(value) -> str:
+    """Render a scalar constant as valid Python source.
+
+    ``repr`` of a non-finite float yields a bare ``inf``/``-inf``/``nan`` token
+    (e.g. the ``-inf`` identity a max-reduction inits with), which is not a
+    valid Python expression — emit ``float('-inf')`` etc. instead.
+    """
+    if isinstance(value, float) and value != value:  # NaN
+        return "float('nan')"
+    if value in (float("inf"), float("-inf")):
+        return f"float('{value}')"
+    return repr(value)
+
+
 def _emit_binary(gen, op) -> bool:
     """``linalg.add/sub/... ins(lhs, rhs) outs(dst)`` -> tensor_tensor_arith."""
     lhs, rhs, dst = op.operands[0], op.operands[1], op.operands[2]
@@ -105,7 +119,7 @@ def _emit_fill(gen, op) -> bool:
     if not irutils.is_on_chip(dst.type):
         return False
     val = irutils.const_scalar(scalar)
-    value_expr = repr(val) if val is not None else index_expr(gen, scalar)
+    value_expr = _scalar_literal(val) if val is not None else index_expr(gen, scalar)
     gen.em.line(gen.api.memset(memref_expr(gen, dst), value_expr))
     return True
 
@@ -201,26 +215,78 @@ def _emit_elementwise(gen, op) -> bool:
     dst = op.operands[num_ins]
 
     if num_ins == 1:
-        scalar = next((irutils.const_scalar(o) for o in body[0].operands
+        inner = body[0]
+        scalar = next((irutils.const_scalar(o) for o in inner.operands
                        if irutils.const_scalar(o) is not None), None)
         if scalar is None:
-            gen.em.comment(f"TODO unary generic without scalar: {body[0].name}")
+            gen.em.comment(f"TODO unary generic without scalar: {inner.name}")
             return False
+        # tensor_scalar computes ``src <op> scalar``. If the constant is the
+        # *first* body operand (``cst - x``), reverse to keep order for
+        # non-commutative ops.
+        scalar_is_lhs = irutils.const_scalar(inner.operands[0]) is not None
         gen.em.line(gen.api.tensor_scalar_arith(
-            memref_expr(gen, dst), memref_expr(gen, ins[0]), repr(scalar),
-            info.member,
+            memref_expr(gen, dst), memref_expr(gen, ins[0]), _scalar_literal(scalar),
+            info.member, reverse="First" if scalar_is_lhs else None,
         ))
         return True
 
     if num_ins == 2:
+        return _emit_binary_generic(gen, op, ins, dst, body[0], info)
+
+    gen.em.comment(f"TODO linalg.generic ins={num_ins} body={body[0].name}")
+    return False
+
+
+def _free_elems(shape: list[int]) -> int:
+    """Product of the free (non-partition) dims — dims after dim 0."""
+    n = 1
+    for s in shape[1:]:
+        n *= s
+    return n
+
+
+def _emit_binary_generic(gen, op, ins, dst, inner, info) -> bool:
+    """Two-input elementwise generic -> tensor_tensor or (broadcast) tensor_scalar.
+
+    If one input's free dims collapse to 1 (a per-partition broadcast, e.g.
+    ``x - x_max`` with ``x_max`` shaped ``[P, 1]``), NISA's tensor_tensor_arith
+    rejects the free-dim mismatch — lower to ``tensor_scalar_arith`` with the
+    broadcast operand as ``operand0``, mirroring the NISA backend. ``reverse``
+    preserves operand order for non-commutative ops (sub/div).
+    """
+    dst_free = _free_elems(irutils.memref_shape(dst.type))
+    in_free = [_free_elems(irutils.memref_shape(v.type)) for v in ins]
+    bcast = [f == 1 and dst_free != 1 for f in in_free]
+
+    if not any(bcast):
         gen.em.line(gen.api.tensor_tensor_arith(
             memref_expr(gen, dst), memref_expr(gen, ins[0]), memref_expr(gen, ins[1]),
             info.member,
         ))
         return True
 
-    gen.em.comment(f"TODO linalg.generic ins={num_ins} body={body[0].name}")
-    return False
+    if all(bcast):  # both broadcast — degenerate; fall back to tensor_tensor
+        gen.em.line(gen.api.tensor_tensor_arith(
+            memref_expr(gen, dst), memref_expr(gen, ins[0]), memref_expr(gen, ins[1]),
+            info.member,
+        ))
+        return True
+
+    # One operand broadcasts: src = the full-shape tensor, operand0 = the
+    # broadcast vector. tensor_scalar computes ``src <op> operand0``; if the
+    # broadcast operand was the *left* body operand, reverse to keep order.
+    bcast_idx = 0 if bcast[0] else 1
+    tensor_v = ins[1 - bcast_idx]
+    vec_v = ins[bcast_idx]
+    block_args = list(op.regions[0].blocks[0].arguments)
+    vec_is_lhs = str(inner.operands[0]) == str(block_args[bcast_idx])
+    reverse = "First" if vec_is_lhs else None
+    gen.em.line(gen.api.tensor_scalar_arith(
+        memref_expr(gen, dst), memref_expr(gen, tensor_v), memref_expr(gen, vec_v),
+        info.member, reverse=reverse,
+    ))
+    return True
 
 
 # Map each linalg op kind to its handler. Named ops dispatch by their entry in

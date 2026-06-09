@@ -67,7 +67,8 @@ class KernelBuilderAPI(Protocol):
     def tensor_tensor_arith(self, dst: str, lhs: str, rhs: str, arith_op: str) -> str:
         ...
 
-    def tensor_scalar_arith(self, dst: str, src: str, scalar: str, arith_op: str) -> str:
+    def tensor_scalar_arith(self, dst: str, src: str, operand0: str, arith_op: str,
+                            reverse: str | None = None) -> str:
         ...
 
     def tensor_reduce_arith(self, dst: str, src: str, arith_op: str,
@@ -174,10 +175,15 @@ class KernelBuilderV1:
             f"{dst}, {lhs}, {rhs}, op={self._arith_op(arith_op)})"
         )
 
-    def tensor_scalar_arith(self, dst: str, src: str, scalar: str, arith_op: str) -> str:
+    def tensor_scalar_arith(self, dst: str, src: str, operand0: str, arith_op: str,
+                            reverse: str | None = None) -> str:
+        """``dst = src <op> operand0``. ``operand0`` is a scalar literal or a
+        broadcast (free-dim-1) tile. ``reverse`` (a ``nisa.tens_scalar_rev_ops``
+        member like ``"First"``) swaps operand order for non-commutative ops."""
+        rev = f", reverse_operands={self.NISA}.tens_scalar_rev_ops.{reverse}" if reverse else ""
         return (
             f"{self.NISA}.tensor_scalar_arith("
-            f"{dst}, {src}, {scalar}, op0={self._arith_op(arith_op)})"
+            f"{dst}, {src}, {operand0}, op0={self._arith_op(arith_op)}{rev})"
         )
 
     def tensor_reduce_arith(self, dst: str, src: str, arith_op: str,
