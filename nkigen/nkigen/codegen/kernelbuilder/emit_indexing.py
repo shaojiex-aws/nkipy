@@ -166,6 +166,56 @@ def _reassoc_groups(op) -> list[list[int]]:
     return [[int(x) for x in g] for g in op.operation.attributes["reassociation"]]
 
 
+def _merge_dims(outer_dims, inner_dims):
+    """Compose two same-rank _Dim lists: sum offsets, inner size wins."""
+    if outer_dims is None:
+        return inner_dims
+    merged = []
+    for i, d in enumerate(inner_dims):
+        outer = outer_dims[i] if i < len(outer_dims) else None
+        if outer is None:
+            merged.append(d)
+        else:
+            merged.append(_Dim(_add_offsets(outer.offset, d.offset), d.size,
+                               on_reg=outer.on_reg or d.on_reg,
+                               squeeze=outer.squeeze))
+    return merged
+
+
+def _fold_subview_through_expand(expand_op, result_dims):
+    """Fold a subview's result-space dims back to the expand's source space.
+
+    ``expand_shape`` splits each source dim into a result group; a subview on
+    the result selects one block per result dim. Merge a group's selections
+    back to the source index: for group ``[r0, r1, ...]`` with result sizes
+    ``[n0, n1, ...]`` the source offset is ``off_r0*(n1*n2..) + off_r1*(n2..) +
+    ..`` and the source size is the product of the selected sizes. Returns one
+    _Dim per source dim, or None if a selection is too complex to fold.
+    """
+    res_shape = irutils.memref_shape(expand_op.operation.results[0].type)
+    src_shape = irutils.memref_shape(expand_op.operation.operands[0].type)
+    out: list[_Dim] = []
+    for sdim, group in enumerate(_reassoc_groups(expand_op)):
+        sel = [result_dims[r] for r in group]
+        # Full source dim: every result dim in the group is full.
+        if all(d.offset is None and d.size == res_shape[r] for d, r in zip(sel, group)):
+            out.append(_full_dim(src_shape[sdim]))
+            continue
+        terms, on_reg, size = [], False, 1
+        for pos, (d, r) in enumerate(zip(sel, group)):
+            on_reg = on_reg or d.on_reg
+            size *= d.size
+            if d.offset is None:
+                continue
+            stride = 1
+            for later in group[pos + 1:]:
+                stride *= res_shape[later]
+            terms.append(f"{d.offset} * {stride}" if stride != 1 else d.offset)
+        offset = " + ".join(terms) if terms else None
+        out.append(_Dim(offset, size, on_reg=on_reg))
+    return out
+
+
 def _group_sizes(shape, group):
     return [shape[i] for i in group]
 
@@ -263,25 +313,26 @@ def _compose_chain(gen, value):
 
     if name == "memref.subview":
         source = op.operation.operands[0]
-        base, base_dims = _compose_chain(gen, source)
         static_offsets, static_sizes, dyn_offsets = _subview_components(op)
         dyn_iter = iter(dyn_offsets)
         here = [_subview_dim(gen, off, size, dyn_iter)
                 for off, size in zip(static_offsets, static_sizes)]
+
+        # If the subview indexes a reshape *result*, fold its indices back to
+        # the reshape's source space (merging split dims with i*size+j) before
+        # composing further — the subview and reshape don't share a rank.
+        src_op = _defining_op(source)
+        if src_op is not None and src_op.operation.name == "memref.expand_shape":
+            folded = _fold_subview_through_expand(src_op, here)
+            if folded is None:
+                return value, None
+            base, base_dims = _compose_chain(gen, src_op.operation.operands[0])
+            return base, _merge_dims(base_dims, folded)
+
+        base, base_dims = _compose_chain(gen, source)
         if base_dims is None:
             return base, here
-        # base_dims is in the *source* index space; this subview indexes the
-        # same space (subview preserves rank), so merge per-dim.
-        merged = []
-        for i, d in enumerate(here):
-            outer = base_dims[i] if i < len(base_dims) else None
-            if outer is None:
-                merged.append(d)
-            else:
-                merged.append(_Dim(_add_offsets(outer.offset, d.offset), d.size,
-                                   on_reg=outer.on_reg or d.on_reg,
-                                   squeeze=outer.squeeze))
-        return base, merged
+        return base, _merge_dims(base_dims, here)
 
     if name == "memref.collapse_shape":
         # Data flows source -> result. Compose the source; the source_dims
@@ -293,6 +344,8 @@ def _compose_chain(gen, value):
         src_shape = irutils.memref_shape(op.operation.operands[0].type)
         if src_dims is None:
             src_dims = [_full_dim(s) for s in src_shape]
+        if len(src_dims) != len(src_shape):
+            return value, None  # composed rank != collapse source rank — bail
         out = list(src_dims)
         for group in _reassoc_groups(op):
             non_unit = [g for g in group if src_shape[g] != 1]
@@ -312,6 +365,8 @@ def _compose_chain(gen, value):
         res_shape = irutils.memref_shape(op.operation.results[0].type)
         if src_dims is None:
             src_dims = [_full_dim(s) for s in src_shape]
+        if len(src_dims) != len(src_shape):
+            return value, None  # composed rank != expand source rank — bail
         out: list[_Dim] = []
         for sdim, group in enumerate(_reassoc_groups(op)):
             non_unit = [r for r in group if res_shape[r] != 1]
