@@ -1,6 +1,6 @@
 # Plan: subgraph delegation (`knob().use()`) with nki-autotune as a tuner backend
 
-**Date:** 2026-06-09 (rev. 2026-06-10: `use()` API, Tuner protocol, offline tuning DB; bridge spike verified)
+**Date:** 2026-06-09 (rev. 2026-06-10: `use()` API, Tuner protocol, offline tuning DB; bridge feasibility verified)
 **Status:** Proposed
 **Working checkout:** `/home/ubuntu/nkipy/nkigen` (package `nkigen`)
 **Backend repo:** `/home/ubuntu/nki-autotune` (packages `nkigym` + `autotune`, branch `dev_1`)
@@ -139,14 +139,15 @@ devices, `/dev/neuron0..15`), with venv `~/.venv/nkidev` (Python 3.11.15)
 carrying a real `nki` 0.4.0 + `neuronxcc`. `nkigym`/`autotune` are pure-Python
 (`requires-python>=3.10`) and install cleanly into that venv.
 
-### The bridge (spiked 2026-06-10: works)
+### The bridge (feasibility verified 2026-06-10)
 
 nki-autotune `render()`s an optimized kernel as **`@nki.jit` NKI source**
 (imports `nki`, calls `nisa.nc_matmul` / `nisa.dma_copy`, etc. —
 [nkigym/src/nkigym/codegen/render.py:17](/home/ubuntu/nki-autotune/nkigym/src/nkigym/codegen/render.py)),
 whereas the CustomOp path wants a **NISA-MLIR string** (generic form). The
-bridge — **`@nki.jit` source → NISA-MLIR generic asm** — was spiked on this
-box against the installed `nki` 0.4.0 wheel and works end-to-end:
+bridge — **`@nki.jit` source → NISA-MLIR generic asm** — was verified with a
+throwaway feasibility script on this box against the installed `nki` 0.4.0
+wheel and works end-to-end:
 
 ```python
 exec(nki_jit_source, ns)
@@ -158,8 +159,8 @@ with nki_ir_context() as ctx:                    # nki.compiler.driver
 ```
 
 This is the same `frontend.compile()` autotune itself calls inside
-`compile_to_bir` — used here without the BIR step. Spike notes: must run
-inside `nki_ir_context()` (plain `ir.Context` fails arg binding); PSUM drains
+`compile_to_bir` — used here without the BIR step. Notes from the check: must
+run inside `nki_ir_context()` (plain `ir.Context` fails arg binding); PSUM drains
 to SBUF before DMA-to-HBM (nkigym's drain gadget already does this). Residual
 risk is only API stability of `nki.compiler.frontend` — pin the wheel (§7).
 
@@ -267,9 +268,9 @@ pool; finished work frees devices, no per-tuner limits. **v1 policy:** fixed
 trace (`examples/tune_matmul_lhsT_rhs.py`-style) or bounded greedy rollout —
 the deliverable is plumbing; AgenticTuner and pluggable policies come later.
 
-### 4.4 Bridge: tuned `@nki.jit` source → NISA-MLIR (spiked, works)
+### 4.4 Bridge: tuned `@nki.jit` source → NISA-MLIR (verified)
 
-The §2 spike proved the path on this box: `exec` the tuned source, then inside
+The §2 feasibility check proved the path on this box: `exec` the tuned source, then inside
 `nki_ir_context()` call `TracerFrontend().compile(ctx, kernel, inputs=...,
 target="trn2")` and take `res.module.operation.get_asm(print_generic_op_form=True)`.
 The result is return-value-style `func.func` over HBM memrefs (flat single
@@ -301,17 +302,17 @@ at tune time, re-checkable at compile.
 
 | Phase | Deliverable | Done-when |
 |---|---|---|
-| **0. Env + smoke** | Install `nkigym`+`autotune` into `~/.venv/nkidev`; smoke-test matmul example + `profile()` on this Trn2 box. (Bridge spike done 2026-06-10, §4.4.) | matmul example runs; `profile()` returns real MFU. |
+| **0. Env + smoke** | Install `nkigym`+`autotune` into `~/.venv/nkidev`; smoke-test matmul example + `profile()` on this Trn2 box. (Bridge feasibility verified 2026-06-10, §4.4.) | matmul example runs; `profile()` returns real MFU. |
 | **1. Marking + slicing** | `nkipy.use` op; `knob(*t).use(impl, key=)`; convex slicer; live-in/out detection; multi-live-out error. | Test program yields expected sliced ops + live-ins/outs. |
 | **2. Kernel-object `use()`** | Resolve pass splices kernel objects with signature validation (refactor of CustomOp machinery — no tuner needed). | Hand-written matmul spliced e2e, numerics match. |
 | **3. nkigym emission** | `linalg → @nkigym_kernel` emitter (matmul-family) + `input_specs`; elementwise/reduce/transpose next; agentic fallback. | Emitted source `exec`s; `simulate_fp32` matches region numpy. |
-| **4. Bridge adapter** | Wrap the spiked §4.4 path as `nki_jit_source -> CustomOp`. | `Module.parse` accepts a tuned kernel's MLIR; spliced via resolve-custom-ops. |
+| **4. Bridge adapter** | Wrap the verified §4.4 path as `nki_jit_source -> CustomOp`. | `Module.parse` accepts a tuned kernel's MLIR; spliced via resolve-custom-ops. |
 | **5. Tune + DB** | `Tuner` protocol; `AutotuneTuner` (fixed trace/greedy); `prog.tune(time_limit, db)`; shared-deadline scheduler; `db/<key>/<hash>/` records. | Matmul region tunes measurably faster than canonical, recorded in DB. |
 | **6. Compile lookup** | `prog.compile(target, tune_db)` wrapper; `use-offload` DB hit→splice / miss→fallback+warn. | Same program: instant compile post-tune; falls back cleanly pre-tune. |
 | **7. Tests + docs** | Unit + e2e tests; examples; doc updates. | All 312 existing tests pass; new e2e green. |
 
-Phases 0–3 are independent. Phase 4 (de-risked by the completed spike) gates
-5/6.
+Phases 0–3 are independent. Phase 4 (de-risked by the completed feasibility
+check) gates 5/6.
 
 ---
 
@@ -328,7 +329,7 @@ Phases 0–3 are independent. Phase 4 (de-risked by the completed spike) gates
 
 | Risk | Severity | Mitigation |
 |---|---|---|
-| `@nki.jit → NISA-MLIR` bridge rides internal `nki.compiler.frontend` API | Low | Spiked working on `nki` 0.4.0 (§4.4); pin wheel; fallbacks in §4.4. |
+| `@nki.jit → NISA-MLIR` bridge rides internal `nki.compiler.frontend` API | Low | Verified working on `nki` 0.4.0 (§4.4); pin wheel; fallbacks in §4.4. |
 | Convex slicing ambiguous on non-trivial programs | Med | Precise closure definition; `out=` override; single-live-out v1. |
 | nkigym op set can't express region | Med | Deterministic emitter + agentic fallback; loud error otherwise. |
 | venv / `nki` wheel mismatch between repos | Low | Verified on this box (`nki` 0.4.0, pure-Python backends); pin in Phase 0. |
