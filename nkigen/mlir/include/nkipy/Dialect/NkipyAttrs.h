@@ -2,6 +2,7 @@
 #define NKIPY_ATTRS_H
 
 #include "mlir/IR/BuiltinAttributes.h"
+#include "mlir/IR/BuiltinAttributeInterfaces.h"
 
 #include "nkipy/Dialect/NkipyEnums.h.inc"
 
