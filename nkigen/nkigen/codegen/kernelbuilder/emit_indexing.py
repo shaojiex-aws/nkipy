@@ -47,6 +47,9 @@ def _defining_op(value):
     return owner.opview
 
 
+_INDEX_CAST_OPS = {"arith.index_cast", "arith.index_castui"}
+
+
 def _depends_on_loop_reg(gen, value) -> bool:
     """True if ``value`` transitively derives from a fori_loop induction Reg.
 
@@ -56,7 +59,11 @@ def _depends_on_loop_reg(gen, value) -> bool:
     if value in gen.loop_regs:
         return True
     op = _defining_op(value)
-    if op is None or op.operation.name not in _ARITH_BINOP:
+    if op is None:
+        return False
+    if op.operation.name in _INDEX_CAST_OPS:
+        return _depends_on_loop_reg(gen, op.operation.operands[0])
+    if op.operation.name not in _ARITH_BINOP:
         return False
     return any(_depends_on_loop_reg(gen, o) for o in op.operation.operands)
 
@@ -78,6 +85,8 @@ def index_expr(gen, value, parent_prec: int = 0) -> str:
 
     op = _defining_op(value)
     if op is not None:
+        if op.operation.name in _INDEX_CAST_OPS:
+            return index_expr(gen, op.operation.operands[0], parent_prec)
         binop = _ARITH_BINOP.get(op.operation.name)
         if binop is not None:
             prec = _PREC[binop]
@@ -167,18 +176,39 @@ def _reassoc_groups(op) -> list[list[int]]:
 
 
 def _merge_dims(outer_dims, inner_dims):
-    """Compose two same-rank _Dim lists: sum offsets, inner size wins."""
+    """Compose two _Dim lists: sum offsets, inner size wins.
+
+    When outer_dims has more entries than inner_dims (rank-reducing subview),
+    the extra outer dims (those with size=1 that were "squeezed" by the rank
+    reduction) are carried forward as squeeze dims. The inner dims map to the
+    non-squeezed outer dims in order.
+    """
     if outer_dims is None:
         return inner_dims
-    merged = []
-    for i, d in enumerate(inner_dims):
-        outer = outer_dims[i] if i < len(outer_dims) else None
-        if outer is None:
-            merged.append(d)
-        else:
+    if len(outer_dims) == len(inner_dims):
+        merged = []
+        for i, d in enumerate(inner_dims):
+            outer = outer_dims[i]
             merged.append(_Dim(_add_offsets(outer.offset, d.offset), d.size,
                                on_reg=outer.on_reg or d.on_reg,
                                squeeze=outer.squeeze))
+        return merged
+    # Rank-reducing case: outer has more dims than inner. Match inner dims
+    # to the non-unit (non-squeeze-candidate) outer dims in order.
+    merged = []
+    inner_idx = 0
+    for outer in outer_dims:
+        if outer.size == 1 and inner_idx < len(inner_dims):
+            # This outer dim was dropped by rank reduction — keep it as squeeze.
+            merged.append(_Dim(outer.offset, 1, on_reg=outer.on_reg, squeeze=True))
+        elif inner_idx < len(inner_dims):
+            d = inner_dims[inner_idx]
+            inner_idx += 1
+            merged.append(_Dim(_add_offsets(outer.offset, d.offset), d.size,
+                               on_reg=outer.on_reg or d.on_reg,
+                               squeeze=outer.squeeze))
+        else:
+            merged.append(outer)
     return merged
 
 
@@ -218,6 +248,78 @@ def _fold_subview_through_expand(expand_op, result_dims):
 
 def _group_sizes(shape, group):
     return [shape[i] for i in group]
+
+
+def _fold_subview_through_collapse(collapse_op, result_dims):
+    """Fold a subview's result-space dims back through a collapse_shape to source space.
+
+    The collapse merges each source group into one result dim. Given a subview on
+    the collapsed result, decompose each result dim's (offset, size) into per-source-dim
+    indices using the group's linearized addressing.
+
+    For group [g0, g1, ...] with source sizes [s0, s1, ...]:
+      result_dim_size = s0 * s1 * ...
+      offset into result dim → indices: g0 = off // (s1*s2*..), g1 = (off // (s2*..)) % s1, ...
+      size in result dim → if aligned to trailing dims, decomposes into
+        point indices for leading dims and full slices for trailing dims.
+    """
+    src_shape = irutils.memref_shape(collapse_op.operation.operands[0].type)
+    out: list[_Dim] = []
+    for rdim, group in enumerate(_reassoc_groups(collapse_op)):
+        d = result_dims[rdim] if rdim < len(result_dims) else _full_dim(0)
+        sizes = _group_sizes(src_shape, group)
+
+        # Full result dim → full source dims
+        product = 1
+        for s in sizes:
+            product *= s
+        if d.offset is None and d.size == product:
+            for g in group:
+                out.append(_full_dim(src_shape[g]))
+            continue
+
+        # Decompose: find how many trailing dims are fully covered by d.size.
+        # If d.size == s_{k} * s_{k+1} * ... * s_{n-1}, then dims 0..k-1 get
+        # point indices (via div/mod of d.offset) and dims k..n-1 get full slices.
+        trailing_product = 1
+        split_point = len(group)
+        for i in range(len(group) - 1, -1, -1):
+            if trailing_product * sizes[i] <= d.size:
+                trailing_product *= sizes[i]
+                split_point = i
+            else:
+                break
+
+        if trailing_product != d.size:
+            # Size doesn't align to trailing dims — fall back to div/mod everything
+            # as point indices (squeeze all).
+            idx = f"({d.offset})" if d.offset else "0"
+            for pos, g in enumerate(group):
+                stride = 1
+                for s in sizes[pos + 1:]:
+                    stride *= s
+                comp = f"{idx} // {stride}" if stride != 1 else idx
+                if pos != 0:
+                    comp = f"({comp}) % {src_shape[g]}"
+                out.append(_Dim(comp, 1, on_reg=d.on_reg, squeeze=True))
+            continue
+
+        # Leading dims get point indices from d.offset, trailing dims get full slices.
+        off_expr = d.offset if d.offset else "0"
+        for pos, g in enumerate(group):
+            if pos < split_point:
+                # Point index via div/mod of the offset over the full trailing extent.
+                stride = 1
+                for s in sizes[pos + 1:]:
+                    stride *= s
+                comp = f"({off_expr}) // {stride}" if stride != 1 else off_expr
+                if pos != 0:
+                    comp = f"({comp}) % {src_shape[g]}"
+                out.append(_Dim(comp, 1, on_reg=d.on_reg, squeeze=True))
+            else:
+                # Full slice of this trailing dim
+                out.append(_full_dim(src_shape[g]))
+    return out
 
 
 def _cross_collapse(op, result_dims):
@@ -317,13 +419,27 @@ def _compose_chain(gen, value):
         dyn_iter = iter(dyn_offsets)
         here = [_subview_dim(gen, off, size, dyn_iter)
                 for off, size in zip(static_offsets, static_sizes)]
+        # Rank-reducing subview: result has fewer dims than source. Mark the
+        # dropped dims (size=1 entries removed from the result type) as squeeze.
+        src_rank = len(static_sizes)
+        res_rank = len(irutils.memref_shape(op.operation.results[0].type))
+        if res_rank < src_rank:
+            for d in here:
+                if d.size == 1:
+                    d.squeeze = True
 
         # If the subview indexes a reshape *result*, fold its indices back to
-        # the reshape's source space (merging split dims with i*size+j) before
-        # composing further — the subview and reshape don't share a rank.
+        # the reshape's source space before composing further — the subview and
+        # reshape don't share a rank.
         src_op = _defining_op(source)
         if src_op is not None and src_op.operation.name == "memref.expand_shape":
             folded = _fold_subview_through_expand(src_op, here)
+            if folded is None:
+                return value, None
+            base, base_dims = _compose_chain(gen, src_op.operation.operands[0])
+            return base, _merge_dims(base_dims, folded)
+        if src_op is not None and src_op.operation.name == "memref.collapse_shape":
+            folded = _fold_subview_through_collapse(src_op, here)
             if folded is None:
                 return value, None
             base, base_dims = _compose_chain(gen, src_op.operation.operands[0])
@@ -337,29 +453,40 @@ def _compose_chain(gen, value):
     if name == "memref.collapse_shape":
         # Data flows source -> result. Compose the source; the source_dims
         # already carry any subview block offsets. The collapse only tells us
-        # which *unit* source dims are merged away -> squeeze them. (This is the
-        # common case: the collapse result feeds a compute op directly. A true
-        # multi-dim merge that is then re-sliced is not handled here.)
+        # which *unit* source dims are merged away -> squeeze them. For true
+        # multi-dim merges, delegate to _cross_collapse for div/mod decomposition.
         base, src_dims = _compose_chain(gen, op.operation.operands[0])
         src_shape = irutils.memref_shape(op.operation.operands[0].type)
         if src_dims is None:
             src_dims = [_full_dim(s) for s in src_shape]
         if len(src_dims) != len(src_shape):
+            # The inner chain folded through a reshape to the base, so src_dims
+            # are already in the base's rank. The collapse is transparent — the
+            # fold already resolved the addressing.
+            if irutils.is_memref(base.type) and len(src_dims) == len(irutils.memref_shape(base.type)):
+                return base, src_dims
             return value, None  # composed rank != collapse source rank — bail
         out = list(src_dims)
+        has_multi_dim = False
         for group in _reassoc_groups(op):
             non_unit = [g for g in group if src_shape[g] != 1]
             if len(non_unit) > 1:
-                return value, None  # true merge feeding a slice — unsupported
+                has_multi_dim = True
+                break
             carrier = non_unit[0] if non_unit else group[-1]
             for g in group:
                 if g != carrier and src_shape[g] == 1:
                     out[g] = _Dim(out[g].offset, 1, on_reg=out[g].on_reg, squeeze=True)
+        if has_multi_dim:
+            res_shape = irutils.memref_shape(op.operation.results[0].type)
+            result_dims = [_full_dim(s) for s in res_shape]
+            out = _cross_collapse(op, result_dims)
         return base, out
 
     if name == "memref.expand_shape":
         # Inverse: result has more dims. Compose the source; map each source
-        # dim's index onto its result group's single non-unit dim.
+        # dim's index onto its result group's single non-unit dim. For true
+        # multi-dim splits, delegate to _cross_expand.
         base, src_dims = _compose_chain(gen, op.operation.operands[0])
         src_shape = irutils.memref_shape(op.operation.operands[0].type)
         res_shape = irutils.memref_shape(op.operation.results[0].type)
@@ -367,14 +494,19 @@ def _compose_chain(gen, value):
             src_dims = [_full_dim(s) for s in src_shape]
         if len(src_dims) != len(src_shape):
             return value, None  # composed rank != expand source rank — bail
+        has_multi_dim = False
         out: list[_Dim] = []
         for sdim, group in enumerate(_reassoc_groups(op)):
             non_unit = [r for r in group if res_shape[r] != 1]
             if len(non_unit) > 1:
-                return value, None  # true split — unsupported
+                has_multi_dim = True
+                break
             for r in group:
                 out.append(src_dims[sdim] if res_shape[r] != 1
                            else _Dim(None, 1, squeeze=True))
+        if has_multi_dim:
+            result_dims = [_full_dim(s) for s in res_shape]
+            out = _cross_expand(op, result_dims)
         return base, out
 
     if name == "memref.reinterpret_cast":

@@ -14,7 +14,7 @@ import math
 from typing import Callable, Optional, Union
 
 import numpy as np
-from mlir import ir, passmanager
+from mlir import ir
 from mlir.dialects import arith, func, linalg, scf, tensor
 from mlir.dialects import math as mlir_math
 
@@ -30,7 +30,7 @@ from nkigen.mlir_utils import (
 
 Scalar = Union[int, float]
 
-_MEM_SPACE_CONSTANT = 4
+_MEM_SPACE_CONSTANT = 5
 
 # ---------------------------------------------------------------------------
 # Type helpers
@@ -1578,69 +1578,6 @@ def split(x: TensorHandle, sections: int, axis: int = 0, loc=None) -> list[Tenso
     return results
 
 
-# ---------------------------------------------------------------------------
-# Annotations (knob)
-# ---------------------------------------------------------------------------
-
-
-def annotate(
-    x: TensorHandle,
-    *,
-    partition_dim: Optional[int] = None,
-    mem_space: Optional[str] = None,
-    tile_size: Optional[list[int]] = None,
-    reduction_tile: Optional[list[int]] = None,
-) -> TensorHandle:
-    value = x._value
-    defining_op = value.owner
-    if defining_op is None:
-        return x
-
-    loc = _loc()
-
-    if isinstance(tile_size, int):
-        tile_size = [tile_size]
-    if isinstance(reduction_tile, int):
-        reduction_tile = [reduction_tile]
-
-    valid = {"Hbm", "Psum", "Sbuf", "SharedHbm"}
-    if mem_space is not None and mem_space not in valid:
-        raise ValueError(f"Invalid mem_space '{mem_space}'. Must be one of: {valid}")
-
-    ms_attr = None
-    if mem_space is not None:
-        ms_map = {"Hbm": 0, "Psum": 1, "Sbuf": 2, "SharedHbm": 3}
-        ms_attr = ir.IntegerAttr.get(ir.IntegerType.get_signless(32), ms_map[mem_space])
-
-    pd_attr = None
-    if partition_dim is not None:
-        pd_attr = ir.IntegerAttr.get(ir.IntegerType.get_unsigned(32), partition_dim)
-
-    ts_attr = None
-    if tile_size is not None:
-        ts_attr = ir.DenseI64ArrayAttr.get(tile_size)
-
-    rt_attr = None
-    if reduction_tile is not None:
-        rt_attr = ir.DenseI64ArrayAttr.get(reduction_tile)
-
-    if ms_attr is not None or pd_attr is not None or ts_attr is not None:
-        nkipy_d.LayoutOp(
-            target=value,
-            mem_space=ms_attr,
-            partition_dim=pd_attr,
-            tile_size=ts_attr,
-            loc=loc,
-        )
-
-    if ts_attr is not None or rt_attr is not None:
-        nkipy_d.TileOp(
-            target=value,
-            loop_tile_size=ts_attr,
-            reduction_tile=rt_attr,
-            loc=loc,
-        )
-    return x
 
 
 # ---------------------------------------------------------------------------
@@ -1771,43 +1708,3 @@ def loop_index_add_loop_index(
     return LoopIndexHandle(rv, a.mul_factor + b.mul_factor, a.add_offset + b.add_offset)
 
 
-# ---------------------------------------------------------------------------
-# Custom ops
-# ---------------------------------------------------------------------------
-
-
-def apply_custom_op(kernel_builder, reference_fn, input_specs, output_specs, args):
-    """Compile a kernel_builder function and call it during tracing.
-
-    Handles the nki.compiler.kernel_builder spec translation that was
-    previously in nkipy's KernelGenTraceContext.
-
-    Args:
-        kernel_builder: NKI kernel_builder function.
-        reference_fn: NumPy reference (for fallback).
-        input_specs: List of (shape, dtype_str) tuples.
-        output_specs: List of (shape, dtype_str) tuples.
-        args: Traced tensor arguments to pass to the custom op.
-
-    Returns:
-        Result from the custom op call.
-    """
-    import nki.compiler.kernel_builder as nb
-    from nkigen.frontend.custom_op import CustomOp
-
-    _dtype_map = {"f32": nb.float32, "f16": nb.float16, "bf16": nb.bfloat16}
-    nb_input_specs = {
-        f"input_{i}": nb.Tensor(shape, _dtype_map[dtype], nb.shared_hbm)
-        for i, (shape, dtype) in enumerate(input_specs)
-    }
-    nb_output_specs = {
-        f"output_{i}": nb.Tensor(shape, _dtype_map[dtype], nb.shared_hbm)
-        for i, (shape, dtype) in enumerate(output_specs)
-    }
-    internal = CustomOp.from_kernel_builder(
-        kernel_func=kernel_builder,
-        input_specs=nb_input_specs,
-        output_specs=nb_output_specs,
-        reference_fn=reference_fn,
-    )
-    return internal(*args)

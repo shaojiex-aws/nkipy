@@ -149,6 +149,8 @@ class _ModuleEmitter:
 
         funcs = irutils.func_ops(self.module)
         for i, func in enumerate(funcs):
+            if not func.regions or not func.regions[0].blocks:
+                continue
             if i:
                 self.em.blank()
                 self.em.blank()
@@ -370,6 +372,8 @@ _SILENT_SKIP = {
     "arith.divsi",
     "arith.remui",
     "arith.remsi",
+    "arith.index_cast",
+    "arith.index_castui",
     "memref.subview",
     "memref.collapse_shape",
     "memref.expand_shape",
