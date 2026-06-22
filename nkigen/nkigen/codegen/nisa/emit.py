@@ -1,0 +1,718 @@
+"""Textual NISA codegen: walk nkipy IR, emit NISA MLIR assembly as text.
+
+Single nkipy context for reading. No NKI wheel dependency during codegen.
+The output is plain NISA MLIR text that the NKI compiler parses downstream.
+"""
+
+from __future__ import annotations
+
+from mlir import ir as up_ir  # type: ignore[import-not-found]
+
+from .. import irutils
+
+_MEMSPACE_STR = {
+    irutils.MEMSPACE_HBM: "#nisa.mem<hbm>",
+    irutils.MEMSPACE_PSUM: "#nisa.mem<psum>",
+    irutils.MEMSPACE_SBUF: "#nisa.mem<sbuf>",
+    irutils.MEMSPACE_SHARED_HBM: "#nisa.mem<shared_hbm>",
+}
+
+_LINALG_TO_ARITH_OP = {
+    "linalg.add": "add",
+    "linalg.sub": "subtract",
+    "linalg.mul": "multiply",
+    "linalg.max": "max",
+    "linalg.min": "min",
+}
+
+_LINALG_TO_ACTIVATION = {
+    "linalg.exp": "exp",
+    "linalg.sqrt": "sqrt",
+    "linalg.square": "square",
+    "linalg.abs": "abs",
+    "linalg.log": "log",
+    "linalg.tanh": "tanh",
+}
+
+_ARITH_BODY_TO_OP = {
+    "arith.addf": "add",
+    "arith.addi": "add",
+    "arith.mulf": "multiply",
+    "arith.muli": "multiply",
+    "arith.subf": "subtract",
+    "arith.subi": "subtract",
+    "arith.maximumf": "max",
+    "arith.minimumf": "min",
+}
+
+
+class NisaEmitter:
+    """Walks nkipy IR top-down and emits NISA MLIR text."""
+
+    def __init__(self) -> None:
+        self._lines: list[str] = []
+        self._indent = 0
+        self._counter = 0
+        self._names: dict = {}  # nkipy Value -> str (e.g. "%0", "%arg0")
+        self._used: set[str] = set()
+
+    # -- text output helpers --
+
+    def _line(self, text: str) -> None:
+        self._lines.append("  " * self._indent + text)
+
+    def _fresh(self, hint: str = "") -> str:
+        """Generate a unique SSA name."""
+        if hint:
+            candidate = f"%{hint}"
+            if candidate not in self._used:
+                self._used.add(candidate)
+                return candidate
+            i = 0
+            while f"%{hint}_{i}" in self._used:
+                i += 1
+            name = f"%{hint}_{i}"
+        else:
+            name = f"%{self._counter}"
+            self._counter += 1
+        self._used.add(name)
+        return name
+
+    def _name(self, val: up_ir.Value) -> str:
+        return self._names[val]
+
+    def _set_name(self, val: up_ir.Value, name: str) -> None:
+        self._names[val] = name
+
+    def _memref_type_str(self, ty: up_ir.Type) -> str:
+        """Render a memref type with NISA memspace."""
+        mrt = up_ir.MemRefType(ty)
+        shape = "x".join(str(d) for d in mrt.shape)
+        elem = str(mrt.element_type)
+        ms = irutils.memref_memspace(ty)
+        ms_str = _MEMSPACE_STR.get(ms, "")
+        if ms_str:
+            return f"memref<{shape}x{elem}, {ms_str}>"
+        return f"memref<{shape}x{elem}>"
+
+    # -- top-level --
+
+    def emit_module(self, module: up_ir.Module, target: str = "trn2") -> str:
+        self._line(f'module attributes {{nisa.target = #nisa.target<{target}>}} {{')
+        self._indent += 1
+        for op in module.body.operations:
+            if op.operation.name == "func.func":
+                self._emit_func(op)
+        self._indent -= 1
+        self._line("}")
+        return "\n".join(self._lines) + "\n"
+
+    # -- structural ops --
+
+    def _emit_func(self, func_op) -> None:
+        op = func_op.operation
+        sym_name = up_ir.StringAttr(op.attributes["sym_name"]).value
+        func_ty = up_ir.FunctionType(up_ir.TypeAttr(op.attributes["function_type"]).value)
+
+        block = list(op.regions[0].blocks)[0]
+        params = []
+        for i, arg in enumerate(block.arguments):
+            name = f"%arg{i}"
+            self._set_name(arg, name)
+            params.append(f"{name}: {self._memref_type_str(arg.type)}")
+
+        results = [self._memref_type_str(t) for t in func_ty.results]
+        ret_str = f' -> {results[0]}' if len(results) == 1 else ""
+        if len(results) > 1:
+            ret_str = f' -> ({", ".join(results)})'
+
+        attrs = ' attributes {nki.output_names = ["output"]}' if results else ""
+        self._line(f'func.func @{sym_name}({", ".join(params)}){ret_str}{attrs} {{')
+        self._indent += 1
+        self._emit_block(block)
+        self._indent -= 1
+        self._line("}")
+
+    def _emit_block(self, block) -> None:
+        for op in block.operations:
+            self._emit_op(op.operation)
+
+    def _emit_op(self, op: up_ir.Operation) -> None:
+        name = op.name
+        if name == "arith.constant":
+            self._emit_arith_constant(op)
+        elif name in ("arith.muli", "arith.addi", "arith.subi",
+                      "arith.divui", "arith.remui"):
+            self._emit_arith_binop(op)
+        elif name == "scf.for":
+            self._emit_scf_for(op)
+        elif name == "scf.yield":
+            self._emit_scf_yield(op)
+        elif name == "func.return":
+            self._emit_return(op)
+        elif name == "memref.alloc":
+            self._emit_alloc(op)
+        elif name == "memref.dealloc":
+            self._emit_dealloc(op)
+        elif name in ("memref.subview", "memref.collapse_shape",
+                      "memref.expand_shape", "memref.reinterpret_cast"):
+            for r in op.results:
+                if r not in self._names:
+                    self._names[r] = None
+        elif name == "memref.copy":
+            self._emit_copy(op)
+        elif name in _LINALG_TO_ARITH_OP:
+            self._emit_elementwise(op)
+        elif name in _LINALG_TO_ACTIVATION:
+            self._emit_activation(op)
+        elif name == "linalg.reciprocal":
+            self._emit_reciprocal(op)
+        elif name == "linalg.fill":
+            self._emit_fill(op)
+        elif name == "linalg.transpose":
+            self._emit_transpose(op)
+        elif name == "linalg.matmul_transpose_a":
+            self._emit_matmul(op)
+        elif name == "linalg.generic":
+            self._emit_linalg_generic(op)
+
+    # -- arith --
+
+    def _emit_arith_constant(self, op: up_ir.Operation) -> None:
+        val = irutils.const_int(op.results[0])
+        if val is not None:
+            name = self._fresh(f"c{val}")
+            self._set_name(op.results[0], name)
+            self._line(f"{name} = arith.constant {val} : index")
+        else:
+            attr = op.attributes["value"]
+            name = self._fresh("cst")
+            self._set_name(op.results[0], name)
+            # attr already includes "value : type", just emit directly
+            self._line(f"{name} = arith.constant {attr}")
+
+    def _emit_arith_binop(self, op: up_ir.Operation) -> None:
+        op_name = op.name.split(".")[-1]
+        lhs = self._name(op.operands[0])
+        rhs = self._name(op.operands[1])
+        result_name = self._fresh()
+        self._set_name(op.results[0], result_name)
+        self._line(f"{result_name} = arith.{op_name} {lhs}, {rhs} : index")
+
+    # -- scf --
+
+    def _emit_scf_for(self, op: up_ir.Operation) -> None:
+        lb = self._name(op.operands[0])
+        ub = self._name(op.operands[1])
+        step = self._name(op.operands[2])
+
+        body_block = list(list(op.regions)[0].blocks)[0]
+        iv = list(body_block.arguments)[0]
+        iv_name = self._fresh("iv")
+        self._set_name(iv, iv_name)
+
+        self._line(f"scf.for {iv_name} = {lb} to {ub} step {step} {{")
+        self._indent += 1
+        self._emit_block(body_block)
+        self._indent -= 1
+        self._line("}")
+
+    def _emit_scf_yield(self, op: up_ir.Operation) -> None:
+        if list(op.operands):
+            operands = ", ".join(self._name(o) for o in op.operands)
+            types = ", ".join(str(o.type) for o in op.operands)
+            self._line(f"scf.yield {operands} : {types}")
+
+    def _emit_return(self, op: up_ir.Operation) -> None:
+        operands = list(op.operands)
+        if operands:
+            vals = ", ".join(self._name(o) for o in operands)
+            types = ", ".join(self._memref_type_str(o.type) for o in operands)
+            self._line(f"return {vals} : {types}")
+        else:
+            self._line("return")
+
+    # -- memory --
+
+    def _emit_alloc(self, op: up_ir.Operation) -> None:
+        result = op.results[0]
+        ty_str = self._memref_type_str(result.type)
+        name = self._fresh("mem")
+        self._set_name(result, name)
+        self._line(f"{name} = nisa.alloc alignment=64 : {ty_str}")
+
+    def _emit_dealloc(self, op: up_ir.Operation) -> None:
+        target = op.operands[0]
+        ms = irutils.memref_memspace(target.type)
+        if ms not in (irutils.MEMSPACE_SBUF, irutils.MEMSPACE_PSUM):
+            return
+        name = self._name(target)
+        ty_str = self._memref_type_str(target.type)
+        self._line(f"nisa.release {name} : {ty_str}")
+
+    # -- access tracing --
+
+    def _trace_access(self, val: up_ir.Value) -> tuple[str, list[str], list[int]]:
+        """Trace a memref value back to its base, collecting offsets.
+
+        Returns (base_name, offset_exprs, tile_shape).
+        """
+        base = val
+        offsets: list[str | None] = None
+
+        while True:
+            owner = getattr(base, "owner", None)
+            if owner is None:
+                break
+            op = owner.opview if hasattr(owner, "opview") else owner
+            op_name = getattr(op, "name", None)
+
+            if op_name == "memref.subview":
+                source = op.operation.operands[0]
+                src_rank = up_ir.MemRefType(source.type).rank
+                static_offsets_attr = op.operation.attributes["static_offsets"]
+                static_offsets = [int(x) for x in static_offsets_attr]
+                dyn_ops = list(op.operation.operands)[1:]
+                dyn_idx = 0
+
+                sv_offsets: list[str] = []
+                for i in range(src_rank):
+                    if static_offsets[i] == -(1 << 63):
+                        sv_offsets.append(self._name(dyn_ops[dyn_idx]))
+                        dyn_idx += 1
+                    else:
+                        if static_offsets[i] == 0:
+                            sv_offsets.append(self._emit_const_index(0))
+                        else:
+                            sv_offsets.append(self._emit_const_index(static_offsets[i]))
+
+                if offsets is None:
+                    offsets = sv_offsets
+                else:
+                    new_offsets = []
+                    for i in range(min(len(offsets), len(sv_offsets))):
+                        new_offsets.append(self._emit_addi(offsets[i], sv_offsets[i]))
+                    offsets = new_offsets
+
+                base = source
+                continue
+
+            break
+
+        base_name = self._name(base)
+        tile_shape = list(up_ir.MemRefType(val.type).shape)
+
+        if offsets is None:
+            base_ty = up_ir.MemRefType(base.type)
+            offsets = [self._emit_const_index(0) for _ in range(base_ty.rank)]
+
+        return base_name, offsets, tile_shape
+
+    def _emit_const_index(self, val: int) -> str:
+        name = self._fresh(f"c{val}")
+        self._line(f"{name} = arith.constant {val} : index")
+        return name
+
+    def _emit_addi(self, a: str, b: str) -> str:
+        result = self._fresh()
+        self._line(f"{result} = arith.addi {a}, {b} : index")
+        return result
+
+    def _operand_str(self, val: up_ir.Value, prefix: str) -> str:
+        """Build operand string: prefix<par| free>=type base[offsets + d0, ...]"""
+        base_name, offsets, tile_shape = self._trace_access(val)
+        base_ty = self._memref_type_str(self._base_type(val))
+        rank = len(tile_shape)
+
+        if rank >= 2:
+            tile_str = f"{tile_shape[0]}| {' '.join(str(s) for s in tile_shape[1:])}"
+        else:
+            tile_str = f"{tile_shape[0]}"
+
+        dims = []
+        for i in range(rank):
+            if i < len(offsets):
+                dims.append(f"{offsets[i]} + d{i}")
+            else:
+                dims.append(f"d{i}")
+
+        return f"{prefix}<{tile_str}>={base_ty} {base_name}[{', '.join(dims)}]"
+
+    def _base_type(self, val: up_ir.Value) -> up_ir.Type:
+        """Get the type of the base alloc/arg this value traces to."""
+        base = val
+        while True:
+            owner = getattr(base, "owner", None)
+            if owner is None:
+                break
+            op = owner.opview if hasattr(owner, "opview") else owner
+            op_name = getattr(op, "name", None)
+            if op_name in ("memref.subview", "memref.collapse_shape",
+                           "memref.expand_shape", "memref.reinterpret_cast"):
+                base = op.operation.operands[0]
+                continue
+            break
+        return base.type
+
+    # -- data movement --
+
+    def _emit_copy(self, op: up_ir.Operation) -> None:
+        src = op.operands[0]
+        dst = op.operands[1]
+        src_ms = irutils.memref_memspace(src.type)
+        dst_ms = irutils.memref_memspace(dst.type)
+
+        src_is_hbm = src_ms in (irutils.MEMSPACE_HBM, irutils.MEMSPACE_SHARED_HBM)
+        dst_is_hbm = dst_ms in (irutils.MEMSPACE_HBM, irutils.MEMSPACE_SHARED_HBM)
+
+        if dst_ms == irutils.MEMSPACE_PSUM and src_is_hbm:
+            # HBM -> psum: stage through sbuf
+            self._emit_staged_copy(src, dst, "hbm_to_psum")
+            return
+        if src_ms == irutils.MEMSPACE_PSUM and dst_is_hbm:
+            # psum -> HBM: stage through sbuf
+            self._emit_staged_copy(src, dst, "psum_to_hbm")
+            return
+
+        dst_str = self._operand_str(dst, "dst")
+        src_str = self._operand_str(src, "src")
+
+        if src_is_hbm or dst_is_hbm:
+            self._line(
+                f"nisa.dma_copy({dst_str}, {src_str}, "
+                f"dge_mode=unassigned, oob_is_err=true) engine=dma"
+            )
+        else:
+            self._line(
+                f"nisa.tensor_copy({dst_str}, {src_str}) engine=vector"
+            )
+
+    def _emit_staged_copy(self, src, dst, direction: str) -> None:
+        """Stage a copy through an sbuf intermediate (psum<->HBM)."""
+        # Use src shape for the intermediate
+        ref_val = src if direction == "psum_to_hbm" else dst
+        tile_shape = list(up_ir.MemRefType(ref_val.type).shape)
+        elem = irutils.memref_elem_type(ref_val.type)
+        shape_str = "x".join(str(d) for d in tile_shape) + f"x{elem}"
+        sbuf_ty = f"memref<{shape_str}, {_MEMSPACE_STR[irutils.MEMSPACE_SBUF]}>"
+
+        tmp = self._fresh("mem")
+        self._line(f"{tmp} = nisa.alloc alignment=64 : {sbuf_ty}")
+
+        # Build tmp operand string
+        rank = len(tile_shape)
+        tmp_offsets = [self._emit_const_index(0) for _ in range(rank)]
+        if rank >= 2:
+            tile_str = f"{tile_shape[0]}| {' '.join(str(s) for s in tile_shape[1:])}"
+        else:
+            tile_str = f"{tile_shape[0]}"
+        tmp_dims = ", ".join(f"{tmp_offsets[i]} + d{i}" for i in range(rank))
+
+        if direction == "psum_to_hbm":
+            # psum -> sbuf (tensor_copy), then sbuf -> HBM (dma_copy)
+            src_str = self._operand_str(src, "src")
+            self._line(
+                f"nisa.tensor_copy(dst<{tile_str}>={sbuf_ty} {tmp}[{tmp_dims}], "
+                f"{src_str}) engine=vector"
+            )
+            dst_str = self._operand_str(dst, "dst")
+            self._line(
+                f"nisa.dma_copy({dst_str}, "
+                f"src<{tile_str}>={sbuf_ty} {tmp}[{tmp_dims}], "
+                f"dge_mode=unassigned, oob_is_err=true) engine=dma"
+            )
+        else:
+            # HBM -> sbuf (dma_copy), then sbuf -> psum (tensor_copy)
+            src_str = self._operand_str(src, "src")
+            self._line(
+                f"nisa.dma_copy(dst<{tile_str}>={sbuf_ty} {tmp}[{tmp_dims}], "
+                f"{src_str}, dge_mode=unassigned, oob_is_err=true) engine=dma"
+            )
+            dst_str = self._operand_str(dst, "dst")
+            self._line(
+                f"nisa.tensor_copy({dst_str}, "
+                f"src<{tile_str}>={sbuf_ty} {tmp}[{tmp_dims}]) engine=vector"
+            )
+        self._line(f"nisa.release {tmp} : {sbuf_ty}")
+
+    def _emit_transpose(self, op: up_ir.Operation) -> None:
+        src = op.operands[0]
+        dst = op.operands[1]
+        permutation = [int(x) for x in op.attributes["permutation"]]
+
+        dst_str = self._operand_str(dst, "dst")
+        src_str = self._operand_str(src, "src")
+
+        perm_str = ", ".join(str(p) for p in permutation)
+        self._line(
+            f"nisa.dma_transpose({dst_str}, {src_str}, "
+            f"permutation=[{perm_str}], dge_mode=no_dge, oob_is_err=true) engine=dma"
+        )
+
+    # -- compute: elementwise --
+
+    def _emit_elementwise(self, op: up_ir.Operation) -> None:
+        arith_op = _LINALG_TO_ARITH_OP[op.name]
+        operands = list(op.operands)
+        lhs, rhs, dst = operands[0], operands[1], operands[2]
+
+        dst_str = self._operand_str(dst, "dst")
+        lhs_str = self._operand_str(lhs, "lhs")
+        rhs_str = self._operand_str(rhs, "rhs")
+
+        self._line(
+            f"nisa.tensor_tensor_arith({dst_str}, {lhs_str}, {rhs_str}, "
+            f"op={arith_op}) engine=vector"
+        )
+
+    # -- compute: activation --
+
+    def _emit_activation(self, op: up_ir.Operation) -> None:
+        """linalg.exp/sqrt/log/... -> nisa.activation."""
+        act_fn = _LINALG_TO_ACTIVATION[op.name]
+        src = op.operands[0]
+        dst = op.operands[1]
+
+        dst_str = self._operand_str(dst, "dst")
+        src_str = self._operand_str(src, "src")
+
+        scale = self._fresh("cst")
+        self._line(f"{scale} = arith.constant 1.000000e+00 : f32")
+        bias = self._fresh("cst")
+        self._line(f"{bias} = arith.constant 0.000000e+00 : f32")
+
+        self._line(
+            f"nisa.activation({dst_str}, {src_str}, "
+            f"bias=f32 {bias}, scale=f32 {scale}, op={act_fn}) engine=scalar"
+        )
+
+    def _emit_reciprocal(self, op: up_ir.Operation) -> None:
+        """linalg.reciprocal -> nisa.reciprocal."""
+        src = op.operands[0]
+        dst = op.operands[1]
+
+        dst_str = self._operand_str(dst, "dst")
+        src_str = self._operand_str(src, "src")
+
+        self._line(f"nisa.reciprocal({dst_str}, {src_str}) engine=vector")
+
+    # -- compute: fill --
+
+    def _emit_fill(self, op: up_ir.Operation) -> None:
+        """linalg.fill -> nisa.memset."""
+        scalar = op.operands[0]
+        dst = op.operands[1]
+
+        if not irutils.is_on_chip(dst.type):
+            return
+
+        scalar_name = self._name(scalar)
+        dst_str = self._operand_str(dst, "dst")
+        elem_ty = irutils.memref_elem_type(dst.type)
+
+        self._line(
+            f"nisa.memset({dst_str}, value={elem_ty} {scalar_name}) engine=vector"
+        )
+
+    # -- compute: matmul --
+
+    def _emit_matmul(self, op: up_ir.Operation) -> None:
+        """linalg.matmul_transpose_a -> nisa.matmul."""
+        mat_a = op.operands[0]  # stationary [K, M] (already transposed)
+        mat_b = op.operands[1]  # moving [K, N]
+        mat_c = op.operands[2]  # dst [M, N] in psum
+
+        dst_str = self._operand_str(mat_c, "dst")
+        stat_str = self._operand_str(mat_a, "stationary")
+        mov_str = self._operand_str(mat_b, "moving")
+
+        row_pos = self._emit_const_index(0)
+        col_pos = self._emit_const_index(0)
+
+        self._line(
+            f"nisa.matmul({dst_str}, {stat_str}, {mov_str}, "
+            f"row_pos=index {row_pos}, col_pos=index {col_pos}, "
+            f"is_transpose=false, perf_opt=none_, psum_zero_region=size2048) engine=tensor"
+        )
+
+    # -- linalg.generic dispatch --
+
+    def _emit_linalg_generic(self, op: up_ir.Operation) -> None:
+        """Dispatch linalg.generic by iterator types and body."""
+        iterator_types = [str(t) for t in op.attributes["iterator_types"]]
+        has_reduction = any("reduction" in t for t in iterator_types)
+
+        if has_reduction:
+            self._emit_reduction_generic(op)
+        else:
+            self._emit_elementwise_generic(op)
+
+    def _emit_elementwise_generic(self, op: up_ir.Operation) -> None:
+        """Parallel linalg.generic -> tensor_tensor_arith or tensor_scalar_arith."""
+        body = list(list(op.regions)[0].blocks)[0]
+        body_ops = [o for o in body.operations if o.operation.name != "linalg.yield"]
+        if len(body_ops) != 1:
+            return
+
+        body_op_name = body_ops[0].operation.name
+        arith_op = _ARITH_BODY_TO_OP.get(body_op_name)
+        if arith_op is None:
+            return
+
+        num_ins = int(op.attributes["operandSegmentSizes"][0])
+        ins = list(op.operands[:num_ins])
+        dst = op.operands[num_ins]
+
+        if num_ins == 1:
+            self._emit_unary_generic(op, ins[0], dst, body_ops[0], arith_op)
+            return
+
+        if num_ins != 2:
+            return
+
+        dst_shape = list(up_ir.MemRefType(dst.type).shape)
+        dst_free = _free_elems(dst_shape)
+
+        in0_shape = list(up_ir.MemRefType(ins[0].type).shape)
+        in1_shape = list(up_ir.MemRefType(ins[1].type).shape)
+        in0_free = _free_elems(in0_shape)
+        in1_free = _free_elems(in1_shape)
+
+        bcast0 = in0_free == 1 and dst_free != 1
+        bcast1 = in1_free == 1 and dst_free != 1
+
+        if not bcast0 and not bcast1:
+            dst_str = self._operand_str(dst, "dst")
+            lhs_str = self._operand_str(ins[0], "lhs")
+            rhs_str = self._operand_str(ins[1], "rhs")
+            self._line(
+                f"nisa.tensor_tensor_arith({dst_str}, {lhs_str}, {rhs_str}, "
+                f"op={arith_op}) engine=vector"
+            )
+        else:
+            # One operand broadcasts: use tensor_scalar_arith
+            if bcast1:
+                tensor_v, vec_v = ins[0], ins[1]
+                # Check if the broadcast operand was the left body operand
+                block_args = list(body.arguments)
+                vec_is_lhs = str(body_ops[0].operation.operands[0]) == str(block_args[1])
+            else:
+                tensor_v, vec_v = ins[1], ins[0]
+                vec_is_lhs = str(body_ops[0].operation.operands[0]) == str(block_args[0])
+
+            reverse = "first" if vec_is_lhs else "none_"
+            dst_str = self._operand_str(dst, "dst")
+            src_str = self._operand_str(tensor_v, "src")
+            op0_str = self._operand_str(vec_v, "operand0")
+            self._line(
+                f"nisa.tensor_scalar_arith({dst_str}, {src_str}, {op0_str}, "
+                f"op0={arith_op}, reverse_operands={reverse}) engine=vector"
+            )
+
+    def _emit_unary_generic(self, op, src, dst, body_op, arith_op: str) -> None:
+        """Single-input elementwise generic with a scalar constant in body."""
+        scalar = None
+        for operand in body_op.operation.operands:
+            v = irutils.const_scalar(operand)
+            if v is not None:
+                scalar = v
+                break
+
+        if scalar is None:
+            return
+
+        scalar_name = self._fresh("cst")
+        self._line(f"{scalar_name} = arith.constant {_format_float(scalar)} : f32")
+
+        dst_str = self._operand_str(dst, "dst")
+        src_str = self._operand_str(src, "src")
+        self._line(
+            f"nisa.tensor_scalar_arith({dst_str}, {src_str}, operand0=f32 {scalar_name}, "
+            f"op0={arith_op}, reverse_operands=none_) engine=vector"
+        )
+
+    def _emit_reduction_generic(self, op: up_ir.Operation) -> None:
+        """Reduction generic -> tensor_reduce_arith + accumulation."""
+        body = list(list(op.regions)[0].blocks)[0]
+        body_ops = [o for o in body.operations if o.operation.name != "linalg.yield"]
+        if len(body_ops) != 1:
+            return
+
+        body_op_name = body_ops[0].operation.name
+        arith_op = _ARITH_BODY_TO_OP.get(body_op_name)
+        if arith_op is None:
+            return
+
+        num_ins = int(op.attributes["operandSegmentSizes"][0])
+        src = op.operands[0]
+        dst = op.operands[num_ins]
+
+        iterator_types = [str(t) for t in op.attributes["iterator_types"]]
+        num_r_dim = sum("reduction" in t for t in iterator_types)
+
+        # Check if body reads the output accumulator (accumulating reduction)
+        out_arg = list(body.arguments)[-1]
+        accumulates = any(
+            o == out_arg for o in body_ops[0].operation.operands
+        )
+
+        dst_str = self._operand_str(dst, "dst")
+        src_str = self._operand_str(src, "src")
+
+        if not accumulates:
+            self._line(
+                f"nisa.tensor_reduce_arith({dst_str}, {src_str}, "
+                f"op={arith_op}, negated=false, num_r_dim={num_r_dim}) engine=vector"
+            )
+        else:
+            # Alloc temp, reduce into temp, accumulate into dst
+            dst_shape = list(up_ir.MemRefType(dst.type).shape)
+            ms = irutils.memref_memspace(dst.type)
+            temp_ty = self._memref_type_str(dst.type)
+            temp_name = self._fresh("mem")
+            self._line(f"{temp_name} = nisa.alloc : {temp_ty}")
+            self._set_name(None, temp_name)  # no SSA value to bind
+
+            # Emit reduce into temp
+            temp_offsets = [self._emit_const_index(0) for _ in range(len(dst_shape))]
+            base_ty = self._memref_type_str(dst.type)
+            rank = len(dst_shape)
+            if rank >= 2:
+                tile_str = f"{dst_shape[0]}| {' '.join(str(s) for s in dst_shape[1:])}"
+            else:
+                tile_str = f"{dst_shape[0]}"
+            temp_dims = ", ".join(f"{temp_offsets[i]} + d{i}" for i in range(rank))
+            temp_operand = f"dst<{tile_str}>={base_ty} {temp_name}[{temp_dims}]"
+
+            self._line(
+                f"nisa.tensor_reduce_arith({temp_operand}, {src_str}, "
+                f"op={arith_op}, negated=false, num_r_dim={num_r_dim}) engine=vector"
+            )
+
+            # Accumulate: dst = dst op temp
+            rhs_operand = f"rhs<{tile_str}>={base_ty} {temp_name}[{temp_dims}]"
+            self._line(
+                f"nisa.tensor_tensor_arith({dst_str}, {dst_str.replace('dst<', 'lhs<')}, "
+                f"{rhs_operand}, op={arith_op}) engine=vector"
+            )
+
+            # Release temp
+            self._line(f"nisa.release {temp_name} : {temp_ty}")
+
+
+def _free_elems(shape: list[int]) -> int:
+    """Product of free (non-partition) dims — everything after dim 0."""
+    n = 1
+    for s in shape[1:]:
+        n *= s
+    return n
+
+
+def _format_float(val: float) -> str:
+    if val != val:
+        return "0x7FC00000"
+    if val == float("inf"):
+        return "0x7F800000"
+    if val == float("-inf"):
+        return "0xFF800000"
+    return f"{val:e}"

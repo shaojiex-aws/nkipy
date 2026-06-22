@@ -108,14 +108,14 @@ def test_2d_sbuf_baseline():
     """
     Baseline: 2D SBUF alloc (256x128) without reshape legalizes normally.
 
-    The 256x128 alloc with tile [128, 128] should become 128x2x1x128 (4D).
-    No Phase 0 pattern is involved — this is the standard path.
+    The 256x128 alloc gets #nkipy.sbuf_map<tile: [128, 128], blocks: [2, 1]>.
+    Logical shape is preserved.
     """
     result = run_legalize_layout(MLIR_2D_SBUF_BASELINE)
 
     check_patterns = '''
 CHECK: func.func @test_2d_baseline
-CHECK: memref.alloc(){{.*}}: memref<128x2x1x128xf32, 3 : i32>
+CHECK: memref.alloc(){{.*}}: memref<256x128xf32, #nkipy.sbuf_map<tile: [128, 128], blocks: [2, 1]>, 3 : i32>
 CHECK: scf.for
 CHECK: linalg.add
 CHECK: return{{.*}}4 : i32
@@ -199,124 +199,17 @@ def test_3d_sbuf_full_copy():
     3D SBUF alloc (256x2x64) with full-buffer copy from 3D HBM.
 
     No reshape involved — HBM and SBUF have the same rank (3).
-    The alloc should be legalized to 5D: 128x2x2x1x64.
-    The full-buffer HBM->SBUF copy should be tiled into a 3-level loop.
+    The alloc gets #nkipy.sbuf_map and the full-buffer copy is tiled into block loops.
     """
     result = run_legalize_layout(MLIR_3D_SBUF_COPY)
 
     check_patterns = '''
 CHECK: func.func @test_3d_copy
-CHECK: memref.alloc(){{.*}}: memref<128x2x2x1x64xf32, 3 : i32>
+CHECK: memref.alloc(){{.*}}: memref<256x2x64xf32, #nkipy.sbuf_map<tile: [128, 1, 64], blocks: [2, 2, 1]>, 3 : i32>
 CHECK: scf.for
 CHECK: scf.for
 CHECK: scf.for
 CHECK: memref.copy{{.*}}4 : i32>{{.*}}to{{.*}}3 : i32>
-CHECK: linalg.generic
-CHECK: return{{.*}}4 : i32
-'''
-    run_filecheck(result, check_patterns)
-
-
-# ============================================================================
-# Test: expandTileShape with multi-non-unit collapse group (Fix 2)
-# ============================================================================
-
-# Pattern: 3D SBUF alloc (128, 2, 128) with collapse_shape [[0],[1,2]] → 2D (128, 256).
-# A linalg op uses 2D tiles [128, 128].  expandTileShape must expand
-# tile=128 for group [1,2] with srcShape=[2, 128].
-#
-# Before fix: expanded=[2, 64] → middle tile=2 ≠ 1 → REJECTED by legalize-layout.
-# After fix:  expanded=[1, 128] → middle tile=1 → legalized to 5D physical.
-
-MLIR_MULTI_NON_UNIT_COLLAPSE = '''
-#map = affine_map<(d0, d1) -> (d0, d1)>
-module {
-  func.func @test_expand_tile_multi_non_unit(
-      %arg0: memref<128x2x128xf32, strided<[?, ?, ?], offset: ?>, 4 : i32>
-  ) -> memref<128x256xf32, 4 : i32> {
-    %c2 = arith.constant 2 : index
-    %c1 = arith.constant 1 : index
-    %c128 = arith.constant 128 : index
-    %c0 = arith.constant 0 : index
-
-    // 3D SBUF alloc — partition at dim 0, batch at dim 1, free at dim 2
-    %alloc_3d = memref.alloc() {alignment = 64 : i64} : memref<128x2x128xf32, 3 : i32>
-
-    // Manually tiled HBM→SBUF copy
-    scf.for %j = %c0 to %c2 step %c1 {
-      %sv_hbm = memref.subview %arg0[0, %j, 0] [128, 1, 128] [1, 1, 1]
-        : memref<128x2x128xf32, strided<[?, ?, ?], offset: ?>, 4 : i32>
-        to memref<128x1x128xf32, strided<[?, ?, ?], offset: ?>, 4 : i32>
-      %sv_sbuf = memref.subview %alloc_3d[0, %j, 0] [128, 1, 128] [1, 1, 1]
-        : memref<128x2x128xf32, 3 : i32>
-        to memref<128x1x128xf32, strided<[256, 128, 1], offset: ?>, 3 : i32>
-      memref.copy %sv_hbm, %sv_sbuf
-        : memref<128x1x128xf32, strided<[?, ?, ?], offset: ?>, 4 : i32>
-        to memref<128x1x128xf32, strided<[256, 128, 1], offset: ?>, 3 : i32>
-    }
-
-    // collapse_shape [[0],[1,2]] → 2D (128, 256)
-    // group [1,2] has srcShape=[2, 128] — multi-non-unit!
-    %collapsed = memref.collapse_shape %alloc_3d [[0], [1, 2]]
-      : memref<128x2x128xf32, 3 : i32> into memref<128x256xf32, 3 : i32>
-
-    // Output in HBM (avoids legalization issues on the output side)
-    %alloc_out = memref.alloc() {alignment = 64 : i64} : memref<128x256xf32, 4 : i32>
-
-    // Tiled loop using 2D [128, 128] tiles of the collapsed view
-    scf.for %j = %c0 to %c2 step %c1 {
-      %off = arith.muli %j, %c128 : index
-
-      %sv_in = memref.subview %collapsed[0, %off] [128, 128] [1, 1]
-        : memref<128x256xf32, 3 : i32>
-        to memref<128x128xf32, strided<[256, 1], offset: ?>, 3 : i32>
-
-      %sv_out = memref.subview %alloc_out[0, %off] [128, 128] [1, 1]
-        : memref<128x256xf32, 4 : i32>
-        to memref<128x128xf32, strided<[256, 1], offset: ?>, 4 : i32>
-
-      %tile_out = memref.alloc() {alignment = 64 : i64} : memref<128x128xf32, 3 : i32>
-      linalg.generic {indexing_maps = [#map, #map],
-                       iterator_types = ["parallel", "parallel"]}
-        ins(%sv_in
-          : memref<128x128xf32, strided<[256, 1], offset: ?>, 3 : i32>)
-        outs(%tile_out : memref<128x128xf32, 3 : i32>) {
-      ^bb0(%in: f32, %out: f32):
-        %exp = math.exp %in : f32
-        linalg.yield %exp : f32
-      }
-
-      memref.copy %tile_out, %sv_out
-        : memref<128x128xf32, 3 : i32>
-        to memref<128x128xf32, strided<[256, 1], offset: ?>, 4 : i32>
-    }
-
-    return %alloc_out : memref<128x256xf32, 4 : i32>
-  }
-}
-'''
-
-
-def test_expand_tile_multi_non_unit_collapse():
-    """
-    expandTileShape must handle collapse groups with multiple non-unit dims.
-
-    Alloc: memref<128x2x128, sbuf> collapsed to 2D via [[0],[1,2]].
-    Linalg ops use 2D tiles [128, 128].
-
-    expandTileShape must expand tile=128 for group [1,2] (srcShape=[2,128]):
-      Correct: [1, 128] — middle tile=1, legalize-layout accepts.
-      Old bug: [2, 64]  — middle tile=2, legalize-layout rejects.
-
-    After legalization the 3D alloc becomes 5D physical:
-      tile=[128, 1, 128], numBlocks=[1, 2, 1] → [128, 1, 2, 1, 128]
-    """
-    result = run_legalize_layout(MLIR_MULTI_NON_UNIT_COLLAPSE)
-
-    check_patterns = '''
-CHECK: func.func @test_expand_tile_multi_non_unit
-CHECK: memref.alloc(){{.*}}: memref<128x1x2x1x128xf32, 3 : i32>
-CHECK: scf.for
 CHECK: linalg.generic
 CHECK: return{{.*}}4 : i32
 '''

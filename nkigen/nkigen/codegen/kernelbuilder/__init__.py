@@ -17,10 +17,11 @@ from __future__ import annotations
 import os
 
 from mlir import ir as up_ir  # type: ignore[import-not-found]
+from nkigen._mlir.dialects import nkipy as nkipy_d
 
 from .api import get_api
 from .emitter import Emitter
-from . import irutils
+from .. import irutils
 from . import ops
 
 
@@ -54,6 +55,7 @@ def linalg_to_kernelbuilder(
 
     ctx = up_ir.Context()
     ctx.load_all_available_dialects()
+    nkipy_d.register_dialect(ctx)
     ctx.allow_unregistered_dialects = True
     with ctx:
         module = up_ir.Module.parse(mlir_text)

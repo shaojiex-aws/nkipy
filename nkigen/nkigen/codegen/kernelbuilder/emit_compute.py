@@ -11,7 +11,7 @@ lives in :mod:`ops`; this module just reads operands and calls the matching
 
 from __future__ import annotations
 
-from . import irutils
+from .. import irutils
 from . import ops
 from .emit_indexing import index_expr, memref_expr
 

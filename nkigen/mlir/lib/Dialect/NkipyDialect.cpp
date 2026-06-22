@@ -35,10 +35,9 @@ SmallVector<int64_t> SbufMapAttr::getPhysicalShape() const {
 }
 
 AffineMap SbufMapAttr::getAffineMap() const {
-  // Return an identity map over the physical rank. This satisfies the
-  // MemRefLayoutAttrInterface contract while signaling that the layout
-  // is not a simple strided layout.
-  return AffineMap::getMultiDimIdentityMap(getPhysicalRank(),
+  // Return an identity map over the logical rank. The memref keeps its
+  // logical shape; sbuf_map is metadata about physical factorization.
+  return AffineMap::getMultiDimIdentityMap(getLogicalRank(),
                                            getContext());
 }
 
@@ -70,9 +69,21 @@ LogicalResult SbufMapAttr::verifyLayout(
 LogicalResult SbufMapAttr::getStridesAndOffset(
     ArrayRef<int64_t> shape, SmallVectorImpl<int64_t> &strides,
     int64_t &offset) const {
-  // Not a strided layout — return failure so callers fall back
-  // to other layout resolution paths.
-  return failure();
+  // Return standard row-major strides for the logical shape.
+  // The sbuf_map encodes physical factorization but the memref's
+  // logical layout is still contiguous row-major.
+  offset = 0;
+  int64_t rank = shape.size();
+  strides.resize(rank);
+  int64_t stride = 1;
+  for (int64_t i = rank - 1; i >= 0; --i) {
+    strides[i] = stride;
+    if (shape[i] == ShapedType::kDynamic)
+      stride = ShapedType::kDynamic;
+    else
+      stride *= shape[i];
+  }
+  return success();
 }
 
 LogicalResult SbufMapAttr::verify(

@@ -338,13 +338,13 @@ The factorization implies div/mod when computing physical addresses. NISA can't 
 
 ### Phase 1: Define `#nkipy.sbuf_map` Attr + `nkipy.slice` Op (1-2 weeks)
 
-1. **Define `NkipySbufMapAttr`** in ODS/C++:
+1. ✅ **Define `NkipySbufMapAttr`** in ODS/C++:
    - Storage: list of factor-lists, one per logical dim (e.g. `[[128, 4], [4, 128]]`)
    - Verifier: product of each factor list == corresponding logical dim size
    - Utility: `applyLayout(logical_offsets) -> physical_offsets` (does the div/mod factorization)
    - Utility: `physicalShape()` → flat concatenation of all factor lists
 
-2. **Modify `legalize-layout`** to emit logical-shaped allocs with sbuf_map attr:
+2. ✅ **Modify `legalize-layout`** to emit logical-shaped allocs with sbuf_map attr:
    - Current: compute physical shape → rewrite alloc → insert collapse/expand → rewire users
    - New: compute factorization → attach `#nkipy.sbuf_map<...>` to alloc type → done
    - The tiling decisions (partition size, block counts) go INTO the attr instead of into reshape ops

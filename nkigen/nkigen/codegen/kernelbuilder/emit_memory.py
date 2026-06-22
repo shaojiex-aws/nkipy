@@ -9,8 +9,8 @@ Handlers are wired into the walker's dispatch table by :func:`register`.
 
 from __future__ import annotations
 
-from . import irutils
-from .irutils import MEMSPACE_PSUM, MEMSPACE_SBUF
+from .. import irutils
+from ..irutils import MEMSPACE_PSUM, MEMSPACE_SBUF
 from .emit_indexing import memref_expr
 
 

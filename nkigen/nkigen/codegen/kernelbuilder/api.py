@@ -20,7 +20,7 @@ from __future__ import annotations
 
 from typing import Protocol
 
-from .irutils import (
+from ..irutils import (
     MEMSPACE_HBM, MEMSPACE_PSUM, MEMSPACE_SBUF, MEMSPACE_SHARED_HBM,
 )
 

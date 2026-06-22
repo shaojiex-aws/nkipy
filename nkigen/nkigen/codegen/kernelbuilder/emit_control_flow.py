@@ -15,7 +15,7 @@ IV-dependent offsets as ``nb.ds(offset, size)`` instead (see emit_indexing).
 
 from __future__ import annotations
 
-from . import irutils
+from .. import irutils
 
 
 def _emit_for(gen, op) -> bool:

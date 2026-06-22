@@ -16,7 +16,7 @@ value -> Python variable name).
 
 from __future__ import annotations
 
-from . import irutils
+from .. import irutils
 
 
 # Dynamic-offset sentinel used by memref.subview's static_offsets attribute
