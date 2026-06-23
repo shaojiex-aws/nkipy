@@ -394,6 +394,27 @@ class NisaEmitter:
 
         return f"{prefix}<{tile_str}>={memloc_ref}[{', '.join(dims)}]"
 
+    def _operand_str_multidim(self, val: up_ir.Value, prefix: str) -> str:
+        """Build operand string with full rank — no view(), no flattening.
+
+        Used for HBM↔HBM copies where both sides keep their native rank.
+        NISA computes correct strides from the memref type directly.
+        """
+        base_name, offsets, tile_shape, base_type = self._trace_access(val)
+        par = tile_shape[0]
+        free_dims = ", ".join(str(d) for d in tile_shape[1:])
+        tile_str = f"{par}| {free_dims}"
+
+        dims = []
+        for i in range(len(tile_shape)):
+            if i < len(offsets):
+                dims.append(f"{offsets[i]} + d{i}")
+            else:
+                dims.append(f"d{i}")
+
+        memloc_ref = f"{self._memref_type_str_nisa(base_type)} {base_name}"
+        return f"{prefix}<{tile_str}>={memloc_ref}[{', '.join(dims)}]"
+
     def _linearize_offsets(self, offsets: list[str],
                            dim_sizes: list[int]) -> str:
         """Linearize N free-dim offsets into one: off[0]*stride[0] + ... + off[N-1].
@@ -452,8 +473,13 @@ class NisaEmitter:
             self._emit_staged_copy(src, dst, "psum_to_hbm")
             return
 
-        dst_str = self._operand_str(dst, "dst")
-        src_str = self._operand_str(src, "src")
+        both_hbm = src_is_hbm and dst_is_hbm
+        if both_hbm:
+            dst_str = self._operand_str_multidim(dst, "dst")
+            src_str = self._operand_str_multidim(src, "src")
+        else:
+            dst_str = self._operand_str(dst, "dst")
+            src_str = self._operand_str(src, "src")
 
         if src_is_hbm or dst_is_hbm:
             self._line(
