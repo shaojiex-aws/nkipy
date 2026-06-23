@@ -1,7 +1,7 @@
 # Memref View-Chain Simplification
 
 **Date:** 2026-06-21  
-**Status:** Proposal  
+**Status:** In Progress (Phase 1–2 done)  
 **Motivation:** The IR between tiling and NISA lowering contains deep chains of `subview(collapse_shape(expand_shape(subview(...))))` that force both backends (KB codegen and linalg-to-nisa) to maintain ~1400 lines of fragile chain-composition logic. This complexity is the root cause of the qwen3 CODEGEN failure and a recurring source of bugs.
 
 ---
@@ -336,53 +336,61 @@ The factorization implies div/mod when computing physical addresses. NISA can't 
 
 ## 4. Implementation Plan
 
-### Phase 1: Define `#nkipy.sbuf_map` Attr + `nkipy.slice` Op (1-2 weeks)
+### Phase 1: Define `#nkipy.sbuf_map` Attr (done)
 
 1. ✅ **Define `NkipySbufMapAttr`** in ODS/C++:
-   - Storage: list of factor-lists, one per logical dim (e.g. `[[128, 4], [4, 128]]`)
-   - Verifier: product of each factor list == corresponding logical dim size
-   - Utility: `applyLayout(logical_offsets) -> physical_offsets` (does the div/mod factorization)
-   - Utility: `physicalShape()` → flat concatenation of all factor lists
+   - Storage: `tile` (tile shape per dim) + `blocks` (num blocks per dim)
+   - Actual syntax: `#nkipy.sbuf_map<tile: [128, 128], blocks: [4, 4]>`
+   - Verifier: tile[i] * blocks[i] == logical dim size
+   - Lives in the MemRefType layout slot
 
 2. ✅ **Modify `legalize-layout`** to emit logical-shaped allocs with sbuf_map attr:
-   - Current: compute physical shape → rewrite alloc → insert collapse/expand → rewire users
-   - New: compute factorization → attach `#nkipy.sbuf_map<...>` to alloc type → done
-   - The tiling decisions (partition size, block counts) go INTO the attr instead of into reshape ops
+   - Attaches `#nkipy.sbuf_map` to resident SBUF buffers (multi-block allocs)
+   - Tile-sized temporaries (single block) get NO sbuf_map — they're already one tile
+   - Tiles HBM↔SBUF copies into block-iteration loops
+   - Decomposes HBM fills (stage through SBUF tile)
+   - No collapse/expand chains emitted. IR stays in logical shape.
 
-3. **Simplify `CanonicalizeReshape`**:
+3. ✅ **>2D tile allocs stay logical in IR** (decided 2026-06-22):
+   - Removed `flattenTileAllocsTo2D` — no IR-level flattening
+   - NISA emitter projects >2D to 2D at emission time (dim0=partition, product(rest)=free)
+   - Linearizes offsets with `arith.muli`/`arith.addi` for the free dims
+
+4. **Simplify `CanonicalizeReshape`** (future):
    - Current: classifies expand/collapse as view-vs-copy based on partition dim analysis
    - New: checks if a user reshape aligns to the sbuf_map attr's factor boundaries
    - Aligned → subview in logical space (the sbuf_map attr propagates)
    - Unaligned → emit alloc+copy with a new sbuf_map attr (same as today, simpler check)
 
-### Phase 2: Update Backends (1-2 weeks)
+### Phase 2: Update Backends (done for NISA, KB has pre-existing bugs)
 
-4. **Update KB backend** (`emit_indexing.py`):
-   - `memref_expr()` reads `#nkipy.sbuf_map` attr from alloc type
-   - Applies factorization to subview offsets → physical indices
-   - Emits `base[phys_0:..., phys_1:..., ...]`
-   - Delete: `_compose_chain`, `_cross_collapse`, `_cross_expand`, `_fold_subview_through_*`, `_merge_dims`
+5. ✅ **Update NISA backend** (`codegen/nisa/emit.py`):
+   - `_trace_access()` traces through subview/collapse/expand chains to base alloc
+   - `_operand_str()` projects >2D tile shapes to 2D at emission time
+   - `_linearize_offsets()` computes linearized free-dim offset using base shape strides
+   - All emitted NISA ops use 2D memref types and 2D access patterns
+   - Function signatures/return types projected to 2D for NISA consumption
 
-5. **Update NISA backend** (`access.py`):
-   - `_get_base_and_offsets()` reads `#nkipy.sbuf_map` attr, applies factorization, emits address arith
-   - Delete: the entire chain-walking loop
+6. **Update KB backend** (`emit_indexing.py`) — pre-existing partition alignment bug:
+   - KB still uses strides instead of sbuf_map for physical addressing
+   - The `test_3d_add_chain` failure (`'nisa.tensor_tensor_arith' op SBUF partition alignment`) is a KB bug where it mis-computes partition offsets for >2D SBUF tiles
+   - Fix: KB should read sbuf_map attr and compute physical addresses from it (same approach as NISA)
 
-6. **Delete `finalize.py` HBM reshape folding** — HBM allocs have no sbuf_map attr (logical == physical).
+7. ✅ **Delete `finalize.py` HBM reshape folding** — already done in textual NISA codegen rewrite (no more `finalize.py`).
 
-### Phase 3: Handle NISA Constraints (1 week)
+### Phase 3: Handle NISA Constraints (partially done)
 
-7. **Ensure no runtime mod reaches NISA**:
-   - Add a verifier after tiling: subview offsets must be multiples of the layout block sizes
-   - If tiling produces a non-aligned access (which it shouldn't — tiling is layout-aware), error early with a clear message instead of silently generating bad code
-   - For point indices (constant offsets like `head_idx=2`), the mod resolves at compile time — emit the result as a constant
+8. ✅ **2D projection at emission time** — no runtime mod/div reaches NISA:
+   - Tile-aligned offsets → exact division, mod = 0 (offsets are always loop IVs * tile_size)
+   - The linearization is just `offset[i] * stride[i]` — no div/mod needed
 
-8. **Transpose handling**: NISA `dma_transpose` needs explicit stride info. With `#nkipy.sbuf_map`, the backend knows the physical strides from the factorization — it can decide transpose legality without walking chains.
+9. **Transpose handling** (future): NISA `dma_transpose` needs explicit stride info. With `#nkipy.sbuf_map`, the backend knows physical strides from the factorization.
 
-### Phase 4: Cleanup & Harden (1 week)
+### Phase 4: Cleanup & Harden (future)
 
-9. **Delete dead code**: `_compose_chain` (KB), `_get_base_and_offsets` chain loop (NISA), the `_PASSTHROUGH_VIEW_OPS` mechanism, `_SILENT_SKIP` entries for collapse/expand
-10. **Add verifier**: reject any `memref.collapse_shape` / `memref.expand_shape` in the IR after legalize-layout (they should no longer exist)
-11. **Migration tests**: run full test suite, compare generated code before/after
+10. **Delete dead code**: old chain-walking code is already gone from NISA backend. KB backend still has it (will be cleaned when KB reads sbuf_map).
+11. **Add verifier** (future): reject collapse_shape/expand_shape on SBUF memrefs after legalize-layout.
+12. **`nkipy.slice` op** (deferred): originally proposed as a replacement for `memref.subview` on sbuf_map memrefs. Not needed for now — MLIR's `memref.subview` works fine since backends trace through to base alloc anyway. Revisit if subview interactions become complex.
 
 
 ---
@@ -420,10 +428,49 @@ memref<512x512xf32, #nkipy.sbuf_map<[128, 4], [4, 128]>, #sbuf>
 
 ---
 
-## 6. Open Questions
+## 6. Key Design Decisions (2026-06-22)
+
+### 6.1 No IR-level 2D flattening
+
+We initially added a `flattenTileAllocsTo2D` phase to `legalize-layout` that physically rewrote >2D SBUF tile allocs to 2D with `expand_shape` bridges. This was **removed** because:
+
+1. It introduced the same collapse/expand chains the doc is trying to eliminate
+2. The NISA emitter had to trace through them (more chain-walking code)
+3. Offset linearization for HBM needed `collapse_shape` on the HBM side of copies
+
+**Resolution:** The IR stays at logical rank. The NISA emitter does 2D projection at text-emission time — trivial string-level operation plus a few `arith.muli`/`arith.addi` for offset linearization. No reshape ops, no view chains.
+
+### 6.2 Everything is 2D in NISA output
+
+NISA strictly requires 2D types, tile shapes, and access patterns. The emitter projects ALL memrefs (SBUF and HBM) to 2D in the output:
+- Function args: `memref<256x2x256xf32>` → `memref<256x512xf32>`
+- Tile shapes: `128x1x128` → `<128| 128>`
+- Offsets: 3D `[%iv*128, %j, %k*128]` → linearized 2D `[%iv*128, %j*256 + %k*128]`
+
+The test harness reshapes HW output back to expected shape for comparison.
+
+### 6.3 `sbuf_map` is only for resident multi-block buffers
+
+Single-tile SBUF temporaries (the common case) have NO sbuf_map attr — they're already one tile, one block. Only multi-block resident SBUF buffers (full-buffer loads from HBM that span multiple tiles) get sbuf_map. This simplifies the common path: most SBUF allocs are just `memref<128x128xf32, 3>` with no layout attr.
+
+---
+
+## 7. Open Questions
 
 1. **User reshapes: new factorization or copy?** If the user writes `np.reshape(x, (batch, heads, seq, dim))`, should this produce an `nkipy.slice` with an updated sbuf_map attr, or an alloc+copy with a new factorization? Rule of thumb: if the reshape aligns to factor boundaries → slice (zero cost). Otherwise → copy.
 
 2. **HBM:** No partition structure → no `#nkipy.sbuf_map` needed. HBM memrefs keep plain `memref.subview` (logical == physical, no factorization).
 
 3. **Transpose:** Currently `SimplifyLinalg` inserts subview+collapse for >2D transposes. With sbuf_map attrs, transpose could be expressed as a factor permutation (swap physical dim order in the attr) rather than new ops. Worth exploring.
+
+---
+
+## 8. Future Simplifications
+
+1. **Merge `_trace_access` and `_base_type`** in the NISA emitter — they walk the same chain. Cache the result or combine into one traversal.
+
+2. **Constant-fold zero-offset linearization** — the SBUF side of a DMA always has offsets `[0, 0, 0]`, so the linearized free offset is always 0. The emitter currently emits `%c0 * 128 + %c0 = %c0` with unnecessary arith ops. A peephole: if all free-dim offsets are the same `%c0` constant, skip the linearization and just use that constant directly.
+
+3. **KB backend needs sbuf_map support** — the kernel_builder backend still uses strides for physical addressing. Once it reads `sbuf_map` directly (like NISA does), the `emit_indexing.py` chain-walking code (~360 lines) can be deleted.
+
+4. **Verifier pass** — add a post-legalize-layout verifier that rejects `memref.collapse_shape` / `memref.expand_shape` on SBUF memrefs. These should never appear after legalization.

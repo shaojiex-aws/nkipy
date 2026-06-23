@@ -128,7 +128,6 @@ CHECK: return{{.*}}4 : i32
 # ============================================================================
 
 MLIR_3D_SBUF_COPY = '''
-#map = affine_map<(d0, d1, d2) -> (d0, d1, d2)>
 module {
   func.func @test_3d_copy(
       %arg0: memref<256x2x64xf32, strided<[?, ?, ?], offset: ?>, 4 : i32>,
@@ -147,7 +146,7 @@ module {
 
     %alloc_out = memref.alloc() {alignment = 64 : i64} : memref<256x2x64xf32, 3 : i32>
 
-    // Linalg ops use 3D operands directly (Phase 4 handles collapse to 2D)
+    // Linalg ops use 3D operands; legalize-layout flattens tile allocs to 2D
     scf.for %i = %c0 to %c2 step %c1 {
       %off = arith.muli %i, %c128 : index
       scf.for %j = %c0 to %c2 step %c1 {
@@ -164,16 +163,10 @@ module {
           to memref<128x1x64xf32, strided<[128, 64, 1], offset: ?>, 3 : i32>
 
         %tile_out = memref.alloc() {alignment = 64 : i64} : memref<128x1x64xf32, 3 : i32>
-        linalg.generic {indexing_maps = [#map, #map, #map],
-                         iterator_types = ["parallel", "parallel", "parallel"]}
-          ins(%tile_a, %sv_b
+        linalg.add ins(%tile_a, %sv_b
             : memref<128x1x64xf32, 3 : i32>,
               memref<128x1x64xf32, strided<[128, 64, 1], offset: ?>, 3 : i32>)
-          outs(%tile_out : memref<128x1x64xf32, 3 : i32>) {
-        ^bb0(%in: f32, %in_1: f32, %out: f32):
-          %add = arith.addf %in, %in_1 : f32
-          linalg.yield %add : f32
-        }
+          outs(%tile_out : memref<128x1x64xf32, 3 : i32>)
 
         %sv_out = memref.subview %alloc_out[%off, %j, 0] [128, 1, 64] [1, 1, 1]
           : memref<256x2x64xf32, 3 : i32>
@@ -210,7 +203,7 @@ CHECK: scf.for
 CHECK: scf.for
 CHECK: scf.for
 CHECK: memref.copy{{.*}}4 : i32>{{.*}}to{{.*}}3 : i32>
-CHECK: linalg.generic
+CHECK: linalg.add
 CHECK: return{{.*}}4 : i32
 '''
     run_filecheck(result, check_patterns)

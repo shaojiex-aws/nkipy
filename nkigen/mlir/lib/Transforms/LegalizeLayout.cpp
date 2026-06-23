@@ -248,13 +248,23 @@ struct NkipyLegalizeLayoutPass
       return;
     }
 
-    // Phase 4: Decompose linalg.fill on HBM
+    // Phase 4: Decompose HBM fills into SBUF fill + tiled DMA.
+    // HBM has no direct fill engine — we stage through an SBUF buffer:
+    //   linalg.fill(scalar, hbm_buf)
+    //     → alloc sbuf_tile
+    //     → linalg.fill(scalar, sbuf_tile)
+    //     → loop { memref.copy sbuf_tile[block] → hbm_buf[block] }
     decomposeHbmFills(func);
 
     if (hasError) {
       signalPassFailure();
       return;
     }
+
+    // Note: >2D tile-sized SBUF allocs are NOT flattened in the IR.
+    // The NISA emitter handles 2D projection at emission time (dim0=partition,
+    // product(dim1..R-1)=free). This keeps the IR clean and avoids
+    // collapse_shape/expand_shape view chains.
 
     eraseAllLayoutOps(func);
     llvm::errs() << "[LegalizeLayout] Pass completed successfully\n";
@@ -728,8 +738,13 @@ struct NkipyLegalizeLayoutPass
     op.erase();
   }
 
+
   //===--------------------------------------------------------------------===//
   // Phase 4: Decompose HBM fills
+  // HBM has no direct fill engine. This decomposes linalg.fill on HBM into:
+  //   1. alloc an SBUF tile
+  //   2. linalg.fill the SBUF tile
+  //   3. loop { DMA copy SBUF tile → HBM block }
   //===--------------------------------------------------------------------===//
 
   void decomposeHbmFills(func::FuncOp func) {
