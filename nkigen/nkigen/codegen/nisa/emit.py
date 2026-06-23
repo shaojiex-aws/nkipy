@@ -8,6 +8,8 @@ from __future__ import annotations
 
 from mlir import ir as up_ir  # type: ignore[import-not-found]
 
+from nkigen._mlir._mlir_libs._nkipy import nkipy as _nkipy_native
+
 from .. import irutils
 
 _MEMSPACE_STR = {
@@ -89,23 +91,52 @@ class NisaEmitter:
 
         HBM keeps its original rank. SBUF/PSUM are projected to 2D
         (partition x free) since tile allocs are always 2D.
+        For SBUF with sbuf_map, uses physical dimensions from the map.
         """
         mrt = up_ir.MemRefType(ty)
         dims = list(mrt.shape)
         elem = str(mrt.element_type)
         ms = irutils.memref_memspace(ty)
         ms_str = _MEMSPACE_STR.get(ms, "")
-        if ms in (irutils.MEMSPACE_SBUF, irutils.MEMSPACE_PSUM) and len(dims) > 2:
-            par = dims[0]
-            free = 1
-            for d in dims[1:]:
-                free *= d
-            shape = f"{par}x{free}"
+        if ms in (irutils.MEMSPACE_SBUF, irutils.MEMSPACE_PSUM):
+            layout = mrt.layout
+            if _nkipy_native.SbufMapAttr.isinstance(layout):
+                # Physical alloc = full logical shape, folded if par > 128
+                logical_par = dims[0]
+                logical_free = 1
+                for d in dims[1:]:
+                    logical_free *= d
+                if logical_par > 128:
+                    par = 128
+                    free = (logical_par // 128) * logical_free
+                else:
+                    par = logical_par
+                    free = logical_free
+                shape = f"{par}x{free}"
+            elif len(dims) > 2:
+                # Strip leading unit dims (temp SBUF from loop tiling)
+                while len(dims) > 2 and dims[0] == 1:
+                    dims = dims[1:]
+                par = dims[0]
+                free = 1
+                for d in dims[1:]:
+                    free *= d
+                shape = f"{par}x{free}"
+            else:
+                shape = "x".join(str(d) for d in dims)
         else:
             shape = "x".join(str(d) for d in dims)
         if ms_str:
             return f"memref<{shape}x{elem}, {ms_str}>"
         return f"memref<{shape}x{elem}>"
+
+    def _has_sbuf_map(self, ty: up_ir.Type) -> bool:
+        layout = up_ir.MemRefType(ty).layout
+        return _nkipy_native.SbufMapAttr.isinstance(layout)
+
+    def _get_sbuf_map(self, ty: up_ir.Type):
+        layout = up_ir.MemRefType(ty).layout
+        return _nkipy_native.SbufMapAttr(layout)
 
     # -- top-level --
 
@@ -279,16 +310,21 @@ class NisaEmitter:
             op = owner.opview if hasattr(owner, "opview") else owner
             op_name = getattr(op, "name", None)
 
-            if op_name in ("memref.collapse_shape", "memref.expand_shape",
-                           "memref.reinterpret_cast"):
+            if op_name == "memref.reinterpret_cast":
                 base = op.operation.operands[0]
                 continue
+
+            if op_name in ("memref.collapse_shape", "memref.expand_shape"):
+                break
 
             if op_name == "memref.subview":
                 source = op.operation.operands[0]
                 src_rank = up_ir.MemRefType(source.type).rank
+                result_rank = up_ir.MemRefType(op.operation.results[0].type).rank
                 static_offsets_attr = op.operation.attributes["static_offsets"]
                 static_offsets = [int(x) for x in static_offsets_attr]
+                static_sizes_attr = op.operation.attributes["static_sizes"]
+                static_sizes = [int(x) for x in static_sizes_attr]
                 dyn_ops = list(op.operation.operands)[1:]
                 dyn_idx = 0
 
@@ -306,9 +342,20 @@ class NisaEmitter:
                 if offsets is None:
                     offsets = sv_offsets
                 else:
-                    new_offsets = []
-                    for i in range(min(len(offsets), len(sv_offsets))):
-                        new_offsets.append(self._emit_addi(offsets[i], sv_offsets[i]))
+                    # Rank-reducing subview: align inner offsets to kept dims
+                    if result_rank < src_rank:
+                        kept_dims = [i for i in range(src_rank)
+                                     if static_sizes[i] != 1]
+                        new_offsets = list(sv_offsets)
+                        for j, src_dim in enumerate(kept_dims):
+                            if j < len(offsets):
+                                new_offsets[src_dim] = self._emit_addi(
+                                    offsets[j], sv_offsets[src_dim])
+                    else:
+                        new_offsets = []
+                        for i in range(min(len(offsets), len(sv_offsets))):
+                            new_offsets.append(
+                                self._emit_addi(offsets[i], sv_offsets[i]))
                     offsets = new_offsets
 
                 base = source
@@ -336,6 +383,16 @@ class NisaEmitter:
         self._line(f"{result} = arith.addi {a}, {b} : index")
         return result
 
+    def _emit_muli(self, a: str, b: str) -> str:
+        result = self._fresh()
+        self._line(f"{result} = arith.muli {a}, {b} : index")
+        return result
+
+    def _emit_divui(self, a: str, b: str) -> str:
+        result = self._fresh()
+        self._line(f"{result} = arith.divui {a}, {b} : index")
+        return result
+
     def _operand_str(self, val: up_ir.Value, prefix: str) -> str:
         """Build operand string: prefix<tile_shape>=memloc_ref[subscripts]
 
@@ -348,37 +405,84 @@ class NisaEmitter:
         ms = irutils.memref_memspace(base_type)
         is_onchip = ms in (irutils.MEMSPACE_SBUF, irutils.MEMSPACE_PSUM)
         base_shape = list(up_ir.MemRefType(base_type).shape)
-        rank = len(tile_shape)
+        base_rank = len(base_shape)
 
-        if rank > 2:
+        # HBM with >2D base memref needs view() regardless of tile rank.
+        # A rank-reducing subview gives a 2D tile but the memref is still >2D.
+        needs_view = not is_onchip and base_rank > 2
+
+        if needs_view:
+            # Find the first accessed dim (tile size > 1) — this splits
+            # the base into [batch... | accessed_row | accessed_col...]
+            first_accessed = 0
+            for i, t in enumerate(tile_shape):
+                if t > 1:
+                    first_accessed = i
+                    break
+
+            par = tile_shape[first_accessed]
+            free = 1
+            for d in tile_shape[first_accessed + 1:]:
+                free *= d
+            tile_str = f"{par}| {free}"
+
+            view_c = 1
+            for d in base_shape[first_accessed + 1:]:
+                view_c *= d
+            view_r = 1
+            for d in base_shape[:first_accessed + 1]:
+                view_r *= d
+
+            row_offset = self._linearize_offsets(
+                offsets[:first_accessed + 1], base_shape[:first_accessed + 1])
+            if first_accessed + 1 < len(offsets):
+                col_offset = self._linearize_offsets(
+                    offsets[first_accessed + 1:], base_shape[first_accessed + 1:])
+            else:
+                col_offset = self._emit_const_index(0)
+            dims = [f"{row_offset} + d0", f"{col_offset} + d1"]
+
+            orig_ty = self._memref_type_str_nisa(base_type)
+            elem = str(up_ir.MemRefType(base_type).element_type)
+            memloc_ref = (
+                f"view({orig_ty} {base_name}, {elem}, [{view_r}, {view_c}])"
+            )
+        elif is_onchip and self._has_sbuf_map(base_type):
+            # Multi-block SBUF: remap logical offsets to physical 2D
+            sbuf_map = self._get_sbuf_map(base_type)
             par = tile_shape[0]
             free = 1
             for d in tile_shape[1:]:
                 free *= d
             tile_str = f"{par}| {free}"
 
-            par_offset = offsets[0] if offsets else self._emit_const_index(0)
-            if len(offsets) > 1:
-                free_offset = self._linearize_offsets(offsets[1:], base_shape[1:])
+            par_offset, free_offset = self._remap_sbuf_offsets(offsets, sbuf_map)
+            dims = [f"{par_offset} + d0", f"{free_offset} + d1"]
+            memloc_ref = f"{self._memref_type_str_nisa(base_type)} {base_name}"
+        elif is_onchip and len(tile_shape) > 2:
+            # On-chip >2D tile without sbuf_map: strip leading 1s, flatten to 2D
+            skip = 0
+            while skip < len(tile_shape) - 2 and tile_shape[skip] == 1:
+                skip += 1
+            par = tile_shape[skip]
+            free = 1
+            for d in tile_shape[skip + 1:]:
+                free *= d
+            tile_str = f"{par}| {free}"
+
+            if skip > 0:
+                par_offset = offsets[skip] if skip < len(offsets) else self._emit_const_index(0)
+            else:
+                par_offset = offsets[0] if offsets else self._emit_const_index(0)
+            remaining_offsets = offsets[skip + 1:]
+            remaining_shape = base_shape[skip + 1:]
+            if remaining_offsets:
+                free_offset = self._linearize_offsets(remaining_offsets, remaining_shape)
             else:
                 free_offset = self._emit_const_index(0)
             dims = [f"{par_offset} + d0", f"{free_offset} + d1"]
-
-            if is_onchip:
-                # SBUF/PSUM: _memref_type_str_nisa already projects to 2D
-                memloc_ref = f"{self._memref_type_str_nisa(base_type)} {base_name}"
-            else:
-                # HBM: use view() to reinterpret >2D as 2D
-                orig_ty = self._memref_type_str_nisa(base_type)
-                elem = str(up_ir.MemRefType(base_type).element_type)
-                flat_par = base_shape[0]
-                flat_free = 1
-                for d in base_shape[1:]:
-                    flat_free *= d
-                memloc_ref = (
-                    f"view({orig_ty} {base_name}, {elem}, [{flat_par}, {flat_free}])"
-                )
-        elif rank == 2:
+            memloc_ref = f"{self._memref_type_str_nisa(base_type)} {base_name}"
+        elif len(tile_shape) == 2:
             tile_str = f"{tile_shape[0]}| {tile_shape[1]}"
             dims = []
             for i in range(2):
@@ -451,6 +555,31 @@ class NisaEmitter:
             self._line(f"{add_result} = arith.addi {result}, {t} : index")
             result = add_result
         return result
+
+    def _remap_sbuf_offsets(self, offsets: list[str], sbuf_map) -> tuple[str, str]:
+        """Remap logical offsets to physical 2D for folded SBUF.
+
+        If tile[0] > 128, physical alloc is [128, (tile[0]/128)*tile[1]].
+        Logical [i, j] → physical [0, (i/128)*tile[1] + j].
+        Tiling guarantees i is always a multiple of 128 (exact division, no mod).
+
+        If tile[0] <= 128, no folding — physical [i, j] directly.
+        """
+        tile_par = sbuf_map.tile_size(0)
+        tile_free = sbuf_map.tile_size(sbuf_map.rank - 1)
+
+        if tile_par <= 128:
+            return offsets[0], offsets[-1]
+
+        # Folded case: par_offset = 0, free_offset = (i / 128) * tile_free + j
+        par_offset = self._emit_const_index(0)
+        c128 = self._emit_const_index(128)
+        fold_idx = self._emit_divui(offsets[0], c128)
+        c_tile_free = self._emit_const_index(tile_free)
+        fold_contrib = self._emit_muli(fold_idx, c_tile_free)
+        free_offset = self._emit_addi(fold_contrib, offsets[-1])
+
+        return par_offset, free_offset
 
 
     # -- data movement --
