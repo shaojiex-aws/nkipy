@@ -394,60 +394,6 @@ struct NkipyLegalizeLayoutPass
         continue;
       }
 
-      // Middle tile sizes (dims 1..R-2) must all be 1
-      if (R > 2) {
-        bool middleTilesUnit = true;
-        for (int64_t i = 1; i < R - 1; i++) {
-          if (refTile[i] != 1) {
-            middleTilesUnit = false;
-            break;
-          }
-        }
-        if (!middleTilesUnit) {
-          if (numBlocks[0] > 1) {
-            llvm::errs() << "  -> Converting " << memrefType
-                         << " to SharedHbm (non-unit middle tile)\n";
-            auto hbmMemSpace = nkipy::MemSpaceEnumAttr::get(
-                allocOp.getContext(), nkipy::MemSpaceEnum::SharedHbm);
-            auto newType = MemRefType::get(
-                memrefType.getShape(), memrefType.getElementType(),
-                memrefType.getLayout(), hbmMemSpace);
-            OpBuilder builder(allocOp);
-            builder.setInsertionPointAfter(allocOp);
-            auto newAlloc = builder.create<memref::AllocOp>(
-                allocOp.getLoc(), newType, allocOp.getAlignmentAttr());
-            allocOp.replaceAllUsesWith(newAlloc.getResult());
-            allocOp.erase();
-
-            SmallVector<memref::SubViewOp> worklist;
-            for (auto *user : newAlloc.getResult().getUsers())
-              if (auto sv = dyn_cast<memref::SubViewOp>(user))
-                worklist.push_back(sv);
-            while (!worklist.empty()) {
-              auto sv = worklist.pop_back_val();
-              OpBuilder svBuilder(sv);
-              svBuilder.setInsertionPointAfter(sv);
-              auto origResultType = sv.getType();
-              auto newResultType = MemRefType::get(
-                  origResultType.getShape(),
-                  origResultType.getElementType(),
-                  origResultType.getLayout(), hbmMemSpace);
-              auto newSv = svBuilder.create<memref::SubViewOp>(
-                  sv.getLoc(), newResultType, sv.getSource(),
-                  sv.getMixedOffsets(), sv.getMixedSizes(),
-                  sv.getMixedStrides());
-              for (auto *user : sv.getResult().getUsers())
-                if (auto nested = dyn_cast<memref::SubViewOp>(user))
-                  worklist.push_back(nested);
-              sv.replaceAllUsesWith(newSv.getResult());
-              sv.erase();
-            }
-          } else {
-            llvm::errs() << "  -> Skipping (non-unit middle tile)\n";
-          }
-          continue;
-        }
-      }
 
       LayoutInfo info;
       info.originalValue = allocOp.getResult();

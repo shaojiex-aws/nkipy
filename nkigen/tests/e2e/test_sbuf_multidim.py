@@ -59,7 +59,6 @@ def test_4d_temp_sbuf_multiple_leading_ones():
     )
 
 
-@pytest.mark.xfail(reason="user SBUF with partition_dim needs upstream pass fixes (4b/4c)")
 def test_3d_user_sbuf_partition_dim0():
     """
     User pins intermediate to SBUF with partition_dim=0.
@@ -89,7 +88,7 @@ def test_3d_user_sbuf_partition_dim0():
     )
 
 
-@pytest.mark.xfail(reason="user SBUF with partition_dim needs upstream pass fixes (4b/4c)")
+@pytest.mark.xfail(reason="partition_dim=1 inserts SBUF transpose not yet handled by emitter")
 def test_3d_user_sbuf_partition_dim1():
     """
     User pins intermediate to SBUF with partition_dim=1.

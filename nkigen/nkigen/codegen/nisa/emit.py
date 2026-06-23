@@ -557,27 +557,35 @@ class NisaEmitter:
         return result
 
     def _remap_sbuf_offsets(self, offsets: list[str], sbuf_map) -> tuple[str, str]:
-        """Remap logical offsets to physical 2D for folded SBUF.
+        """Remap logical N-D offsets to physical 2D [partition, free] for SBUF with sbuf_map.
 
-        If tile[0] > 128, physical alloc is [128, (tile[0]/128)*tile[1]].
-        Logical [i, j] → physical [0, (i/128)*tile[1] + j].
-        Tiling guarantees i is always a multiple of 128 (exact division, no mod).
+        Dim 0 = partition. Dims 1..N-1 linearize into free using the sbuf_map
+        tile sizes as strides.
 
-        If tile[0] <= 128, no folding — physical [i, j] directly.
+        If tile[0] > 128, partition is folded: physical alloc is [128, (tile[0]/128)*free].
+        Logical [i, ...] → physical [0, (i/128)*total_free + linearize(rest)].
         """
         tile_par = sbuf_map.tile_size(0)
-        tile_free = sbuf_map.tile_size(sbuf_map.rank - 1)
+        rank = sbuf_map.rank
+
+        # Linearize dims 1..N-1 into free offset using tile sizes as dim extents
+        free_dims = [sbuf_map.tile_size(i) for i in range(1, rank)]
+        free_offsets = offsets[1:]
+        free_offset = self._linearize_offsets(free_offsets, free_dims)
 
         if tile_par <= 128:
-            return offsets[0], offsets[-1]
+            return offsets[0], free_offset
 
-        # Folded case: par_offset = 0, free_offset = (i / 128) * tile_free + j
+        # Folded case: par_offset = 0, free_offset = (i / 128) * total_free + linearize(rest)
         par_offset = self._emit_const_index(0)
+        total_free = 1
+        for d in free_dims:
+            total_free *= d
         c128 = self._emit_const_index(128)
         fold_idx = self._emit_divui(offsets[0], c128)
-        c_tile_free = self._emit_const_index(tile_free)
-        fold_contrib = self._emit_muli(fold_idx, c_tile_free)
-        free_offset = self._emit_addi(fold_contrib, offsets[-1])
+        c_total_free = self._emit_const_index(total_free)
+        fold_contrib = self._emit_muli(fold_idx, c_total_free)
+        free_offset = self._emit_addi(fold_contrib, free_offset)
 
         return par_offset, free_offset
 

@@ -109,8 +109,10 @@ The pass that creates HBM→SBUF copies must produce 2D allocs. Take the source 
 
 Files: need to identify which pass creates these (bufferization or annotate-memory-space)
 
-### Step 4c: Remove LegalizeLayout "middle dims must be unit" restriction
+### Step 4c: Remove LegalizeLayout "middle dims must be unit" restriction ✅
 
-Currently LegalizeLayout converts SBUF to HBM if the tile has non-unit middle dims. Remove this. Any tile shape should work: first non-unit dim = partition, rest = free. This enables sbuf_map on arbitrary >2D tiles like `[1, 128, 64, 2, 1]`.
+Removed the block that converted SBUF allocs to SharedHBM when middle tile dims were non-unit. Any tile shape now gets `sbuf_map` attached and goes through copy-tiling normally. The emitter handles the physical 2D mapping regardless of tile shape.
+
+Files: `mlir/lib/Transforms/LegalizeLayout.cpp`
 
 Files: `mlir/lib/Transforms/LegalizeLayout.cpp` (lines ~397-449)
