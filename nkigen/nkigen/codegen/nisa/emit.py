@@ -84,13 +84,25 @@ class NisaEmitter:
     def _set_name(self, val: up_ir.Value, name: str) -> None:
         self._names[val] = name
 
-    def _memref_type_str(self, ty: up_ir.Type) -> str:
-        """Render a memref type with NISA memspace."""
+    def _memref_type_str_nisa(self, ty: up_ir.Type) -> str:
+        """Render memref type for NISA emission.
+
+        HBM keeps its original rank. SBUF/PSUM are projected to 2D
+        (partition x free) since tile allocs are always 2D.
+        """
         mrt = up_ir.MemRefType(ty)
-        shape = "x".join(str(d) for d in mrt.shape)
+        dims = list(mrt.shape)
         elem = str(mrt.element_type)
         ms = irutils.memref_memspace(ty)
         ms_str = _MEMSPACE_STR.get(ms, "")
+        if ms in (irutils.MEMSPACE_SBUF, irutils.MEMSPACE_PSUM) and len(dims) > 2:
+            par = dims[0]
+            free = 1
+            for d in dims[1:]:
+                free *= d
+            shape = f"{par}x{free}"
+        else:
+            shape = "x".join(str(d) for d in dims)
         if ms_str:
             return f"memref<{shape}x{elem}, {ms_str}>"
         return f"memref<{shape}x{elem}>"
@@ -119,9 +131,9 @@ class NisaEmitter:
         for i, arg in enumerate(block.arguments):
             name = f"%arg{i}"
             self._set_name(arg, name)
-            params.append(f"{name}: {self._memref_type_str(arg.type)}")
+            params.append(f"{name}: {self._memref_type_str_nisa(arg.type)}")
 
-        results = [self._memref_type_str(t) for t in func_ty.results]
+        results = [self._memref_type_str_nisa(t) for t in func_ty.results]
         ret_str = f' -> {results[0]}' if len(results) == 1 else ""
         if len(results) > 1:
             ret_str = f' -> ({", ".join(results)})'
@@ -227,7 +239,7 @@ class NisaEmitter:
         operands = list(op.operands)
         if operands:
             vals = ", ".join(self._name(o) for o in operands)
-            types = ", ".join(self._memref_type_str(o.type) for o in operands)
+            types = ", ".join(self._memref_type_str_nisa(o.type) for o in operands)
             self._line(f"return {vals} : {types}")
         else:
             self._line("return")
@@ -236,7 +248,7 @@ class NisaEmitter:
 
     def _emit_alloc(self, op: up_ir.Operation) -> None:
         result = op.results[0]
-        ty_str = self._memref_type_str(result.type)
+        ty_str = self._memref_type_str_nisa(result.type)
         name = self._fresh("mem")
         self._set_name(result, name)
         self._line(f"{name} = nisa.alloc alignment=64 : {ty_str}")
@@ -247,15 +259,15 @@ class NisaEmitter:
         if ms not in (irutils.MEMSPACE_SBUF, irutils.MEMSPACE_PSUM):
             return
         name = self._name(target)
-        ty_str = self._memref_type_str(target.type)
+        ty_str = self._memref_type_str_nisa(target.type)
         self._line(f"nisa.release {name} : {ty_str}")
 
     # -- access tracing --
 
-    def _trace_access(self, val: up_ir.Value) -> tuple[str, list[str], list[int]]:
+    def _trace_access(self, val: up_ir.Value) -> tuple[str, list[str], list[int], up_ir.Type]:
         """Trace a memref value back to its base, collecting offsets.
 
-        Returns (base_name, offset_exprs, tile_shape).
+        Returns (base_name, offset_exprs, tile_shape, base_type).
         """
         base = val
         offsets: list[str | None] = None
@@ -266,6 +278,11 @@ class NisaEmitter:
                 break
             op = owner.opview if hasattr(owner, "opview") else owner
             op_name = getattr(op, "name", None)
+
+            if op_name in ("memref.collapse_shape", "memref.expand_shape",
+                           "memref.reinterpret_cast"):
+                base = op.operation.operands[0]
+                continue
 
             if op_name == "memref.subview":
                 source = op.operation.operands[0]
@@ -300,13 +317,14 @@ class NisaEmitter:
             break
 
         base_name = self._name(base)
+        base_type = base.type
         tile_shape = list(up_ir.MemRefType(val.type).shape)
 
         if offsets is None:
-            base_ty = up_ir.MemRefType(base.type)
+            base_ty = up_ir.MemRefType(base_type)
             offsets = [self._emit_const_index(0) for _ in range(base_ty.rank)]
 
-        return base_name, offsets, tile_shape
+        return base_name, offsets, tile_shape, base_type
 
     def _emit_const_index(self, val: int) -> str:
         name = self._fresh(f"c{val}")
@@ -319,40 +337,100 @@ class NisaEmitter:
         return result
 
     def _operand_str(self, val: up_ir.Value, prefix: str) -> str:
-        """Build operand string: prefix<par| free>=type base[offsets + d0, ...]"""
-        base_name, offsets, tile_shape = self._trace_access(val)
-        base_ty = self._memref_type_str(self._base_type(val))
+        """Build operand string: prefix<tile_shape>=memloc_ref[subscripts]
+
+        BIR requires dma_copy src/dst to have matching rank. Since SBUF is
+        always 2D, >2D operands are projected to 2D:
+        - SBUF/PSUM: emitted type is already 2D, no view() needed
+        - HBM: uses view() to reinterpret the >2D memref as 2D
+        """
+        base_name, offsets, tile_shape, base_type = self._trace_access(val)
+        ms = irutils.memref_memspace(base_type)
+        is_onchip = ms in (irutils.MEMSPACE_SBUF, irutils.MEMSPACE_PSUM)
+        base_shape = list(up_ir.MemRefType(base_type).shape)
         rank = len(tile_shape)
 
-        if rank >= 2:
-            tile_str = f"{tile_shape[0]}| {' '.join(str(s) for s in tile_shape[1:])}"
+        if rank > 2:
+            par = tile_shape[0]
+            free = 1
+            for d in tile_shape[1:]:
+                free *= d
+            tile_str = f"{par}| {free}"
+
+            par_offset = offsets[0] if offsets else self._emit_const_index(0)
+            if len(offsets) > 1:
+                free_offset = self._linearize_offsets(offsets[1:], base_shape[1:])
+            else:
+                free_offset = self._emit_const_index(0)
+            dims = [f"{par_offset} + d0", f"{free_offset} + d1"]
+
+            if is_onchip:
+                # SBUF/PSUM: _memref_type_str_nisa already projects to 2D
+                memloc_ref = f"{self._memref_type_str_nisa(base_type)} {base_name}"
+            else:
+                # HBM: use view() to reinterpret >2D as 2D
+                orig_ty = self._memref_type_str_nisa(base_type)
+                elem = str(up_ir.MemRefType(base_type).element_type)
+                flat_par = base_shape[0]
+                flat_free = 1
+                for d in base_shape[1:]:
+                    flat_free *= d
+                memloc_ref = (
+                    f"view({orig_ty} {base_name}, {elem}, [{flat_par}, {flat_free}])"
+                )
+        elif rank == 2:
+            tile_str = f"{tile_shape[0]}| {tile_shape[1]}"
+            dims = []
+            for i in range(2):
+                if i < len(offsets):
+                    dims.append(f"{offsets[i]} + d{i}")
+                else:
+                    dims.append(f"d{i}")
+            memloc_ref = f"{self._memref_type_str_nisa(base_type)} {base_name}"
         else:
             tile_str = f"{tile_shape[0]}"
+            dims = [f"{offsets[0]} + d0"] if offsets else ["d0"]
+            memloc_ref = f"{self._memref_type_str_nisa(base_type)} {base_name}"
 
-        dims = []
-        for i in range(rank):
-            if i < len(offsets):
-                dims.append(f"{offsets[i]} + d{i}")
+        return f"{prefix}<{tile_str}>={memloc_ref}[{', '.join(dims)}]"
+
+    def _linearize_offsets(self, offsets: list[str],
+                           dim_sizes: list[int]) -> str:
+        """Linearize N free-dim offsets into one: off[0]*stride[0] + ... + off[N-1].
+
+        stride[i] = product(dim_sizes[i+1:])
+
+        Optimization: if all offsets are the same zero constant (common for
+        SBUF tiles where the alloc starts at offset 0), skip the arithmetic.
+        """
+        # Fast path: all offsets are the same value (typically %c0 for SBUF tiles)
+        if len(set(offsets)) == 1 and offsets[0].startswith("%c0"):
+            return offsets[0]
+
+        n = len(offsets)
+        strides = [1] * n
+        for i in range(n - 2, -1, -1):
+            strides[i] = strides[i + 1] * dim_sizes[i + 1]
+
+        terms = []
+        for off, stride in zip(offsets, strides):
+            if stride == 1:
+                terms.append(off)
             else:
-                dims.append(f"d{i}")
+                stride_name = self._emit_const_index(stride)
+                mul_result = self._fresh()
+                self._line(f"{mul_result} = arith.muli {off}, {stride_name} : index")
+                terms.append(mul_result)
 
-        return f"{prefix}<{tile_str}>={base_ty} {base_name}[{', '.join(dims)}]"
+        if not terms:
+            return self._emit_const_index(0)
+        result = terms[0]
+        for t in terms[1:]:
+            add_result = self._fresh()
+            self._line(f"{add_result} = arith.addi {result}, {t} : index")
+            result = add_result
+        return result
 
-    def _base_type(self, val: up_ir.Value) -> up_ir.Type:
-        """Get the type of the base alloc/arg this value traces to."""
-        base = val
-        while True:
-            owner = getattr(base, "owner", None)
-            if owner is None:
-                break
-            op = owner.opview if hasattr(owner, "opview") else owner
-            op_name = getattr(op, "name", None)
-            if op_name in ("memref.subview", "memref.collapse_shape",
-                           "memref.expand_shape", "memref.reinterpret_cast"):
-                base = op.operation.operands[0]
-                continue
-            break
-        return base.type
 
     # -- data movement --
 
@@ -389,24 +467,24 @@ class NisaEmitter:
 
     def _emit_staged_copy(self, src, dst, direction: str) -> None:
         """Stage a copy through an sbuf intermediate (psum<->HBM)."""
-        # Use src shape for the intermediate
+        # SBUF intermediate is always 2D (partition x free)
         ref_val = src if direction == "psum_to_hbm" else dst
         tile_shape = list(up_ir.MemRefType(ref_val.type).shape)
         elem = irutils.memref_elem_type(ref_val.type)
-        shape_str = "x".join(str(d) for d in tile_shape) + f"x{elem}"
+        par = tile_shape[0]
+        free = 1
+        for d in tile_shape[1:]:
+            free *= d
+        shape_str = f"{par}x{free}x{elem}"
         sbuf_ty = f"memref<{shape_str}, {_MEMSPACE_STR[irutils.MEMSPACE_SBUF]}>"
 
         tmp = self._fresh("mem")
         self._line(f"{tmp} = nisa.alloc alignment=64 : {sbuf_ty}")
 
-        # Build tmp operand string
-        rank = len(tile_shape)
-        tmp_offsets = [self._emit_const_index(0) for _ in range(rank)]
-        if rank >= 2:
-            tile_str = f"{tile_shape[0]}| {' '.join(str(s) for s in tile_shape[1:])}"
-        else:
-            tile_str = f"{tile_shape[0]}"
-        tmp_dims = ", ".join(f"{tmp_offsets[i]} + d{i}" for i in range(rank))
+        # Build tmp operand string (always 2D)
+        tmp_offsets = [self._emit_const_index(0) for _ in range(2)]
+        tile_str = f"{par}| {free}"
+        tmp_dims = ", ".join(f"{tmp_offsets[i]} + d{i}" for i in range(2))
 
         if direction == "psum_to_hbm":
             # psum -> sbuf (tensor_copy), then sbuf -> HBM (dma_copy)
@@ -667,21 +745,20 @@ class NisaEmitter:
         else:
             # Alloc temp, reduce into temp, accumulate into dst
             dst_shape = list(up_ir.MemRefType(dst.type).shape)
-            ms = irutils.memref_memspace(dst.type)
-            temp_ty = self._memref_type_str(dst.type)
+            par = dst_shape[0]
+            free = 1
+            for d in dst_shape[1:]:
+                free *= d
+            temp_ty = self._memref_type_str_nisa(dst.type)
             temp_name = self._fresh("mem")
             self._line(f"{temp_name} = nisa.alloc : {temp_ty}")
             self._set_name(None, temp_name)  # no SSA value to bind
 
-            # Emit reduce into temp
-            temp_offsets = [self._emit_const_index(0) for _ in range(len(dst_shape))]
-            base_ty = self._memref_type_str(dst.type)
-            rank = len(dst_shape)
-            if rank >= 2:
-                tile_str = f"{dst_shape[0]}| {' '.join(str(s) for s in dst_shape[1:])}"
-            else:
-                tile_str = f"{dst_shape[0]}"
-            temp_dims = ", ".join(f"{temp_offsets[i]} + d{i}" for i in range(rank))
+            # Emit reduce into temp (2D SBUF)
+            temp_offsets = [self._emit_const_index(0) for _ in range(2)]
+            base_ty = temp_ty
+            tile_str = f"{par}| {free}"
+            temp_dims = ", ".join(f"{temp_offsets[i]} + d{i}" for i in range(2))
             temp_operand = f"dst<{tile_str}>={base_ty} {temp_name}[{temp_dims}]"
 
             self._line(
