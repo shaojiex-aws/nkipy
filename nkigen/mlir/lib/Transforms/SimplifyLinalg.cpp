@@ -488,34 +488,18 @@ static void rewriteSbufTransposeTo2D(func::FuncOp func) {
           if (auto dealloc = dyn_cast<memref::DeallocOp>(eu)) {
             dealloc.getMemrefMutable().assign(*val);
           } else if (auto copyOp = dyn_cast<memref::CopyOp>(eu)) {
+            // Replace 3D copy (expand_shape <-> HBM) with 2D copy (sbuf <-> HBM).
+            // The emitter handles the rank mismatch: view() for HBM, 2D for SBUF.
             OpBuilder cb(copyOp);
             Location cl = copyOp.getLoc();
             bool sbufIsDst = (copyOp.getTarget() == expand.getResult());
             Value hbmOperand = sbufIsDst ? copyOp.getSource()
                                          : copyOp.getTarget();
-            auto hbmType = cast<MemRefType>(hbmOperand.getType());
-            int64_t hbmRank = hbmType.getRank();
-
-            // Build a rank-reducing subview: [1,128,128] -> [128,128]
-            SmallVector<OpFoldResult> offsets(hbmRank,
-                                              cb.getI64IntegerAttr(0));
-            SmallVector<OpFoldResult> sizes;
-            for (int64_t s : hbmType.getShape())
-              sizes.push_back(cb.getI64IntegerAttr(s));
-            SmallVector<OpFoldResult> strides(hbmRank,
-                                              cb.getI64IntegerAttr(1));
-
-            auto sbufType = cast<MemRefType>(val->getType());
-            auto hbm2dType = memref::SubViewOp::inferRankReducedResultType(
-                sbufType.getShape(), hbmType, offsets, sizes, strides);
-            auto hbm2d = cb.create<memref::SubViewOp>(
-                cl, cast<MemRefType>(hbm2dType), hbmOperand,
-                offsets, sizes, strides);
 
             if (sbufIsDst) {
-              cb.create<memref::CopyOp>(cl, hbm2d, *val);
+              cb.create<memref::CopyOp>(cl, hbmOperand, *val);
             } else {
-              cb.create<memref::CopyOp>(cl, *val, hbm2d);
+              cb.create<memref::CopyOp>(cl, *val, hbmOperand);
             }
             copyOp.erase();
           }

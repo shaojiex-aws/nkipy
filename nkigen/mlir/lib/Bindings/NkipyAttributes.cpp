@@ -64,4 +64,23 @@ void mlir::python::populateNkipyAttributes(nb::module_ &m) {
           nb::arg("cls"), nb::arg("space"), nb::arg("context").none() = nb::none(),
           "Gets an attribute wrapping a memory space.");
 
+  mlir_attribute_subclass(m, "SbufMapAttr", mlirAttributeIsASbufMap)
+      .def_property_readonly(
+          "rank",
+          [](MlirAttribute self) -> intptr_t {
+            return mlirSbufMapAttrGetRank(self);
+          })
+      .def(
+          "tile_size",
+          [](MlirAttribute self, intptr_t idx) -> int64_t {
+            return mlirSbufMapAttrGetTileSize(self, idx);
+          },
+          nb::arg("idx"))
+      .def(
+          "num_blocks",
+          [](MlirAttribute self, intptr_t idx) -> int64_t {
+            return mlirSbufMapAttrGetNumBlocks(self, idx);
+          },
+          nb::arg("idx"));
+
 }

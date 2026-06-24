@@ -1,7 +1,7 @@
 # RFC: Remove Tensor Dialect — Memref-Native Pipeline
 
 **Date:** 2026-06-22
-**Status:** Proposal
+**Status:** Accepted
 **Priority:** Work Item #1 (prerequisite for KV cache / in-place aliasing)
 
 ## Motivation

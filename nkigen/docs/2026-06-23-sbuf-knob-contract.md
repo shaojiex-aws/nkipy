@@ -138,15 +138,23 @@ Files: `nkigen/frontend/knob.py`
 
 Files: `nkigen/frontend/knob.py`, `mlir/include/nkipy/Dialect/NkipyOps.td`, `mlir/lib/Transforms/KnobDrivenTiling.cpp`, `mlir/lib/Transforms/AnnotateMemorySpace.cpp`
 
-### Step 7: Add `.cache()` fallback for matmul
+### Step 7: Fix multi-block SBUF addressing in emitter ✅
 
-When no `.cache()` is specified for a matmul, the compiler should emit a sensible default: cache LHS at block-M level and RHS at block-N level (current hardcoded behavior). When `.cache()` IS specified, use the user's axes to pick promotion points.
+The NISA emitter's `_remap_sbuf_offsets` only folded partition into free when `tile_par > 128`, but missed the case where `blocks[0] > 1` (multiple partition blocks). This caused out-of-bounds partition accesses for any full-SBUF tensor whose partition dimension exceeded 128 (e.g., 256×256 with tile [128, 128]).
 
-Files: knob-driven-tiling pass, existing matmul tests should continue to pass unchanged
+Fix: guard on `num_par_blocks == 1` instead of `tile_par <= 128`, fold the partition block index into the free dimension. No modulo needed — accesses are always tile-aligned.
 
-### Step 8: Remove legacy "strip leading 1s" workarounds
+Files: `nkigen/codegen/nisa/emit.py` (`_remap_sbuf_offsets`)
 
-Only safe after Step 6 is working. Remove the workarounds that exist because temp SBUF allocs were naively copied from the tile shape:
+### Step 8: Make `.cache()` drive matmul promotion
+
+Currently matmul always uses hardcoded promotion (LHS at block-M, RHS at block-N). When `.cache()` IS specified, use the user's axes to pick promotion points. When not specified, keep the current default.
+
+Files: `mlir/lib/Transforms/KnobDrivenTiling.cpp` (`buildMatmulBlockingTransforms`)
+
+### Step 9: Remove legacy "strip leading 1s" workarounds
+
+Only safe after Step 7 is done. Remove the workarounds that exist because temp SBUF allocs were naively copied from the tile shape:
 
 - 4a: emitter strips leading unit dims (`nkigen/codegen/nisa/emit.py`) — remove
 - 4b: alloc pass strips leading 1s — remove

@@ -18,3 +18,19 @@ MlirAttribute mlirMemSpaceGet(MlirContext ctx, MlirAttribute space) {
       static_cast<MemSpaceEnum>(attr.getInt());
   return wrap(MemSpaceEnumAttr::get(unwrap(ctx), spaceEnum));
 }
+
+bool mlirAttributeIsASbufMap(MlirAttribute attr) {
+  return mlir::isa<SbufMapAttr>(unwrap(attr));
+}
+
+intptr_t mlirSbufMapAttrGetRank(MlirAttribute attr) {
+  return mlir::cast<SbufMapAttr>(unwrap(attr)).getLogicalRank();
+}
+
+int64_t mlirSbufMapAttrGetTileSize(MlirAttribute attr, intptr_t idx) {
+  return mlir::cast<SbufMapAttr>(unwrap(attr)).getTileSize()[idx];
+}
+
+int64_t mlirSbufMapAttrGetNumBlocks(MlirAttribute attr, intptr_t idx) {
+  return mlir::cast<SbufMapAttr>(unwrap(attr)).getNumBlocks()[idx];
+}

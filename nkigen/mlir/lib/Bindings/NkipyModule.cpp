@@ -1,4 +1,5 @@
 #include "nkipy/Transforms/Passes.h"
+#include "nkipy/Bindings/NkipyModule.h"
 #include "nkipy-c/Dialect/Registration.h"
 #include "nkipy-c/Dialect/Dialects.h"
 
@@ -56,6 +57,8 @@ NB_MODULE(_nkipy, m) {
   nkipyMlirRegisterAllPasses();
 
   auto nkipy_m = m.def_submodule("nkipy");
+
+  populateNkipyAttributes(nkipy_m);
 
   nkipy_m.def(
       "register_dialect",

@@ -559,32 +559,36 @@ class NisaEmitter:
     def _remap_sbuf_offsets(self, offsets: list[str], sbuf_map) -> tuple[str, str]:
         """Remap logical N-D offsets to physical 2D [partition, free] for SBUF with sbuf_map.
 
-        Dim 0 = partition. Dims 1..N-1 linearize into free using the sbuf_map
-        tile sizes as strides.
+        Physical shape: [tile[0], blocks[0], ..., blocks[R-1], tile[R-1]]
+        Flattened 2D:   [tile[0], blocks[0] * ... * blocks[R-1] * tile[R-1]]
 
-        If tile[0] > 128, partition is folded: physical alloc is [128, (tile[0]/128)*free].
-        Logical [i, ...] → physical [0, (i/128)*total_free + linearize(rest)].
+        When blocks[0] > 1, the partition offset folds into free as a block index.
+        Accesses are always tile-aligned so within-block partition offset is 0.
         """
         tile_par = sbuf_map.tile_size(0)
+        num_par_blocks = sbuf_map.num_blocks(0)
         rank = sbuf_map.rank
 
-        # Linearize dims 1..N-1 into free offset using tile sizes as dim extents
-        free_dims = [sbuf_map.tile_size(i) for i in range(1, rank)]
+        # Free offset: logical column offsets map directly into the free dimension.
+        # Use full logical extents (tile * blocks) as dim sizes for linearization.
+        free_dims = [sbuf_map.tile_size(i) * sbuf_map.num_blocks(i)
+                     for i in range(1, rank)]
         free_offsets = offsets[1:]
         free_offset = self._linearize_offsets(free_offsets, free_dims)
 
-        if tile_par <= 128:
+        if num_par_blocks == 1:
             return offsets[0], free_offset
 
-        # Folded case: par_offset = 0, free_offset = (i / 128) * total_free + linearize(rest)
-        par_offset = self._emit_const_index(0)
-        total_free = 1
+        # Fold partition block index into free.
+        # Stride = number of free elements per partition-block.
+        stride = 1
         for d in free_dims:
-            total_free *= d
-        c128 = self._emit_const_index(128)
-        fold_idx = self._emit_divui(offsets[0], c128)
-        c_total_free = self._emit_const_index(total_free)
-        fold_contrib = self._emit_muli(fold_idx, c_total_free)
+            stride *= d
+        par_offset = self._emit_const_index(0)
+        c_tile_par = self._emit_const_index(tile_par)
+        block_idx = self._emit_divui(offsets[0], c_tile_par)
+        c_stride = self._emit_const_index(stride)
+        fold_contrib = self._emit_muli(block_idx, c_stride)
         free_offset = self._emit_addi(fold_contrib, free_offset)
 
         return par_offset, free_offset

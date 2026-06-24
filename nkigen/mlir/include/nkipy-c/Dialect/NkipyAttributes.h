@@ -17,6 +17,13 @@ MLIR_CAPI_EXPORTED bool mlirAttributeIsAMemSpace(MlirAttribute attr);
 MLIR_CAPI_EXPORTED MlirAttribute mlirMemSpaceGet(MlirContext ctx,
                                                   MlirAttribute space);
 
+MLIR_CAPI_EXPORTED bool mlirAttributeIsASbufMap(MlirAttribute attr);
+MLIR_CAPI_EXPORTED intptr_t mlirSbufMapAttrGetRank(MlirAttribute attr);
+MLIR_CAPI_EXPORTED int64_t mlirSbufMapAttrGetTileSize(MlirAttribute attr,
+                                                       intptr_t idx);
+MLIR_CAPI_EXPORTED int64_t mlirSbufMapAttrGetNumBlocks(MlirAttribute attr,
+                                                        intptr_t idx);
+
 #ifdef __cplusplus
 }
 #endif
