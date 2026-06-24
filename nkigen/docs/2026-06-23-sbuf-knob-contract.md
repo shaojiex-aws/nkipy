@@ -146,9 +146,11 @@ Fix: guard on `num_par_blocks == 1` instead of `tile_par <= 128`, fold the parti
 
 Files: `nkigen/codegen/nisa/emit.py` (`_remap_sbuf_offsets`)
 
-### Step 8: Make `.cache()` drive matmul promotion
+### Step 8: Make `.cache()` drive matmul promotion levels
 
-Currently matmul always uses hardcoded promotion (LHS at block-M, RHS at block-N). When `.cache()` IS specified, use the user's axes to pick promotion points. When not specified, keep the current default.
+Currently matmul always promotes LHS at block-M and RHS at block-N (hardware requires both in SBUF). The cache annotations are collected but the promotion *level* is fixed. To honor user-specified axes, the tiling structure itself would need to change (e.g., promote RHS at a different loop level than block-N).
+
+This is deferred — the fixed structure works well for the common case and `.cache()` already controls elementwise/reduction promotion.
 
 Files: `mlir/lib/Transforms/KnobDrivenTiling.cpp` (`buildMatmulBlockingTransforms`)
 
