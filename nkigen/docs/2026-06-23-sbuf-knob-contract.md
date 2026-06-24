@@ -122,30 +122,32 @@ The buffer is `128x64` (not `1x128x64`) because dim 0 has extent = loop step at 
 
 ## Implementation Plan
 
-### Step 4 (legacy, will be removed): Emitter >2D SBUF workarounds ✅
+### Step 5: Remove `tile_size` from `.layout()` API ✅
 
-Steps 4a/4b/4c were workarounds for the "strip leading 1s" heuristic when temp SBUF allocs were naively copied from the tile shape. Once `.cache()` is implemented (Step 6), the cache pass produces clean 2D buffers directly — these workarounds become dead code and should be removed.
+Removed the `tile_size` parameter from `_KnobBuilder.layout()`. Physical factorization is always derived from the consuming `tile_op` + indexing maps by `InferLayout`. No test changes needed.
+
+Files: `nkigen/frontend/knob.py`
+
+### Step 6: Implement `.cache()` primitive ✅
+
+- Python frontend: `.cache(input, axis=[], prefetch=False)` on `_KnobBuilder` with axis validation against `tile_op` levels
+- MLIR op: `nkipy.cache` in `NkipyOps.td` (target, input, axes, prefetch)
+- C++ collection: `KnobDrivenTiling` collects CacheOps, resolves operand indices, attaches to `KnobInfo.caches`
+- C++ promotion: elementwise/reduction use cache annotations to selectively promote; fallback to promote-all when no `.cache()` present
+- C++ erasure: `AnnotateMemorySpace` erases CacheOps after consumption
+
+Files: `nkigen/frontend/knob.py`, `mlir/include/nkipy/Dialect/NkipyOps.td`, `mlir/lib/Transforms/KnobDrivenTiling.cpp`, `mlir/lib/Transforms/AnnotateMemorySpace.cpp`
+
+### Step 7: Add `.cache()` fallback for matmul
+
+When no `.cache()` is specified for a matmul, the compiler should emit a sensible default: cache LHS at block-M level and RHS at block-N level (current hardcoded behavior). When `.cache()` IS specified, use the user's axes to pick promotion points.
+
+Files: knob-driven-tiling pass, existing matmul tests should continue to pass unchanged
+
+### Step 8: Remove legacy "strip leading 1s" workarounds
+
+Only safe after Step 6 is working. Remove the workarounds that exist because temp SBUF allocs were naively copied from the tile shape:
 
 - 4a: emitter strips leading unit dims (`nkigen/codegen/nisa/emit.py`) — remove
 - 4b: alloc pass strips leading 1s — remove
 - 4c: LegalizeLayout "middle dims must be unit" restriction removed ✅ — keep (still correct)
-
-### Step 5: Remove `tile_size` from `.layout()` API
-
-Remove the `tile_size` parameter from `_KnobBuilder.layout()`. Physical factorization is always derived from the consuming `tile_op` + indexing maps by `InferLayout`. Update all existing `.layout(tile_size=...)` calls in tests to just `.layout(mem_space=...)`.
-
-Files: `nkigen/frontend/knob.py`, `mlir/include/nkipy/Dialect/NkipyOps.td`, all tests with `.layout(tile_size=...)`
-
-### Step 6: Implement `.cache()` primitive
-
-Add `.cache(input, axis=[], prefetch=False)` to `_KnobBuilder`. Emit a new MLIR op (`nkipy.cache`) carrying the input reference, axis list, and prefetch flag. The cache pass replaces the current hardcoded input staging in knob-driven-tiling.
-
-Buffer shape derivation: at each specified axis level, compute the input's tile shape from loop bounds and indexing maps, squeeze dims whose extent = loop step at that level.
-
-Files: `nkigen/frontend/knob.py`, `mlir/include/nkipy/Dialect/NkipyOps.td`, new pass or modification to knob-driven-tiling
-
-### Step 7: Remove hardcoded caching from knob-driven-tiling
-
-Remove the fixed input-caching logic (matmul A-row / B-col caching). Default behavior becomes `axis=[-1]` (minimal staging) for all inputs without explicit `.cache()`. Add `.cache()` annotations to existing tests to preserve behavior.
-
-Files: knob-driven-tiling pass, all matmul/attention tests

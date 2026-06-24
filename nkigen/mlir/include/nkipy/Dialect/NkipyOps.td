@@ -103,6 +103,38 @@ def Nkipy_FuseOp : Nkipy_Op<"fuse_op">
     let hasVerifier = 1;
 }
 
+def Nkipy_CacheOp : Nkipy_Op<"cache", [
+    DeclareOpInterfaceMethods<BufferizableOpInterface,
+      ["bufferizesToMemoryRead", "bufferizesToMemoryWrite",
+       "getAliasingValues", "bufferize"]>]>
+{
+    let summary = "cache";
+    let description = [{
+        nkipy_d.cache(target, input, axes, prefetch=False)
+
+        Declare SBUF caching for an input tensor when computing the target op.
+        Each entry in `axes` is a post-tiling loop level where an SBUF cache
+        buffer for this input will exist. Buffer shape at each level is
+        auto-derived from loop bounds and indexing maps.
+
+        Parameters
+        * target (Tensor) - The output tensor (identifies the consuming op)
+        * input (Tensor) - The input tensor to cache in SBUF
+        * axes (array<int>) - Post-tiling loop levels for cache placement
+        * prefetch (bool) - Enable double-buffering (load next while computing)
+    }];
+
+    let arguments = (ins
+        AnyTypeOf<[AnyTensor, AnyMemRef]>:$target,
+        AnyTypeOf<[AnyTensor, AnyMemRef]>:$input,
+        DenseI64ArrayAttr:$axes,
+        DefaultValuedAttr<BoolAttr, "false">:$prefetch);
+    let results = (outs );
+    let assemblyFormat = [{
+        `(` $target `:` type($target) `,` $input `:` type($input) `)` attr-dict
+    }];
+}
+
 def Nkipy_YieldOp : Nkipy_Op<"yield", [Pure, ReturnLike, Terminator]>
 {
     let summary = "Yield values from an nkipy region";

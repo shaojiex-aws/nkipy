@@ -138,6 +138,11 @@ struct NkipyAnnotateMemorySpacePass
     func.walk([&](nkipy::TileOp op) { tileOps.push_back(op); });
     for (auto tileOp : tileOps)
       tileOp.erase();
+
+    SmallVector<nkipy::CacheOp> cacheOps;
+    func.walk([&](nkipy::CacheOp op) { cacheOps.push_back(op); });
+    for (auto cacheOp : cacheOps)
+      cacheOp.erase();
   }
 
   /// Propagate memory space from one value to another.

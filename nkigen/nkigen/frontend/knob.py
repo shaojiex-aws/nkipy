@@ -133,6 +133,58 @@ class _KnobBuilder:
         self._tile_op_tile_size = tile_size_attr
         return self
 
+    def cache(
+        self,
+        input_tensor: Union["TracedArray", Any],
+        *,
+        axis: Optional[List[int]] = None,
+        prefetch: bool = False,
+    ) -> "_KnobBuilder":
+        """Declare SBUF caching for an input when computing this op.
+
+        ``axis`` lists post-tiling loop levels where a cache buffer for
+        ``input_tensor`` will exist.  axis=[-1] means innermost (minimal
+        staging, no reuse).  The buffer shape at each level is auto-derived
+        from loop bounds and indexing maps.
+        """
+        if self._value is None:
+            return self
+        if not isinstance(input_tensor, TracedArray):
+            return self
+        input_value = input_tensor.value
+        if input_value is None:
+            return self
+
+        if self._tile_op_tile_size is None:
+            raise ValueError(
+                ".cache() requires a preceding .tile_op(). "
+                "Chain as: knob(x).tile_op(...).cache(...)"
+            )
+
+        if axis is None:
+            axis = [-1]
+
+        num_levels = 2 * len(self._tile_op_tile_size)
+        for a in axis:
+            if a < -num_levels or a >= num_levels:
+                raise ValueError(
+                    f"axis={a} is out of bounds. "
+                    f"tile_op produces {num_levels} post-tiling loop levels "
+                    f"(valid range [{-num_levels}, {num_levels - 1}])"
+                )
+
+        axes_attr = ir.DenseI64ArrayAttr.get(axis)
+        prefetch_attr = ir.BoolAttr.get(prefetch)
+
+        nkipy_d.CacheOp(
+            target=self._value,
+            input=input_value,
+            axes=axes_attr,
+            prefetch=prefetch_attr,
+            loc=self._loc,
+        )
+        return self
+
     # ------------------------------------------------------------------
     # Validation
     # ------------------------------------------------------------------

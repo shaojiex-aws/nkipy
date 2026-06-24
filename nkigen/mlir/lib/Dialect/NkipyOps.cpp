@@ -94,6 +94,46 @@ LogicalResult nkipy::TileOp::bufferize(
 }
 
 //===----------------------------------------------------------------------===//
+// CacheOp — BufferizableOpInterface
+//===----------------------------------------------------------------------===//
+
+bool nkipy::CacheOp::bufferizesToMemoryRead(
+    OpOperand &opOperand, const bufferization::AnalysisState &state) {
+  return false;
+}
+
+bool nkipy::CacheOp::bufferizesToMemoryWrite(
+    OpOperand &opOperand, const bufferization::AnalysisState &state) {
+  return false;
+}
+
+bufferization::AliasingValueList nkipy::CacheOp::getAliasingValues(
+    OpOperand &opOperand, const bufferization::AnalysisState &state) {
+  return {};
+}
+
+LogicalResult nkipy::CacheOp::bufferize(
+    RewriterBase &rewriter, const bufferization::BufferizationOptions &options,
+    bufferization::BufferizationState &state) {
+  Value target = getTarget();
+  Value input = getInput();
+
+  FailureOr<Value> targetBuf =
+      bufferization::getBuffer(rewriter, target, options, state);
+  if (failed(targetBuf))
+    return failure();
+  FailureOr<Value> inputBuf =
+      bufferization::getBuffer(rewriter, input, options, state);
+  if (failed(inputBuf))
+    return failure();
+
+  rewriter.create<nkipy::CacheOp>(
+      getLoc(), *targetBuf, *inputBuf, getAxesAttr(), getPrefetchAttr());
+  rewriter.eraseOp(getOperation());
+  return success();
+}
+
+//===----------------------------------------------------------------------===//
 // FuseOp
 //===----------------------------------------------------------------------===//
 
