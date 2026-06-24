@@ -180,10 +180,10 @@ Before legalize-layout, the IR has a simple `memref.copy %hbm_256x256, %sbuf_256
 - Also: stop tracing through `collapse_shape`/`expand_shape` (they change rank, offsets don't translate)
 
 ### Step 4: SBUF 2D contract enforcement
-- **4a** ✅: Emitter handles >2D SBUF mechanically (strip leading 1s, collapse to 2D)
-- **4b**: Temp SBUF allocs for HBM staging must be produced as 2D (strip leading 1s at creation)
+- **4a** ✅: Emitter handles >2D SBUF mechanically (strip leading 1s, collapse to 2D) — legacy, will be removed by `.cache()` implementation
+- **4b** ✅: Temp SBUF allocs strip leading unit dims — legacy, will be removed by `.cache()` implementation
 - **4c** ✅: Remove LegalizeLayout "middle dims must be unit" restriction — support arbitrary tile shapes
-- Full design: `docs/2026-06-23-sbuf-partition-dim-contract.md`
+- Full design: `docs/2026-06-23-sbuf-knob-contract.md` (renamed from sbuf-partition-dim-contract)
 
 ### Step 5: Fix BMM IR cross-tile access
 - Current IR has `sbuf_map<tile: [128, 128]>` but accesses span `[256, 128]` subviews

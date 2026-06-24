@@ -3,10 +3,10 @@ Knob API for annotating tensors with transformation hints.
 
 Usage (builder-style):
 
-    # Memory layout hint (placement + physical tile).
-    knob(result).layout(mem_space="Sbuf", tile_size=[128, 128], partition_dim=0)
+    # Memory placement hint.
+    knob(result).layout(mem_space="Sbuf", partition_dim=0)
 
-    # Loop-tiling hint (separate from memory layout).
+    # Loop-tiling hint.
     # tile_size has one entry per iterator of the producing op, in the
     # same order linalg emits — tile_size[i] applies to iterator i.
     # Examples:
@@ -22,11 +22,9 @@ Usage (builder-style):
     # Chain both.
     knob(result).tile_op(tile_size=[64, 64]).layout(mem_space="Sbuf")
 
-If .layout() is called with tile_size=None and a .tile_op() was invoked
-earlier on the same builder, the layout inherits tile_size from it.  If
-.layout() is called with an explicit tile_size and no .tile_op() was
-invoked, a matching tile_op is emitted automatically so the loop tile
-matches the physical tile (today's one-knob-does-both semantic).
+The physical factorization tile for SBUF is always auto-derived from the
+consuming tile_op via indexing maps (InferLayout pass). No tile_size
+parameter on .layout().
 """
 
 from typing import Union, Any, Optional, List
@@ -70,13 +68,11 @@ class _KnobBuilder:
         *,
         partition_dim: Optional[int] = None,
         mem_space: Optional[str] = None,
-        tile_size: Optional[List[int]] = None,
     ) -> "_KnobBuilder":
-        """Declare the tensor's memory layout (placement + physical tile).
+        """Declare the tensor's memory placement.
 
-        If ``tile_size`` is omitted and a prior ``.tile_op(tile_size=...)``
-        was called on the same builder, the layout's physical tile
-        inherits from it.
+        Physical factorization tile for SBUF is auto-derived from the
+        consuming tile_op via indexing maps (InferLayout pass).
         """
         if self._value is None:
             return self
@@ -86,35 +82,17 @@ class _KnobBuilder:
         if partition_dim is not None:
             self._validate_partition_dim(partition_dim)
 
-        if isinstance(tile_size, int):
-            tile_size = [tile_size]
-        if tile_size is not None:
-            self._validate_tile_size(tile_size)
-
         mem_space_attr = _mem_space_attr(mem_space)
         partition_dim_attr = _partition_dim_attr(partition_dim)
-        tile_size_attr = _dense_i64_attr(tile_size)
 
-        # Don't auto-inherit tile_size from a preceding tile_op: tile_op
-        # carries the iter-space tile (full input shape for reductions,
-        # rank 3 for matmul), while layout's tile_size is the value-shape
-        # placement tile. The two only coincide for elementwise ops, but
-        # the knob builder doesn't know the op kind. Let InferLayout
-        # project the iter-space tile down to the value-shape tile and
-        # fill in the layout's tile_size attribute from there.
-
-        if (
-            mem_space_attr is None
-            and partition_dim_attr is None
-            and tile_size_attr is None
-        ):
+        if mem_space_attr is None and partition_dim_attr is None:
             return self
 
         nkipy_d.LayoutOp(
             target=self._value,
             mem_space=mem_space_attr,
             partition_dim=partition_dim_attr,
-            tile_size=tile_size_attr,
+            tile_size=None,
             loc=self._loc,
         )
         return self
@@ -198,7 +176,7 @@ class _KnobBuilder:
 def knob(tensor: Union[TracedArray, Any]) -> _KnobBuilder:
     """Return a builder for annotating ``tensor``.  Usage:
 
-        knob(x).layout(mem_space="Sbuf", tile_size=[128, 128])
+        knob(x).layout(mem_space="Sbuf")
         knob(x).tile_op(tile_size=[64, 64]).layout(mem_space="Sbuf")
 
     If ``tensor`` is not a TracedArray (e.g. a plain numpy array during
