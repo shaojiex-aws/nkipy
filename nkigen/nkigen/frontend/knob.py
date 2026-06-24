@@ -174,7 +174,7 @@ class _KnobBuilder:
                 )
 
         axes_attr = ir.DenseI64ArrayAttr.get(axis)
-        prefetch_attr = ir.BoolAttr.get(prefetch)
+        prefetch_attr = ir.BoolAttr.get(True) if prefetch else None
 
         nkipy_d.CacheOp(
             target=self._value,

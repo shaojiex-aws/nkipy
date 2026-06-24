@@ -278,45 +278,26 @@ std::map<std::string, std::vector<KnobInfo>> extractKnobsByOpType(
       Value target = cacheOp.getTarget();
       auto it = valueToKnob.find(target);
       if (it == valueToKnob.end())
-        return;  // No tile_op for this target; ignore
-
-      Value input = cacheOp.getInput();
-      auto axesAttr = cacheOp.getAxes();
+        return;
 
       CacheInfo ci;
-      ci.axes.assign(axesAttr.begin(), axesAttr.end());
+      ci.axes.assign(cacheOp.getAxes().begin(), cacheOp.getAxes().end());
       ci.prefetch = cacheOp.getPrefetch();
 
-      // Resolve operand index: find which DPS input of the producing op
-      // this input corresponds to.
+      // Resolve operand index via DPS interface.
       Operation *producerOp = target.getDefiningOp();
-      if (auto linalgOp = dyn_cast_or_null<linalg::LinalgOp>(producerOp)) {
-        for (int i = 0, e = linalgOp.getNumDpsInputs(); i < e; ++i) {
-          if (linalgOp.getDpsInputs()[i] == input) {
-            ci.operandIndex = i;
-            break;
-          }
-        }
-      } else if (auto dstOp = dyn_cast_or_null<DestinationStyleOpInterface>(producerOp)) {
-        auto inputs = dstOp.getDpsInputs();
-        for (int i = 0, e = inputs.size(); i < e; ++i) {
-          if (inputs[i] == input) {
+      if (auto dstOp = dyn_cast_or_null<DestinationStyleOpInterface>(producerOp)) {
+        Value input = cacheOp.getInput();
+        for (auto [i, inp] : llvm::enumerate(dstOp.getDpsInputs())) {
+          if (inp == input) {
             ci.operandIndex = i;
             break;
           }
         }
       }
 
-      if (ci.operandIndex >= 0) {
+      if (ci.operandIndex >= 0)
         it->second.caches.push_back(ci);
-        llvm::errs() << "[KnobDrivenTiling] Found cache for operand "
-                     << ci.operandIndex << " axes=[";
-        for (size_t i = 0; i < ci.axes.size(); ++i) {
-          llvm::errs() << ci.axes[i];
-          if (i + 1 < ci.axes.size()) llvm::errs() << ", ";
-        }
-        llvm::errs() << "]\n";
-      }
     });
 
     // Then, group knobs by op type, validating each.
@@ -413,6 +394,25 @@ std::map<std::string, std::vector<KnobInfo>> extractKnobsByOpType(
   return knobsByOp;
 }
 
+/// Promote inputs to SBUF based on cache annotations (or all if none).
+/// Always promotes the output (at position numInputs).
+void emitCacheAwarePromotion(OpBuilder &builder, Location loc,
+                             Value tiledOp, int numInputs,
+                             const SmallVector<CacheInfo> &caches) {
+  auto sbufMemSpace = nkipy::MemSpaceEnumAttr::get(
+      builder.getContext(), nkipy::MemSpaceEnum::Sbuf);
+
+  if (caches.empty()) {
+    emitPromoteAllToSbuf(builder, loc, tiledOp, numInputs);
+  } else {
+    for (const auto &ci : caches) {
+      if (ci.operandIndex >= 0 && ci.operandIndex < numInputs)
+        emitPromoteOperand(builder, loc, tiledOp, ci.operandIndex, sbufMemSpace);
+    }
+    emitPromoteOperand(builder, loc, tiledOp, numInputs, sbufMemSpace);
+  }
+}
+
 /// Build tiling + SBUF promotion for elementwise (and transpose) operations.
 void buildElementwiseTiling(OpBuilder &builder, Location loc,
                             Value moduleArg,
@@ -426,32 +426,10 @@ void buildElementwiseTiling(OpBuilder &builder, Location loc,
 
   int numInputs = knob.numDpsInputs >= 0 ? knob.numDpsInputs
       : (isNamedUnaryElementwiseOp(opName) ? 1 : 2);
-
-  auto sbufMemSpace = nkipy::MemSpaceEnumAttr::get(
-      builder.getContext(), nkipy::MemSpaceEnum::Sbuf);
-
-  if (knob.caches.empty()) {
-    // Default: promote all inputs + output
-    emitPromoteAllToSbuf(builder, loc, tiledOp, numInputs);
-    llvm::errs() << "[KnobDrivenTiling] Elementwise: promoted " << numInputs
-                 << " inputs + 1 output to SBUF (default)\n";
-  } else {
-    // User-specified: only promote inputs with cache annotations
-    for (const auto &ci : knob.caches) {
-      if (ci.operandIndex >= 0 && ci.operandIndex < numInputs) {
-        emitPromoteOperand(builder, loc, tiledOp, ci.operandIndex, sbufMemSpace);
-      }
-    }
-    // Always promote output
-    emitPromoteOperand(builder, loc, tiledOp, numInputs, sbufMemSpace);
-    llvm::errs() << "[KnobDrivenTiling] Elementwise: promoted "
-                 << knob.caches.size() << " cached inputs + 1 output to SBUF\n";
-  }
+  emitCacheAwarePromotion(builder, loc, tiledOp, numInputs, knob.caches);
 }
 
 /// Build tiling + SBUF promotion for reduction operations.
-/// tile_size is already in iterator-space order, so pass it straight to
-/// tile_using_for; promote all operands to SBUF.
 void buildReductionTiling(OpBuilder &builder, Location loc,
                           Value moduleArg,
                           const std::string &opName,
@@ -463,24 +441,7 @@ void buildReductionTiling(OpBuilder &builder, Location loc,
   Value tiledOp = emitTile(builder, loc, matched, knob.tileSize);
 
   int numInputs = knob.numDpsInputs >= 0 ? knob.numDpsInputs : 1;
-
-  auto sbufMemSpace = nkipy::MemSpaceEnumAttr::get(
-      builder.getContext(), nkipy::MemSpaceEnum::Sbuf);
-
-  if (knob.caches.empty()) {
-    emitPromoteAllToSbuf(builder, loc, tiledOp, numInputs);
-    llvm::errs() << "[KnobDrivenTiling] Reduction: promoted " << numInputs
-                 << " inputs + 1 output to SBUF (default)\n";
-  } else {
-    for (const auto &ci : knob.caches) {
-      if (ci.operandIndex >= 0 && ci.operandIndex < numInputs) {
-        emitPromoteOperand(builder, loc, tiledOp, ci.operandIndex, sbufMemSpace);
-      }
-    }
-    emitPromoteOperand(builder, loc, tiledOp, numInputs, sbufMemSpace);
-    llvm::errs() << "[KnobDrivenTiling] Reduction: promoted "
-                 << knob.caches.size() << " cached inputs + 1 output to SBUF\n";
-  }
+  emitCacheAwarePromotion(builder, loc, tiledOp, numInputs, knob.caches);
 }
 
 /// Build the transform sequence for matmul with dynamic blocking.
