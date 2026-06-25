@@ -22,6 +22,7 @@
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/Linalg/IR/Linalg.h"
+#include "mlir/Dialect/MemRef/IR/MemRef.h"
 #include "mlir/Dialect/Utils/StructuredOpsUtils.h"
 #include "mlir/Dialect/Tensor/IR/Tensor.h"
 #include "mlir/IR/PatternMatch.h"
@@ -103,14 +104,27 @@ private:
     return found;
   }
 
-  static linalg::ReciprocalOp createReciprocal(PatternRewriter &rewriter,
-                                                Location loc, Value input) {
-    auto inputType = cast<RankedTensorType>(input.getType());
+  static Value createReciprocal(PatternRewriter &rewriter,
+                                Location loc, Value input,
+                                Value outputBuf = nullptr) {
+    auto shapedType = cast<ShapedType>(input.getType());
+    auto shape = shapedType.getShape();
+
+    if (auto memrefType = dyn_cast<MemRefType>(input.getType())) {
+      Value out = outputBuf ? outputBuf
+                            : rewriter.create<memref::AllocOp>(loc, memrefType).getResult();
+      rewriter.create<linalg::ReciprocalOp>(
+          loc, TypeRange{}, ValueRange{input}, ValueRange{out});
+      return out;
+    }
+
+    auto tensorType = cast<RankedTensorType>(input.getType());
     auto recipOut = rewriter.create<tensor::EmptyOp>(
-        loc, inputType.getShape(), inputType.getElementType());
-    return rewriter.create<linalg::ReciprocalOp>(
-        loc, TypeRange{inputType}, ValueRange{input},
+        loc, shape, shapedType.getElementType());
+    auto recipOp = rewriter.create<linalg::ReciprocalOp>(
+        loc, TypeRange{tensorType}, ValueRange{input},
         ValueRange{recipOut.getResult()});
+    return recipOp.getResult(0);
   }
 
   static bool isAllParallel(linalg::GenericOp op) {
@@ -125,15 +139,23 @@ private:
                                 Value divisor, Value output,
                                 PatternRewriter &rewriter) const {
     Location loc = origOp->getLoc();
-    auto outType = cast<RankedTensorType>(output.getType());
 
-    auto recipOp = createReciprocal(rewriter, loc, divisor);
-    cloneAnnotations(origOp->getResult(0), recipOp.getResult(0), rewriter);
+    Value recipResult = createReciprocal(rewriter, loc, divisor);
 
-    auto mulOp = rewriter.create<linalg::MulOp>(
-        loc, TypeRange{outType},
-        ValueRange{numerator, recipOp.getResult(0)}, ValueRange{output});
-    rewriter.replaceOp(origOp, mulOp.getResults());
+    if (isa<MemRefType>(output.getType())) {
+      cloneAnnotations(output, recipResult, rewriter);
+      rewriter.create<linalg::MulOp>(
+          loc, TypeRange{},
+          ValueRange{numerator, recipResult}, ValueRange{output});
+      rewriter.eraseOp(origOp);
+    } else {
+      cloneAnnotations(origOp->getResult(0), recipResult, rewriter);
+      auto outType = cast<ShapedType>(output.getType());
+      auto mulOp = rewriter.create<linalg::MulOp>(
+          loc, TypeRange{outType},
+          ValueRange{numerator, recipResult}, ValueRange{output});
+      rewriter.replaceOp(origOp, mulOp.getResults());
+    }
   }
 
   // --- Case handlers ---
@@ -190,23 +212,36 @@ private:
     Location loc = op.getLoc();
     Value input = op.getDpsInputs()[0];
     Value output = op.getDpsInits()[0];
-    auto outputType = cast<RankedTensorType>(output.getType());
+    auto outputType = cast<ShapedType>(output.getType());
 
     if (scalarVal == 1.0) {
-      auto recipOp = createReciprocal(rewriter, loc, input);
-      cloneAnnotations(op.getResult(0), recipOp.getResult(0), rewriter);
-      rewriter.replaceOp(op, recipOp.getResults());
+      if (isa<MemRefType>(output.getType())) {
+        createReciprocal(rewriter, loc, input, output);
+        rewriter.eraseOp(op);
+      } else {
+        Value recipResult = createReciprocal(rewriter, loc, input);
+        cloneAnnotations(op.getResult(0), recipResult, rewriter);
+        rewriter.replaceOp(op, recipResult);
+      }
     } else {
       // Create fill(scalar) as the numerator, then use shared helper
-      auto fillEmpty = rewriter.create<tensor::EmptyOp>(
-          loc, outputType.getShape(), outputType.getElementType());
+      Value fillOut;
+      if (auto memrefType = dyn_cast<MemRefType>(output.getType())) {
+        fillOut = rewriter.create<memref::AllocOp>(loc, memrefType);
+      } else {
+        fillOut = rewriter.create<tensor::EmptyOp>(
+            loc, outputType.getShape(), outputType.getElementType());
+      }
       auto scalarCst = rewriter.create<arith::ConstantOp>(
           loc, rewriter.getFloatAttr(
               cast<FloatType>(outputType.getElementType()), scalarVal));
       auto fillOp = rewriter.create<linalg::FillOp>(
-          loc, TypeRange{outputType}, ValueRange{scalarCst.getResult()},
-          ValueRange{fillEmpty.getResult()});
-      replaceWithReciprocalMul(op, fillOp.getResult(0), input, output,
+          loc, isa<MemRefType>(output.getType()) ? TypeRange{} : TypeRange{outputType},
+          ValueRange{scalarCst.getResult()},
+          ValueRange{fillOut});
+      Value fillResult = isa<MemRefType>(output.getType())
+          ? fillOut : fillOp.getResult(0);
+      replaceWithReciprocalMul(op, fillResult, input, output,
                                rewriter);
     }
     return success();
@@ -228,11 +263,11 @@ private:
 
     Location loc = op.getLoc();
     Value rhsInput = op.getDpsInputs()[rhsArgNum];
-    auto recipOp = createReciprocal(rewriter, loc, rhsInput);
+    Value recipResult = createReciprocal(rewriter, loc, rhsInput);
 
     // Clone generic with reciprocal replacing the rhs input, divf→mulf in body
     SmallVector<Value> newInputs(op.getDpsInputs());
-    newInputs[rhsArgNum] = recipOp.getResult(0);
+    newInputs[rhsArgNum] = recipResult;
 
     auto newGeneric = rewriter.create<linalg::GenericOp>(
         loc, op.getResultTypes(), newInputs, op.getDpsInits(),
@@ -249,7 +284,11 @@ private:
       }
     }
 
-    rewriter.replaceOp(op, newGeneric.getResults());
+    if (isa<MemRefType>(op.getDpsInits()[0].getType())) {
+      rewriter.eraseOp(op);
+    } else {
+      rewriter.replaceOp(op, newGeneric.getResults());
+    }
     return success();
   }
 };
@@ -271,6 +310,7 @@ struct PrepareArithmeticPass
   void getDependentDialects(DialectRegistry &registry) const override {
     registry.insert<arith::ArithDialect>();
     registry.insert<linalg::LinalgDialect>();
+    registry.insert<memref::MemRefDialect>();
     registry.insert<tensor::TensorDialect>();
     registry.insert<nkipy::NkipyDialect>();
   }

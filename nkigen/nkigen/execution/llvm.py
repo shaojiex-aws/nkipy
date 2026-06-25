@@ -76,44 +76,19 @@ def extract_and_clean_func_from_module(mlir_module_str: str):
         clean_mlir, func_name = extract_and_clean_func_from_module(tiled_mlir)
         runner = LLVMModule(clean_mlir, func_name)
     """
-    import re
-    # Strip memory-space attributes from memref type syntax before parsing.
-    # We accept two forms and drop both:
-    #   1. #nisa.mem<...>         — post-annotate-memory-space NISA dialect form
-    #   2. N : i32                — raw IntegerAttr form that
-    #                                nkipy's MemSpaceEnumAttr prints as
-    #
-    # The MLIR parser can't handle the NISA-dialect attribute without the
-    # dialect registered. More importantly, a non-zero integer memspace
-    # becomes `!llvm.ptr<N>` during memref-to-llvm lowering, and the
-    # runtime helpers (`@free` etc.) only accept `!llvm.ptr` in address
-    # space 0 — leaving the memspace on would trip the LLVM verifier
-    # with `operand type mismatch … '!llvm.ptr<N>' != '!llvm.ptr'` when
-    # lowering `memref.dealloc` on an HBM/SBUF buffer.
-    mlir_module_str = re.sub(r',\s*#nisa\.mem<[^>]+>', '', mlir_module_str)
-    mlir_module_str = re.sub(r',\s*\d+\s*:\s*i32>', '>', mlir_module_str)
-
     # Inline nkipy reference_impl regions (e.g. nkipy.gather) to plain
     # linalg/tensor ops via nkipy-opt BEFORE the in-process Module.parse below:
     # the in-process bindings can't verify nkipy.yield-terminated regions.
-    # (Also folds tensor.extract(to_tensor) → memref.load left after inlining.)
-    # See docs/2026-06-05-nkipy-block-no-terminator-error.md.
     from nkigen.driver.pipeline import run_nkipy_opt_passes
     mlir_module_str = run_nkipy_opt_passes(
         mlir_module_str,
         ["inline-nkipy-reference", "canonicalize"],
     )
 
-    with Context() as ctx:
-        # Register nkipy dialect to handle nkipy operations
+    with Context() as ctx, Location.unknown():
         nkipy_d.register_dialect(ctx)
-
-        # Allow unregistered dialects temporarily to parse the module
         ctx.allow_unregistered_dialects = True
 
-        # Parse the (now nkipy-free) MLIR module and clean it in-place,
-        # preserving all module-level declarations like memref.global that the
-        # function may reference.
         new_module = Module.parse(mlir_module_str, ctx)
 
         # Strip the transform.with_named_sequence module attribute if present
@@ -121,48 +96,67 @@ def extract_and_clean_func_from_module(mlir_module_str: str):
         if "transform.with_named_sequence" in module_op.attributes:
             del module_op.attributes["transform.with_named_sequence"]
 
-        # Walk module body: find the func, and collect ops to erase
-        # (transform sequences, nkipy.annotate, etc.)
+        # Walk module body: find the func, erase nkipy ops and transform sequences,
+        # and strip memory spaces from all memref types.
         actual_func_name = None
         ops_to_erase = []
 
-        def walk_and_mark(op):
-            if op.name in ("nkipy.layout", "nkipy.tile_op"):
+        def strip_mem_space(ty):
+            """Remove memory space from a memref type (LLVM lowering requires address space 0)."""
+            if not MemRefType.isinstance(ty):
+                return ty
+            mt = MemRefType(ty)
+            if mt.memory_space is None:
+                return ty
+            return MemRefType.get(mt.shape, mt.element_type, layout=mt.layout, memory_space=None)
+
+        def walk_and_clean(op):
+            if op.name in ("nkipy.layout", "nkipy.tile_op", "nkipy.fuse_op", "nkipy.cache"):
                 ops_to_erase.append(op)
+                return
             if "nkipy.op_id" in op.attributes:
                 del op.attributes["nkipy.op_id"]
-            if "memory_space" in op.attributes:
-                del op.attributes["memory_space"]
+            # Strip memory spaces from all results
+            for result in op.results:
+                new_ty = strip_mem_space(result.type)
+                if new_ty != result.type:
+                    result.set_type(new_ty)
+            # Strip memory spaces from block arguments in regions
             for region in op.regions:
                 for block in region:
+                    for arg in block.arguments:
+                        new_ty = strip_mem_space(arg.type)
+                        if new_ty != arg.type:
+                            arg.set_type(new_ty)
                     for nested_op in block:
-                        walk_and_mark(nested_op)
+                        walk_and_clean(nested_op)
 
         for op in new_module.body.operations:
             op_name = op.operation.name
             if op_name == "func.func" and actual_func_name is None:
                 actual_func_name = str(op.attributes["sym_name"]).strip('"')
-                walk_and_mark(op.operation)
+                walk_and_clean(op.operation)
+                # Fix function type signature
+                ft = op.type
+                new_inputs = [strip_mem_space(ft.inputs[i]) for i in range(len(ft.inputs))]
+                new_results = [strip_mem_space(ft.results[i]) for i in range(len(ft.results))]
+                new_ft = FunctionType.get(new_inputs, new_results)
+                op.attributes['function_type'] = TypeAttr.get(new_ft)
             elif op_name == "transform.named_sequence":
                 ops_to_erase.append(op.operation)
 
         if actual_func_name is None:
             raise ValueError("Could not find func.func operation in MLIR module")
 
-        # Erase marked operations
         for op in ops_to_erase:
             op.erase()
 
-        # For CPU simulation: Zero-fill all tensor.empty operations
+        # For CPU simulation: Zero-fill all tensor.empty and memref.alloc operations
         _zero_fill_empty_tensors_ir(new_module)
-
-        # For CPU simulation: Zero-fill all memref.alloc operations
-        # (needed for post-bufferization IR, e.g. --stop=5+)
         _zero_fill_alloc_memrefs_ir(new_module)
 
-        # Get clean MLIR string
-        clean_mlir = str(new_module)
-    
+        clean_mlir = str(new_module.operation)
+
     return clean_mlir, actual_func_name
 
 

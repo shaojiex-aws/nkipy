@@ -257,11 +257,11 @@ class IRBuilder:
         with ir.InsertionPoint(self._module.body):
             for custom in custom_ops:
                 input_types = [
-                    ranked_tensor_of(s, _np_to_mlir(d))
+                    _shaped_type(s, _np_to_mlir(d))
                     for s, d in zip(custom.input_shapes, custom.input_dtypes)
                 ]
                 result_types = [
-                    ranked_tensor_of(s, _np_to_mlir(d))
+                    _shaped_type(s, _np_to_mlir(d))
                     for s, d in zip(custom.output_shapes, custom.output_dtypes)
                 ]
                 fn_type = ir.FunctionType.get(input_types, result_types)
@@ -1361,8 +1361,8 @@ def take(a: TensorHandle, indices: TensorHandle, axis: int = 0, loc=None) -> Ten
         raise NotImplementedError("Only axis=0 gather is currently supported")
 
     out_shape = i_shape + a_shape[1:]
-    rt = ranked_tensor_of(out_shape, a_elem)
-    output = make_empty(loc, out_shape, a_elem)
+    rt = _shaped_type(out_shape, a_elem)
+    output = _make_output(loc, out_shape, a_elem)
 
     gather = nkipy_d.GatherOp(rt, av, iv, output, loc=loc)
 
@@ -1375,14 +1375,14 @@ def take(a: TensorHandle, indices: TensorHandle, axis: int = 0, loc=None) -> Ten
         src_arg, idx_arg = blk.arguments
         rank = len(out_shape)
         irank = len(i_shape)
-        out2 = make_empty(loc, out_shape, a_elem)
+        out2 = _make_output(loc, out_shape, a_elem)
 
         ie = [ir.AffineDimExpr.get(i) for i in range(irank)]
         im = ir.AffineMap.get(rank, 0, ie)
         om = ir.AffineMap.get_identity(rank)
 
         g = linalg.GenericOp(
-            [rt],
+            _linalg_result_types(out_shape, a_elem),
             [idx_arg],
             [out2],
             ir.ArrayAttr.get([ir.AffineMapAttr.get(im), ir.AffineMapAttr.get(om)]),
@@ -1400,10 +1400,13 @@ def take(a: TensorHandle, indices: TensorHandle, axis: int = 0, loc=None) -> Ten
             ext_idx = [index_val]
             for di in range(1, len(a_shape)):
                 ext_idx.append(linalg.IndexOp(irank + di - 1, loc=loc).result)
-            extracted = tensor.ExtractOp(src_arg, ext_idx, loc=loc).result
+            if _use_memref():
+                extracted = memref.LoadOp(src_arg, ext_idx, loc=loc).result
+            else:
+                extracted = tensor.ExtractOp(src_arg, ext_idx, loc=loc).result
             linalg.YieldOp([extracted], loc=loc)
 
-        nkipy_d.YieldOp(values=[g.results[0]], loc=loc)
+        nkipy_d.YieldOp(values=[_linalg_result(g, out2)], loc=loc)
 
     return _make_handle(gather.result, tuple(out_shape), a_elem)
 
@@ -1600,7 +1603,17 @@ def dynamic_slice(x: TensorHandle, indices, loc=None) -> TensorHandle:
             result_shape.append(size // stride if stride > 1 else size)
 
     if _use_memref():
-        result_type = memref_of(tuple(result_shape), elem)
+        src_strides = _get_memref_strides(ir.MemRefType(val.type))
+        has_dynamic_offset = any(
+            o == ir.ShapedType.get_dynamic_size() for o in static_offsets
+        )
+        sv_offset = (ir.ShapedType.get_dynamic_size() if has_dynamic_offset
+                     else sum(o * s for o, s in zip(static_offsets, src_strides)))
+        result_strides = [src_strides[i] * static_strides[i]
+                          for i, idx in enumerate(full_indices)
+                          if not (isinstance(idx, LoopIndexHandle) or isinstance(idx, int))]
+        layout = ir.StridedLayoutAttr.get(sv_offset, result_strides)
+        result_type = ir.MemRefType.get(list(result_shape), elem, layout)
         sv = memref.SubViewOp(
             result_type,
             val,
@@ -1762,7 +1775,13 @@ def fori_loop(
         loop_idx = LoopIndexHandle(loop_idx_value)
 
         with ir.InsertionPoint(loop_block):
-            body_fn(loop_idx, init_handles)
+            results = body_fn(loop_idx, init_handles)
+            if results is not None:
+                if not isinstance(results, list):
+                    results = [results]
+                for res, acc in zip(results, init_handles):
+                    if res._value != acc._value:
+                        memref.CopyOp(res._value, acc._value, loc=loc)
             scf.YieldOp([], loc=loc)
 
         return init_handles

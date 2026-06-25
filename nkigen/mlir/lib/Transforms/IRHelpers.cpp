@@ -35,7 +35,7 @@ std::optional<nkipy::MemSpaceEnum> getNkipyMemSpace(Type type) {
   auto memSpaceAttr = memrefType.getMemorySpace();
   if (!memSpaceAttr)
     return std::nullopt;
-  if (auto ms = dyn_cast<nkipy::MemSpaceEnumAttr>(memSpaceAttr))
+  if (auto ms = dyn_cast<nkipy::MemSpaceAttr>(memSpaceAttr))
     return ms.getValue();
   return std::nullopt;
 }

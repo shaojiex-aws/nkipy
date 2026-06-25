@@ -9,14 +9,20 @@ using namespace mlir;
 using namespace nkipy;
 
 bool mlirAttributeIsAMemSpace(MlirAttribute attr) {
-  return mlir::isa<MemSpaceEnumAttr>(unwrap(attr));
+  return mlir::isa<MemSpaceAttr>(unwrap(attr));
 }
 
 MlirAttribute mlirMemSpaceGet(MlirContext ctx, MlirAttribute space) {
   auto attr = llvm::cast<mlir::IntegerAttr>(unwrap(space));
   MemSpaceEnum spaceEnum =
       static_cast<MemSpaceEnum>(attr.getInt());
-  return wrap(MemSpaceEnumAttr::get(unwrap(ctx), spaceEnum));
+  return wrap(MemSpaceAttr::get(unwrap(ctx), spaceEnum));
+}
+
+MlirStringRef mlirMemSpaceGetValue(MlirAttribute attr) {
+  auto msAttr = mlir::cast<MemSpaceAttr>(unwrap(attr));
+  llvm::StringRef str = ConvertToMemSpaceString(msAttr.getValue());
+  return wrap(str);
 }
 
 bool mlirAttributeIsASbufMap(MlirAttribute attr) {

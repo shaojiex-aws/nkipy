@@ -88,12 +88,12 @@ def trace(
     *,
     input_specs: Optional[list] = None,
     name: Optional[str] = None,
-    backend: str = "tensor",
+    backend: str = "memref",
 ) -> Callable:
     """Decorator to trace a Python function with NumPy APIs into MLIR.
 
     Args:
-        backend: "tensor" (default) for tensor SSA IR, "memref" for memref-native IR.
+        backend: "memref" (default) for memref-native IR, "tensor" for tensor SSA IR.
     """
 
     def decorator(f: Callable) -> Callable:

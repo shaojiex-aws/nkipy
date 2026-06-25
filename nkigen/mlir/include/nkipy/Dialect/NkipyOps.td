@@ -40,7 +40,7 @@ def Nkipy_LayoutOp : Nkipy_Op<"layout", [
     }];
 
     let arguments = (ins AnyTypeOf<[AnyTensor, AnyMemRef]>:$target,
-                     OptionalAttr<MemSpaceEnum>:$mem_space,
+                     OptionalAttr<NkipyMemSpaceAttr>:$mem_space,
                      OptionalAttr<UI32Attr>:$partition_dim,
                      OptionalAttr<DenseI64ArrayAttr>:$tile_size);
     let results = (outs );

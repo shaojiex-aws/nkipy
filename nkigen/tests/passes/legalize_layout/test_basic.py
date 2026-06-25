@@ -50,17 +50,17 @@ def test_matmul_sbuf_add_hbm():
     # preserved, and block loops are generated for HBM↔SBUF transfers.
     check_patterns = '''
 CHECK: func.func @matmul_add_kernel
-CHECK-SAME: 4 : i32
-CHECK: memref.alloc(){{.*}}: memref<256x256xf32, #nkipy.sbuf_map<tile: [128, 128], blocks: [2, 2]>, 3 : i32>
+CHECK-SAME: #nkipy.mem<SharedHbm>
+CHECK: memref.alloc(){{.*}}: memref<256x256xf32, #nkipy.sbuf_map<tile: [128, 128], blocks: [2, 2]>, #nkipy.mem<Sbuf>>
 CHECK: scf.for
 CHECK: scf.for
-CHECK: memref.alloc(){{.*}}: memref<128x128xf32, 2 : i32>
+CHECK: memref.alloc(){{.*}}: memref<128x128xf32, #nkipy.mem<Psum>>
 CHECK: linalg.matmul
-CHECK: memref.alloc(){{.*}}: memref<256x256xf32, 4 : i32>
+CHECK: memref.alloc(){{.*}}: memref<256x256xf32, #nkipy.mem<SharedHbm>>
 CHECK: scf.for
 CHECK: scf.for
 CHECK: linalg.add
-CHECK: return{{.*}}memref<256x256xf32, 4 : i32>
+CHECK: return{{.*}}memref<256x256xf32, #nkipy.mem<SharedHbm>>
 '''
     run_kernel_test(
         matmul_add_kernel,
@@ -98,16 +98,16 @@ def test_3d_add_chain_sbuf():
     # Block loops are generated for the HBM↔SBUF transfers.
     check_patterns = '''
 CHECK: func.func @add_chain_3d
-CHECK: memref.alloc(){{.*}}: memref<256x2x256xf32, #nkipy.sbuf_map<tile: [128, 1, 128], blocks: [2, 2, 2]>, 3 : i32>
+CHECK: memref.alloc(){{.*}}: memref<256x2x256xf32, #nkipy.sbuf_map<tile: [128, 1, 128], blocks: [2, 2, 2]>, #nkipy.mem<Sbuf>>
 CHECK: scf.for
 CHECK: scf.for
 CHECK: scf.for
-CHECK: memref.alloc(){{.*}}: memref<256x2x256xf32, 4 : i32>
+CHECK: memref.alloc(){{.*}}: memref<256x2x256xf32, #nkipy.mem<SharedHbm>>
 CHECK: scf.for
 CHECK: scf.for
 CHECK: scf.for
 CHECK: linalg.add
-CHECK: return{{.*}}memref<256x2x256xf32, 4 : i32>
+CHECK: return{{.*}}memref<256x2x256xf32, #nkipy.mem<SharedHbm>>
 '''
     run_kernel_test(
         add_chain_3d,

@@ -32,22 +32,22 @@ def test_sbuf_overflow_spill():
     """
     input_ir = """
 module {
-  func.func @sbuf_overflow(%arg0: memref<128x1x1x2048xf32, 4 : i32>) -> memref<128x1x1x2048xf32, 4 : i32> {
-    %a = memref.alloc() : memref<128x1x1x2048xf32, 3 : i32>
-    %b = memref.alloc() : memref<128x1x1x2048xf32, 3 : i32>
-    %c = memref.alloc() : memref<128x1x1x2048xf32, 3 : i32>
-    linalg.copy ins(%arg0 : memref<128x1x1x2048xf32, 4 : i32>)
-                outs(%a : memref<128x1x1x2048xf32, 3 : i32>)
-    linalg.exp ins(%a : memref<128x1x1x2048xf32, 3 : i32>)
-               outs(%b : memref<128x1x1x2048xf32, 3 : i32>)
-    linalg.mul ins(%b, %b : memref<128x1x1x2048xf32, 3 : i32>, memref<128x1x1x2048xf32, 3 : i32>)
-               outs(%c : memref<128x1x1x2048xf32, 3 : i32>)
-    linalg.copy ins(%c : memref<128x1x1x2048xf32, 3 : i32>)
-                outs(%arg0 : memref<128x1x1x2048xf32, 4 : i32>)
-    memref.dealloc %a : memref<128x1x1x2048xf32, 3 : i32>
-    memref.dealloc %b : memref<128x1x1x2048xf32, 3 : i32>
-    memref.dealloc %c : memref<128x1x1x2048xf32, 3 : i32>
-    return %arg0 : memref<128x1x1x2048xf32, 4 : i32>
+  func.func @sbuf_overflow(%arg0: memref<128x1x1x2048xf32, #nkipy.mem<SharedHbm>>) -> memref<128x1x1x2048xf32, #nkipy.mem<SharedHbm>> {
+    %a = memref.alloc() : memref<128x1x1x2048xf32, #nkipy.mem<Sbuf>>
+    %b = memref.alloc() : memref<128x1x1x2048xf32, #nkipy.mem<Sbuf>>
+    %c = memref.alloc() : memref<128x1x1x2048xf32, #nkipy.mem<Sbuf>>
+    linalg.copy ins(%arg0 : memref<128x1x1x2048xf32, #nkipy.mem<SharedHbm>>)
+                outs(%a : memref<128x1x1x2048xf32, #nkipy.mem<Sbuf>>)
+    linalg.exp ins(%a : memref<128x1x1x2048xf32, #nkipy.mem<Sbuf>>)
+               outs(%b : memref<128x1x1x2048xf32, #nkipy.mem<Sbuf>>)
+    linalg.mul ins(%b, %b : memref<128x1x1x2048xf32, #nkipy.mem<Sbuf>>, memref<128x1x1x2048xf32, #nkipy.mem<Sbuf>>)
+               outs(%c : memref<128x1x1x2048xf32, #nkipy.mem<Sbuf>>)
+    linalg.copy ins(%c : memref<128x1x1x2048xf32, #nkipy.mem<Sbuf>>)
+                outs(%arg0 : memref<128x1x1x2048xf32, #nkipy.mem<SharedHbm>>)
+    memref.dealloc %a : memref<128x1x1x2048xf32, #nkipy.mem<Sbuf>>
+    memref.dealloc %b : memref<128x1x1x2048xf32, #nkipy.mem<Sbuf>>
+    memref.dealloc %c : memref<128x1x1x2048xf32, #nkipy.mem<Sbuf>>
+    return %arg0 : memref<128x1x1x2048xf32, #nkipy.mem<SharedHbm>>
   }
 }
 """
@@ -57,11 +57,11 @@ module {
 
     check_patterns = """
     CHECK: func.func @sbuf_overflow
-    CHECK: memref.alloc() : memref<128x1x1x2048xf32, 3 : i32>
-    CHECK: memref.alloc() : memref<128x1x1x2048xf32, 1 : i32>
+    CHECK: memref.alloc() : memref<128x1x1x2048xf32, #nkipy.mem<Sbuf>>
+    CHECK: memref.alloc() : memref<128x1x1x2048xf32, #nkipy.mem<Hbm>>
     CHECK: linalg.exp
-    CHECK: memref.copy {{.*}} 3 : i32> to memref<128x1x1x2048xf32, 1 : i32>
-    CHECK: memref.copy {{.*}} 1 : i32> to memref<128x1x1x2048xf32, 3 : i32>
+    CHECK: memref.copy {{.*}} #nkipy.mem<Sbuf>> to memref<128x1x1x2048xf32, #nkipy.mem<Hbm>>
+    CHECK: memref.copy {{.*}} #nkipy.mem<Hbm>> to memref<128x1x1x2048xf32, #nkipy.mem<Sbuf>>
     CHECK: return
     """
     run_filecheck(output_ir, check_patterns)
@@ -76,16 +76,16 @@ def test_no_spill_below_capacity():
     """
     input_ir = """
 module {
-  func.func @no_spill(%arg0: memref<128x1x1x512xf32, 4 : i32>) -> memref<128x1x1x512xf32, 4 : i32> {
-    %a = memref.alloc() : memref<128x1x1x512xf32, 3 : i32>
-    linalg.copy ins(%arg0 : memref<128x1x1x512xf32, 4 : i32>)
-                outs(%a : memref<128x1x1x512xf32, 3 : i32>)
-    linalg.exp ins(%a : memref<128x1x1x512xf32, 3 : i32>)
-               outs(%a : memref<128x1x1x512xf32, 3 : i32>)
-    linalg.copy ins(%a : memref<128x1x1x512xf32, 3 : i32>)
-                outs(%arg0 : memref<128x1x1x512xf32, 4 : i32>)
-    memref.dealloc %a : memref<128x1x1x512xf32, 3 : i32>
-    return %arg0 : memref<128x1x1x512xf32, 4 : i32>
+  func.func @no_spill(%arg0: memref<128x1x1x512xf32, #nkipy.mem<SharedHbm>>) -> memref<128x1x1x512xf32, #nkipy.mem<SharedHbm>> {
+    %a = memref.alloc() : memref<128x1x1x512xf32, #nkipy.mem<Sbuf>>
+    linalg.copy ins(%arg0 : memref<128x1x1x512xf32, #nkipy.mem<SharedHbm>>)
+                outs(%a : memref<128x1x1x512xf32, #nkipy.mem<Sbuf>>)
+    linalg.exp ins(%a : memref<128x1x1x512xf32, #nkipy.mem<Sbuf>>)
+               outs(%a : memref<128x1x1x512xf32, #nkipy.mem<Sbuf>>)
+    linalg.copy ins(%a : memref<128x1x1x512xf32, #nkipy.mem<Sbuf>>)
+                outs(%arg0 : memref<128x1x1x512xf32, #nkipy.mem<SharedHbm>>)
+    memref.dealloc %a : memref<128x1x1x512xf32, #nkipy.mem<Sbuf>>
+    return %arg0 : memref<128x1x1x512xf32, #nkipy.mem<SharedHbm>>
   }
 }
 """
@@ -94,8 +94,8 @@ module {
 
     check_patterns = """
     CHECK: func.func @no_spill
-    CHECK: memref.alloc() : memref<128x1x1x512xf32, 3 : i32>
-    CHECK-NOT: 1 : i32
+    CHECK: memref.alloc() : memref<128x1x1x512xf32, #nkipy.mem<Sbuf>>
+    CHECK-NOT: #nkipy.mem<Hbm>
     CHECK: linalg.exp
     CHECK: return
     """
@@ -112,24 +112,24 @@ def test_non_overlapping_lifetimes():
     """
     input_ir = """
 module {
-  func.func @sequential(%arg0: memref<128x1x1x2048xf32, 4 : i32>) -> memref<128x1x1x2048xf32, 4 : i32> {
-    %a = memref.alloc() : memref<128x1x1x2048xf32, 3 : i32>
-    linalg.copy ins(%arg0 : memref<128x1x1x2048xf32, 4 : i32>)
-                outs(%a : memref<128x1x1x2048xf32, 3 : i32>)
-    linalg.exp ins(%a : memref<128x1x1x2048xf32, 3 : i32>)
-               outs(%a : memref<128x1x1x2048xf32, 3 : i32>)
-    linalg.copy ins(%a : memref<128x1x1x2048xf32, 3 : i32>)
-                outs(%arg0 : memref<128x1x1x2048xf32, 4 : i32>)
-    memref.dealloc %a : memref<128x1x1x2048xf32, 3 : i32>
-    %b = memref.alloc() : memref<128x1x1x2048xf32, 3 : i32>
-    linalg.copy ins(%arg0 : memref<128x1x1x2048xf32, 4 : i32>)
-                outs(%b : memref<128x1x1x2048xf32, 3 : i32>)
-    linalg.sqrt ins(%b : memref<128x1x1x2048xf32, 3 : i32>)
-                outs(%b : memref<128x1x1x2048xf32, 3 : i32>)
-    linalg.copy ins(%b : memref<128x1x1x2048xf32, 3 : i32>)
-                outs(%arg0 : memref<128x1x1x2048xf32, 4 : i32>)
-    memref.dealloc %b : memref<128x1x1x2048xf32, 3 : i32>
-    return %arg0 : memref<128x1x1x2048xf32, 4 : i32>
+  func.func @sequential(%arg0: memref<128x1x1x2048xf32, #nkipy.mem<SharedHbm>>) -> memref<128x1x1x2048xf32, #nkipy.mem<SharedHbm>> {
+    %a = memref.alloc() : memref<128x1x1x2048xf32, #nkipy.mem<Sbuf>>
+    linalg.copy ins(%arg0 : memref<128x1x1x2048xf32, #nkipy.mem<SharedHbm>>)
+                outs(%a : memref<128x1x1x2048xf32, #nkipy.mem<Sbuf>>)
+    linalg.exp ins(%a : memref<128x1x1x2048xf32, #nkipy.mem<Sbuf>>)
+               outs(%a : memref<128x1x1x2048xf32, #nkipy.mem<Sbuf>>)
+    linalg.copy ins(%a : memref<128x1x1x2048xf32, #nkipy.mem<Sbuf>>)
+                outs(%arg0 : memref<128x1x1x2048xf32, #nkipy.mem<SharedHbm>>)
+    memref.dealloc %a : memref<128x1x1x2048xf32, #nkipy.mem<Sbuf>>
+    %b = memref.alloc() : memref<128x1x1x2048xf32, #nkipy.mem<Sbuf>>
+    linalg.copy ins(%arg0 : memref<128x1x1x2048xf32, #nkipy.mem<SharedHbm>>)
+                outs(%b : memref<128x1x1x2048xf32, #nkipy.mem<Sbuf>>)
+    linalg.sqrt ins(%b : memref<128x1x1x2048xf32, #nkipy.mem<Sbuf>>)
+                outs(%b : memref<128x1x1x2048xf32, #nkipy.mem<Sbuf>>)
+    linalg.copy ins(%b : memref<128x1x1x2048xf32, #nkipy.mem<Sbuf>>)
+                outs(%arg0 : memref<128x1x1x2048xf32, #nkipy.mem<SharedHbm>>)
+    memref.dealloc %b : memref<128x1x1x2048xf32, #nkipy.mem<Sbuf>>
+    return %arg0 : memref<128x1x1x2048xf32, #nkipy.mem<SharedHbm>>
   }
 }
 """
@@ -139,10 +139,10 @@ module {
 
     check_patterns = """
     CHECK: func.func @sequential
-    CHECK: memref.alloc() : memref<128x1x1x2048xf32, 3 : i32>
-    CHECK-NOT: 1 : i32
+    CHECK: memref.alloc() : memref<128x1x1x2048xf32, #nkipy.mem<Sbuf>>
+    CHECK-NOT: #nkipy.mem<Hbm>
     CHECK: linalg.exp
-    CHECK-NOT: 1 : i32
+    CHECK-NOT: #nkipy.mem<Hbm>
     CHECK: linalg.sqrt
     CHECK: return
     """
@@ -165,25 +165,25 @@ def test_spill_with_loop_use():
     """
     input_ir = """
 module {
-  func.func @spill_with_loop_use(%arg0: memref<128x1x1x2048xf32, 4 : i32>) -> memref<128x1x1x2048xf32, 4 : i32> {
-    %a = memref.alloc() : memref<128x1x1x2048xf32, 3 : i32>
-    %b = memref.alloc() : memref<128x1x1x2048xf32, 3 : i32>
-    linalg.copy ins(%arg0 : memref<128x1x1x2048xf32, 4 : i32>)
-                outs(%a : memref<128x1x1x2048xf32, 3 : i32>)
-    linalg.copy ins(%arg0 : memref<128x1x1x2048xf32, 4 : i32>)
-                outs(%b : memref<128x1x1x2048xf32, 3 : i32>)
+  func.func @spill_with_loop_use(%arg0: memref<128x1x1x2048xf32, #nkipy.mem<SharedHbm>>) -> memref<128x1x1x2048xf32, #nkipy.mem<SharedHbm>> {
+    %a = memref.alloc() : memref<128x1x1x2048xf32, #nkipy.mem<Sbuf>>
+    %b = memref.alloc() : memref<128x1x1x2048xf32, #nkipy.mem<Sbuf>>
+    linalg.copy ins(%arg0 : memref<128x1x1x2048xf32, #nkipy.mem<SharedHbm>>)
+                outs(%a : memref<128x1x1x2048xf32, #nkipy.mem<Sbuf>>)
+    linalg.copy ins(%arg0 : memref<128x1x1x2048xf32, #nkipy.mem<SharedHbm>>)
+                outs(%b : memref<128x1x1x2048xf32, #nkipy.mem<Sbuf>>)
     %c0 = arith.constant 0 : index
     %c4 = arith.constant 4 : index
     %c1 = arith.constant 1 : index
     scf.for %i = %c0 to %c4 step %c1 {
-      linalg.add ins(%a, %b : memref<128x1x1x2048xf32, 3 : i32>, memref<128x1x1x2048xf32, 3 : i32>)
-                 outs(%b : memref<128x1x1x2048xf32, 3 : i32>)
+      linalg.add ins(%a, %b : memref<128x1x1x2048xf32, #nkipy.mem<Sbuf>>, memref<128x1x1x2048xf32, #nkipy.mem<Sbuf>>)
+                 outs(%b : memref<128x1x1x2048xf32, #nkipy.mem<Sbuf>>)
     }
-    linalg.copy ins(%b : memref<128x1x1x2048xf32, 3 : i32>)
-                outs(%arg0 : memref<128x1x1x2048xf32, 4 : i32>)
-    memref.dealloc %a : memref<128x1x1x2048xf32, 3 : i32>
-    memref.dealloc %b : memref<128x1x1x2048xf32, 3 : i32>
-    return %arg0 : memref<128x1x1x2048xf32, 4 : i32>
+    linalg.copy ins(%b : memref<128x1x1x2048xf32, #nkipy.mem<Sbuf>>)
+                outs(%arg0 : memref<128x1x1x2048xf32, #nkipy.mem<SharedHbm>>)
+    memref.dealloc %a : memref<128x1x1x2048xf32, #nkipy.mem<Sbuf>>
+    memref.dealloc %b : memref<128x1x1x2048xf32, #nkipy.mem<Sbuf>>
+    return %arg0 : memref<128x1x1x2048xf32, #nkipy.mem<SharedHbm>>
   }
 }
 """
@@ -193,9 +193,9 @@ module {
 
     check_patterns = """
     CHECK: func.func @spill_with_loop_use
-    CHECK: memref.alloc() : memref<128x1x1x2048xf32, 1 : i32>
-    CHECK: memref.copy {{.*}} 3 : i32> to memref<128x1x1x2048xf32, 1 : i32>
-    CHECK: memref.copy {{.*}} 1 : i32> to memref<128x1x1x2048xf32, 3 : i32>
+    CHECK: memref.alloc() : memref<128x1x1x2048xf32, #nkipy.mem<Hbm>>
+    CHECK: memref.copy {{.*}} #nkipy.mem<Sbuf>> to memref<128x1x1x2048xf32, #nkipy.mem<Hbm>>
+    CHECK: memref.copy {{.*}} #nkipy.mem<Hbm>> to memref<128x1x1x2048xf32, #nkipy.mem<Sbuf>>
     CHECK-NEXT: scf.for
     """
     run_filecheck(output_ir, check_patterns)
@@ -216,28 +216,28 @@ def test_multiple_pressure_peaks():
     """
     input_ir = """
 module {
-  func.func @two_peaks(%arg0: memref<128x1x1x2048xf32, 4 : i32>) -> memref<128x1x1x2048xf32, 4 : i32> {
-    %a = memref.alloc() : memref<128x1x1x2048xf32, 3 : i32>
-    %b = memref.alloc() : memref<128x1x1x2048xf32, 3 : i32>
-    linalg.copy ins(%arg0 : memref<128x1x1x2048xf32, 4 : i32>)
-                outs(%a : memref<128x1x1x2048xf32, 3 : i32>)
-    linalg.exp ins(%a : memref<128x1x1x2048xf32, 3 : i32>)
-               outs(%b : memref<128x1x1x2048xf32, 3 : i32>)
-    linalg.copy ins(%b : memref<128x1x1x2048xf32, 3 : i32>)
-                outs(%arg0 : memref<128x1x1x2048xf32, 4 : i32>)
-    memref.dealloc %a : memref<128x1x1x2048xf32, 3 : i32>
-    memref.dealloc %b : memref<128x1x1x2048xf32, 3 : i32>
-    %c = memref.alloc() : memref<128x1x1x2048xf32, 3 : i32>
-    %d = memref.alloc() : memref<128x1x1x2048xf32, 3 : i32>
-    linalg.copy ins(%arg0 : memref<128x1x1x2048xf32, 4 : i32>)
-                outs(%c : memref<128x1x1x2048xf32, 3 : i32>)
-    linalg.sqrt ins(%c : memref<128x1x1x2048xf32, 3 : i32>)
-                outs(%d : memref<128x1x1x2048xf32, 3 : i32>)
-    linalg.copy ins(%d : memref<128x1x1x2048xf32, 3 : i32>)
-                outs(%arg0 : memref<128x1x1x2048xf32, 4 : i32>)
-    memref.dealloc %c : memref<128x1x1x2048xf32, 3 : i32>
-    memref.dealloc %d : memref<128x1x1x2048xf32, 3 : i32>
-    return %arg0 : memref<128x1x1x2048xf32, 4 : i32>
+  func.func @two_peaks(%arg0: memref<128x1x1x2048xf32, #nkipy.mem<SharedHbm>>) -> memref<128x1x1x2048xf32, #nkipy.mem<SharedHbm>> {
+    %a = memref.alloc() : memref<128x1x1x2048xf32, #nkipy.mem<Sbuf>>
+    %b = memref.alloc() : memref<128x1x1x2048xf32, #nkipy.mem<Sbuf>>
+    linalg.copy ins(%arg0 : memref<128x1x1x2048xf32, #nkipy.mem<SharedHbm>>)
+                outs(%a : memref<128x1x1x2048xf32, #nkipy.mem<Sbuf>>)
+    linalg.exp ins(%a : memref<128x1x1x2048xf32, #nkipy.mem<Sbuf>>)
+               outs(%b : memref<128x1x1x2048xf32, #nkipy.mem<Sbuf>>)
+    linalg.copy ins(%b : memref<128x1x1x2048xf32, #nkipy.mem<Sbuf>>)
+                outs(%arg0 : memref<128x1x1x2048xf32, #nkipy.mem<SharedHbm>>)
+    memref.dealloc %a : memref<128x1x1x2048xf32, #nkipy.mem<Sbuf>>
+    memref.dealloc %b : memref<128x1x1x2048xf32, #nkipy.mem<Sbuf>>
+    %c = memref.alloc() : memref<128x1x1x2048xf32, #nkipy.mem<Sbuf>>
+    %d = memref.alloc() : memref<128x1x1x2048xf32, #nkipy.mem<Sbuf>>
+    linalg.copy ins(%arg0 : memref<128x1x1x2048xf32, #nkipy.mem<SharedHbm>>)
+                outs(%c : memref<128x1x1x2048xf32, #nkipy.mem<Sbuf>>)
+    linalg.sqrt ins(%c : memref<128x1x1x2048xf32, #nkipy.mem<Sbuf>>)
+                outs(%d : memref<128x1x1x2048xf32, #nkipy.mem<Sbuf>>)
+    linalg.copy ins(%d : memref<128x1x1x2048xf32, #nkipy.mem<Sbuf>>)
+                outs(%arg0 : memref<128x1x1x2048xf32, #nkipy.mem<SharedHbm>>)
+    memref.dealloc %c : memref<128x1x1x2048xf32, #nkipy.mem<Sbuf>>
+    memref.dealloc %d : memref<128x1x1x2048xf32, #nkipy.mem<Sbuf>>
+    return %arg0 : memref<128x1x1x2048xf32, #nkipy.mem<SharedHbm>>
   }
 }
 """
@@ -247,12 +247,12 @@ module {
 
     check_patterns = """
     CHECK: func.func @two_peaks
-    CHECK: memref.alloc() : memref<128x1x1x2048xf32, 1 : i32>
+    CHECK: memref.alloc() : memref<128x1x1x2048xf32, #nkipy.mem<Hbm>>
     CHECK: linalg.exp
-    CHECK: memref.copy {{.*}} 3 : i32> to memref<128x1x1x2048xf32, 1 : i32>
-    CHECK: memref.alloc() : memref<128x1x1x2048xf32, 1 : i32>
+    CHECK: memref.copy {{.*}} #nkipy.mem<Sbuf>> to memref<128x1x1x2048xf32, #nkipy.mem<Hbm>>
+    CHECK: memref.alloc() : memref<128x1x1x2048xf32, #nkipy.mem<Hbm>>
     CHECK: linalg.sqrt
-    CHECK: memref.copy {{.*}} 3 : i32> to memref<128x1x1x2048xf32, 1 : i32>
+    CHECK: memref.copy {{.*}} #nkipy.mem<Sbuf>> to memref<128x1x1x2048xf32, #nkipy.mem<Hbm>>
     CHECK: return
     """
     run_filecheck(output_ir, check_patterns)
@@ -296,8 +296,8 @@ def test_rmsnorm_no_spill():
 
     check_patterns = """
     CHECK: func.func @rmsnorm_kernel
-    CHECK: memref.alloc() {{.*}} : memref<128x{{.*}}xf32, 3 : i32>
-    CHECK-NOT: 1 : i32
+    CHECK: memref.alloc() {{.*}}#nkipy.mem<Sbuf>
+    CHECK-NOT: #nkipy.mem<Hbm>
     CHECK: return
     """
     run_kernel_test(
@@ -337,8 +337,8 @@ def test_exp_kernel_no_spurious_spill():
 
     check_patterns = """
     CHECK: func.func @exp_kernel
-    CHECK: memref.alloc() {{.*}} 3 : i32
-    CHECK-NOT: 1 : i32
+    CHECK: memref.alloc() {{.*}}#nkipy.mem<Sbuf>
+    CHECK-NOT: #nkipy.mem<Hbm>
     CHECK: linalg.exp
     CHECK: return
     """

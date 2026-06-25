@@ -79,35 +79,35 @@ def test_matmul_sbuf_add_hbm():
     check_patterns = '''
 CHECK: func.func @matmul_add_kernel
 CHECK: memref.alloc(){{.*}}: memref<256x256xf32>
-CHECK: memref.alloc(){{.*}}: memref<256x256xf32, 3 : i32>
-CHECK: linalg.transpose{{.*}}outs({{.*}}memref<256x256xf32, 3 : i32>)
-CHECK: memref.alloc(){{.*}}: memref<256x256xf32, 3 : i32>
-CHECK: memref.copy{{.*}}to memref<256x256xf32, 3 : i32>
+CHECK: memref.alloc(){{.*}}: memref<256x256xf32, #nkipy.mem<Sbuf>>
+CHECK: linalg.transpose{{.*}}outs({{.*}}memref<256x256xf32, #nkipy.mem<Sbuf>>)
+CHECK: memref.alloc(){{.*}}: memref<256x256xf32, #nkipy.mem<Sbuf>>
+CHECK: memref.copy{{.*}}to memref<256x256xf32, #nkipy.mem<Sbuf>>
 CHECK: scf.for
-CHECK: memref.subview{{.*}}3 : i32>
+CHECK: memref.subview{{.*}}#nkipy.mem<Sbuf>>
 CHECK: memref.subview
 CHECK: scf.for
-CHECK: memref.subview{{.*}}3 : i32>
-CHECK: memref.alloc(){{.*}}: memref<128x128xf32, 2 : i32>
-CHECK-NOT: memref.copy{{.*}}to memref<128x128xf32, 2 : i32>
+CHECK: memref.subview{{.*}}#nkipy.mem<Sbuf>>
+CHECK: memref.alloc(){{.*}}: memref<128x128xf32, #nkipy.mem<Psum>>
+CHECK-NOT: memref.copy{{.*}}to memref<128x128xf32, #nkipy.mem<Psum>>
 CHECK: scf.for
-CHECK: memref.subview{{.*}}3 : i32>
-CHECK: memref.subview{{.*}}3 : i32>
+CHECK: memref.subview{{.*}}#nkipy.mem<Sbuf>>
+CHECK: memref.subview{{.*}}#nkipy.mem<Sbuf>>
 CHECK: linalg.matmul
 CHECK: memref.subview
-CHECK: memref.copy{{.*}}2 : i32>{{.*}}to{{.*}}memref<128x128xf32
+CHECK: memref.copy{{.*}}#nkipy.mem<Psum>>{{.*}}to{{.*}}memref<128x128xf32
 CHECK: nkipy.layout
 CHECK: memref.alloc(){{.*}}: memref<256x256xf32>
 CHECK: scf.for
 CHECK: scf.for
 CHECK: memref.subview
 CHECK: memref.subview
-CHECK: memref.alloc(){{.*}}: memref<128x128xf32, 3 : i32>
-CHECK: memref.copy{{.*}}to{{.*}}3 : i32>
-CHECK: memref.alloc(){{.*}}: memref<128x128xf32, 3 : i32>
+CHECK: memref.alloc(){{.*}}: memref<128x128xf32, #nkipy.mem<Sbuf>>
+CHECK: memref.copy{{.*}}to{{.*}}#nkipy.mem<Sbuf>>
+CHECK: memref.alloc(){{.*}}: memref<128x128xf32, #nkipy.mem<Sbuf>>
 CHECK: linalg.add
 CHECK: memref.subview
-CHECK: memref.copy{{.*}}3 : i32>{{.*}}to{{.*}}memref<128x128xf32
+CHECK: memref.copy{{.*}}#nkipy.mem<Sbuf>>{{.*}}to{{.*}}memref<128x128xf32
 CHECK: nkipy.layout
 CHECK: return
 '''

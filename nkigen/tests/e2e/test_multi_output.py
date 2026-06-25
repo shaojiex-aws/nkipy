@@ -44,7 +44,7 @@ def test_multi_output_traces():
     module = add_and_sub.to_mlir()
     mlir_str = str(module)
     # Function should have two result types
-    assert "-> (tensor<256x256xf32>, tensor<256x256xf32>)" in mlir_str
+    assert "-> (memref<256x256xf32>, memref<256x256xf32>)" in mlir_str
 
 
 def test_three_output_traces():
@@ -52,7 +52,7 @@ def test_three_output_traces():
     module = three_outputs.to_mlir()
     mlir_str = str(module)
     assert (
-        "-> (tensor<256x256xf32>, tensor<256x256xf32>, tensor<256x256xf32>)" in mlir_str
+        "-> (memref<256x256xf32>, memref<256x256xf32>, memref<256x256xf32>)" in mlir_str
     )
 
 

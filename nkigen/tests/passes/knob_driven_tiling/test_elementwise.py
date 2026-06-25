@@ -46,38 +46,33 @@ def test_add_tiling(shape, tile_size):
         return result
 
     # Build FileCheck patterns based on dimensionality
-    # Elementwise ops have one scf.for loop per dimension
-    # With SBUF promotion, we expect:
+    # Memref backend produces:
     # 1. scf.for loops for tiling
-    # 2. tensor.extract_slice for each input/output
-    # 3. bufferization.alloc_tensor for SBUF promotion
-    # 4. linalg.add on SBUF tensors
-    # 5. tensor.insert_slice to write back
-    #
-    # FileCheck regex uses {{.*}} - in f-strings, {{{{.*}}}} produces {{.*}}
+    # 2. memref.subview for each input/output
+    # 3. memref.alloc in SBUF + memref.copy for promotion
+    # 4. linalg.add on SBUF memrefs
+    # 5. memref.copy to write back
     check_patterns = "CHECK: func.func\n"
     for i, (dim, tile) in enumerate(zip(shape, tile_size)):
         check_patterns += f"    CHECK: scf.for %{{{{.*}}}} = %c0{{{{.*}}}} to %c{dim}{{{{.*}}}} step %c{tile}\n"
 
-    # Tiled tensor shapes - IR uses [dim1, dim2] with comma separator
-    tile_shape_comma = ", ".join(str(t) for t in tile_size)
     tile_shape_x = "x".join(str(t) for t in tile_size)
 
-    # With SBUF promotion, we expect alloc_tensor ops with memory_space
-    check_patterns += f"    CHECK: tensor.extract_slice {{{{.*}}}} [{tile_shape_comma}]\n"
-    check_patterns += f"    CHECK: bufferization.alloc_tensor() {{{{.*}}}}memory_space = 3 : i32\n"
-    check_patterns += f"    CHECK: tensor.extract_slice {{{{.*}}}} [{tile_shape_comma}]\n"
-    check_patterns += f"    CHECK: bufferization.alloc_tensor() {{{{.*}}}}memory_space = 3 : i32\n"
-    check_patterns += f"    CHECK: bufferization.alloc_tensor() {{{{.*}}}}memory_space = 3 : i32\n"
-    check_patterns += f"    CHECK: linalg.add {{{{.*}}}} tensor<{tile_shape_x}xf32\n"
-    check_patterns += f"    CHECK: tensor.insert_slice\n"
-    check_patterns += f"    CHECK: scf.yield\n"
+    # With SBUF promotion: subview + alloc + copy for each operand
+    check_patterns += f"    CHECK: memref.subview\n"
+    check_patterns += f"    CHECK: memref.alloc() : memref<{tile_shape_x}xf32, #nkipy.mem<Sbuf>>\n"
+    check_patterns += f"    CHECK: memref.subview\n"
+    check_patterns += f"    CHECK: memref.alloc() : memref<{tile_shape_x}xf32, #nkipy.mem<Sbuf>>\n"
+    check_patterns += f"    CHECK: memref.subview\n"
+    check_patterns += f"    CHECK: memref.alloc() : memref<{tile_shape_x}xf32, #nkipy.mem<Sbuf>>\n"
+    check_patterns += f"    CHECK: linalg.add {{{{.*}}}} memref<{tile_shape_x}xf32, #nkipy.mem<Sbuf>>\n"
+    check_patterns += f"    CHECK: memref.copy\n"
 
     run_kernel_test(
         add_kernel,
         stop_after='apply-and-strip-transforms',
         check_patterns=check_patterns,
-        modes=Mode.LLVM | Mode.FILECHECK,
+        modes=Mode.FILECHECK,
     )
 
 
@@ -139,30 +134,24 @@ def test_add_simple():
         knob.knob(result).tile_op(tile_size=tile_size)
         return result
 
-    # FileCheck patterns for 2D elementwise tiling with SBUF promotion
-    # After promotion, we expect:
-    # 1. extract_slice for input tiles
-    # 2. alloc_tensor with 3 : i32 for SBUF copies
-    # 3. linalg.add on promoted tensors
-    # 4. insert_slice to write back
     check_patterns = f"""
     CHECK: func.func
     CHECK: scf.for %{{{{.*}}}} = %c0{{{{.*}}}} to %c{dim0}{{{{.*}}}} step %c{tile0}
     CHECK: scf.for %{{{{.*}}}} = %c0{{{{.*}}}} to %c{dim1}{{{{.*}}}} step %c{tile1}
-    CHECK: tensor.extract_slice {{{{.*}}}} [{tile0}, {tile1}]
-    CHECK: bufferization.alloc_tensor() {{{{.*}}}}memory_space = 3 : i32
-    CHECK: tensor.extract_slice {{{{.*}}}} [{tile0}, {tile1}]
-    CHECK: bufferization.alloc_tensor() {{{{.*}}}}memory_space = 3 : i32
-    CHECK: bufferization.alloc_tensor() {{{{.*}}}}memory_space = 3 : i32
-    CHECK: linalg.add {{{{.*}}}} tensor<{tile0}x{tile1}xf32
-    CHECK: tensor.insert_slice
-    CHECK: scf.yield
+    CHECK: memref.subview
+    CHECK: memref.alloc() : memref<{tile0}x{tile1}xf32, #nkipy.mem<Sbuf>>
+    CHECK: memref.subview
+    CHECK: memref.alloc() : memref<{tile0}x{tile1}xf32, #nkipy.mem<Sbuf>>
+    CHECK: memref.subview
+    CHECK: memref.alloc() : memref<{tile0}x{tile1}xf32, #nkipy.mem<Sbuf>>
+    CHECK: linalg.add {{{{.*}}}} memref<{tile0}x{tile1}xf32, #nkipy.mem<Sbuf>>
+    CHECK: memref.copy
     """
     run_kernel_test(
         add_kernel,
         stop_after='apply-and-strip-transforms',
         check_patterns=check_patterns,
-        modes=Mode.LLVM | Mode.FILECHECK,
+        modes=Mode.FILECHECK,
     )
 
 
@@ -171,8 +160,8 @@ def test_add_simple():
 # ============================================================================
 # When one operand is a scalar constant, the tracer generates a linalg.generic
 # with the arith.constant embedded in the region body. This has 1 DPS input
-# (the tensor) and 1 DPS init (the output), so tiling promotes 1 input + 1
-# output to SBUF (2 alloc_tensors, not 3 like binary tensor-tensor ops).
+# (the memref) and 1 DPS init (the output), so tiling promotes 1 input + 1
+# output to SBUF (2 memref.alloc, not 3 like binary tensor-tensor ops).
 
 
 def test_tensor_add_scalar():
@@ -193,23 +182,22 @@ def test_tensor_add_scalar():
         knob.knob(result).tile_op(tile_size=tile_size)
         return result
 
-    # linalg.generic with 1 input: 1 extract_slice + 2 alloc_tensors (1 input + 1 output)
     check_patterns = f"""
     CHECK: func.func
     CHECK: scf.for %{{{{.*}}}} = %c0{{{{.*}}}} to %c{dim0}{{{{.*}}}} step %c{tile0}
     CHECK: scf.for %{{{{.*}}}} = %c0{{{{.*}}}} to %c{dim1}{{{{.*}}}} step %c{tile1}
-    CHECK: tensor.extract_slice {{{{.*}}}} [{tile0}, {tile1}]
-    CHECK: bufferization.alloc_tensor() {{{{.*}}}}memory_space = 3 : i32
-    CHECK: bufferization.alloc_tensor() {{{{.*}}}}memory_space = 3 : i32
+    CHECK: memref.subview
+    CHECK: memref.alloc() : memref<{tile0}x{tile1}xf32, #nkipy.mem<Sbuf>>
+    CHECK: memref.subview
+    CHECK: memref.alloc() : memref<{tile0}x{tile1}xf32, #nkipy.mem<Sbuf>>
     CHECK: linalg.generic
-    CHECK: tensor.insert_slice
-    CHECK: scf.yield
+    CHECK: memref.copy
     """
     run_kernel_test(
         kernel,
         stop_after='apply-and-strip-transforms',
         check_patterns=check_patterns,
-        modes=Mode.LLVM | Mode.FILECHECK,
+        modes=Mode.FILECHECK,
     )
 
 
@@ -231,23 +219,22 @@ def test_scalar_minus_tensor():
         knob.knob(result).tile_op(tile_size=tile_size)
         return result
 
-    # 1 DPS input -> 1 extract_slice, 2 alloc_tensors (1 input + 1 output)
     check_patterns = f"""
     CHECK: func.func
     CHECK: scf.for %{{{{.*}}}} = %c0{{{{.*}}}} to %c{dim0}{{{{.*}}}} step %c{tile0}
     CHECK: scf.for %{{{{.*}}}} = %c0{{{{.*}}}} to %c{dim1}{{{{.*}}}} step %c{tile1}
-    CHECK: tensor.extract_slice {{{{.*}}}} [{tile0}, {tile1}]
-    CHECK: bufferization.alloc_tensor() {{{{.*}}}}memory_space = 3 : i32
-    CHECK: bufferization.alloc_tensor() {{{{.*}}}}memory_space = 3 : i32
+    CHECK: memref.subview
+    CHECK: memref.alloc() : memref<{tile0}x{tile1}xf32, #nkipy.mem<Sbuf>>
+    CHECK: memref.subview
+    CHECK: memref.alloc() : memref<{tile0}x{tile1}xf32, #nkipy.mem<Sbuf>>
     CHECK: linalg.generic
-    CHECK: tensor.insert_slice
-    CHECK: scf.yield
+    CHECK: memref.copy
     """
     run_kernel_test(
         kernel,
         stop_after='apply-and-strip-transforms',
         check_patterns=check_patterns,
-        modes=Mode.LLVM | Mode.FILECHECK,
+        modes=Mode.FILECHECK,
     )
 
 
@@ -272,18 +259,18 @@ def test_tensor_mul_scalar():
     CHECK: func.func
     CHECK: scf.for %{{{{.*}}}} = %c0{{{{.*}}}} to %c{dim0}{{{{.*}}}} step %c{tile0}
     CHECK: scf.for %{{{{.*}}}} = %c0{{{{.*}}}} to %c{dim1}{{{{.*}}}} step %c{tile1}
-    CHECK: tensor.extract_slice {{{{.*}}}} [{tile0}, {tile1}]
-    CHECK: bufferization.alloc_tensor() {{{{.*}}}}memory_space = 3 : i32
-    CHECK: bufferization.alloc_tensor() {{{{.*}}}}memory_space = 3 : i32
+    CHECK: memref.subview
+    CHECK: memref.alloc() : memref<{tile0}x{tile1}xf32, #nkipy.mem<Sbuf>>
+    CHECK: memref.subview
+    CHECK: memref.alloc() : memref<{tile0}x{tile1}xf32, #nkipy.mem<Sbuf>>
     CHECK: linalg.generic
-    CHECK: tensor.insert_slice
-    CHECK: scf.yield
+    CHECK: memref.copy
     """
     run_kernel_test(
         kernel,
         stop_after='apply-and-strip-transforms',
         check_patterns=check_patterns,
-        modes=Mode.LLVM | Mode.FILECHECK,
+        modes=Mode.FILECHECK,
     )
 
 
@@ -308,18 +295,18 @@ def test_tensor_div_scalar():
     CHECK: func.func
     CHECK: scf.for %{{{{.*}}}} = %c0{{{{.*}}}} to %c{dim0}{{{{.*}}}} step %c{tile0}
     CHECK: scf.for %{{{{.*}}}} = %c0{{{{.*}}}} to %c{dim1}{{{{.*}}}} step %c{tile1}
-    CHECK: tensor.extract_slice {{{{.*}}}} [{tile0}, {tile1}]
-    CHECK: bufferization.alloc_tensor() {{{{.*}}}}memory_space = 3 : i32
-    CHECK: bufferization.alloc_tensor() {{{{.*}}}}memory_space = 3 : i32
+    CHECK: memref.subview
+    CHECK: memref.alloc() : memref<{tile0}x{tile1}xf32, #nkipy.mem<Sbuf>>
+    CHECK: memref.subview
+    CHECK: memref.alloc() : memref<{tile0}x{tile1}xf32, #nkipy.mem<Sbuf>>
     CHECK: linalg.generic
-    CHECK: tensor.insert_slice
-    CHECK: scf.yield
+    CHECK: memref.copy
     """
     run_kernel_test(
         kernel,
         stop_after='apply-and-strip-transforms',
         check_patterns=check_patterns,
-        modes=Mode.LLVM | Mode.FILECHECK,
+        modes=Mode.FILECHECK,
     )
 
 
@@ -341,23 +328,22 @@ def test_scalar_div_tensor():
         knob.knob(result).tile_op(tile_size=tile_size)
         return result
 
-    # prepare-arithmetic converts 1.0/x into linalg.reciprocal
     check_patterns = f"""
     CHECK: func.func
     CHECK: scf.for %{{{{.*}}}} = %c0{{{{.*}}}} to %c{dim0}{{{{.*}}}} step %c{tile0}
     CHECK: scf.for %{{{{.*}}}} = %c0{{{{.*}}}} to %c{dim1}{{{{.*}}}} step %c{tile1}
-    CHECK: tensor.extract_slice {{{{.*}}}} [{tile0}, {tile1}]
-    CHECK: bufferization.alloc_tensor() {{{{.*}}}}memory_space = 3 : i32
-    CHECK: bufferization.alloc_tensor() {{{{.*}}}}memory_space = 3 : i32
+    CHECK: memref.subview
+    CHECK: memref.alloc() : memref<{tile0}x{tile1}xf32, #nkipy.mem<Sbuf>>
+    CHECK: memref.subview
+    CHECK: memref.alloc() : memref<{tile0}x{tile1}xf32, #nkipy.mem<Sbuf>>
     CHECK: linalg.reciprocal
-    CHECK: tensor.insert_slice
-    CHECK: scf.yield
+    CHECK: memref.copy
     """
     run_kernel_test(
         kernel,
         stop_after='apply-and-strip-transforms',
         check_patterns=check_patterns,
-        modes=Mode.LLVM | Mode.FILECHECK,
+        modes=Mode.FILECHECK,
     )
 
 

@@ -13,10 +13,10 @@ from nkigen._mlir._mlir_libs._nkipy import nkipy as _nkipy_native
 from .. import irutils
 
 _MEMSPACE_STR = {
-    irutils.MEMSPACE_HBM: "#nisa.mem<hbm>",
-    irutils.MEMSPACE_PSUM: "#nisa.mem<psum>",
-    irutils.MEMSPACE_SBUF: "#nisa.mem<sbuf>",
-    irutils.MEMSPACE_SHARED_HBM: "#nisa.mem<shared_hbm>",
+    "Hbm": "#nisa.mem<hbm>",
+    "Psum": "#nisa.mem<psum>",
+    "Sbuf": "#nisa.mem<sbuf>",
+    "SharedHbm": "#nisa.mem<shared_hbm>",
 }
 
 _LINALG_TO_ARITH_OP = {

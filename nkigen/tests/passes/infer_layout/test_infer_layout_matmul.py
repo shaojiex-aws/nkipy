@@ -454,12 +454,11 @@ def test_return_value_gets_shared_hbm():
     def kernel(x):
         return np.exp(x)
 
-    # mem_space = 4 is SharedHbm
     run_kernel_test(
         kernel,
         stop_after='infer-layout',
         check_ir_contains=[
-            "mem_space = 4",
+            "mem_space = #nkipy.mem<SharedHbm>",
         ],
         modes=Mode.STRING_CHECK,
     )

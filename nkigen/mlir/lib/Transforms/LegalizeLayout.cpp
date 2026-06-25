@@ -59,13 +59,13 @@ struct LayoutInfo {
 };
 
 static bool isSbuf(Attribute memSpaceAttr) {
-  if (auto a = dyn_cast_or_null<nkipy::MemSpaceEnumAttr>(memSpaceAttr))
+  if (auto a = dyn_cast_or_null<nkipy::MemSpaceAttr>(memSpaceAttr))
     return a.getValue() == nkipy::MemSpaceEnum::Sbuf;
   return false;
 }
 
 static bool isHbm(Attribute memSpaceAttr) {
-  if (auto a = dyn_cast_or_null<nkipy::MemSpaceEnumAttr>(memSpaceAttr))
+  if (auto a = dyn_cast_or_null<nkipy::MemSpaceAttr>(memSpaceAttr))
     return a.getValue() == nkipy::MemSpaceEnum::Hbm ||
            a.getValue() == nkipy::MemSpaceEnum::SharedHbm;
   return false;
@@ -735,7 +735,7 @@ struct NkipyLegalizeLayoutPass
       for (int64_t i = 2; i < rank; ++i)
         sbufShape.push_back(hbmShape[i]);
 
-      auto sbufMemSpace = nkipy::MemSpaceEnumAttr::get(
+      auto sbufMemSpace = nkipy::MemSpaceAttr::get(
           builder.getContext(), nkipy::MemSpaceEnum::Sbuf);
       auto sbufType = MemRefType::get(
           sbufShape, hbmType.getElementType(), nullptr, sbufMemSpace);

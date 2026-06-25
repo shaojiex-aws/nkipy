@@ -9,20 +9,16 @@ readable.
 
 from __future__ import annotations
 
-import re
-
 from mlir import ir as up_ir  # type: ignore[import-not-found]
 
+from nkigen._mlir._mlir_libs._nkipy import nkipy as _nkipy_native
 
-# Integer memory-space markers in post-Phase-4 memref types (matching
-# MemSpaceEnum in NkipyAttrs.td; the enum starts at 1).
-MEMSPACE_HBM = 1
-MEMSPACE_PSUM = 2
-MEMSPACE_SBUF = 3
-MEMSPACE_SHARED_HBM = 4
 
-# "<n> : i32" memory-space marker -> int.
-_MEMSPACE_RE = re.compile(r"(\d+)\s*:\s*i32")
+# Memory-space markers matching MemSpaceEnum case names in NkipyAttrs.td.
+MEMSPACE_HBM = "Hbm"
+MEMSPACE_PSUM = "Psum"
+MEMSPACE_SBUF = "Sbuf"
+MEMSPACE_SHARED_HBM = "SharedHbm"
 
 
 def memref_shape(ty: up_ir.Type) -> list[int]:
@@ -35,17 +31,18 @@ def memref_elem_type(ty: up_ir.Type) -> str:
     return str(up_ir.MemRefType(ty).element_type)
 
 
-def memref_memspace(ty: up_ir.Type) -> int | None:
-    """Integer memory-space marker of a memref, or ``None`` if unset.
+def memref_memspace(ty: up_ir.Type) -> str | None:
+    """Memory-space enum name of a memref, or ``None`` if unset.
 
-    Post-Phase-4 memrefs carry the space as an ``i32`` attribute (1=hbm,
-    2=psum, 3=sbuf, 4=shared_hbm).
+    Returns the MemSpaceEnum case name (e.g. ``"Sbuf"``, ``"Psum"``, ``"Hbm"``)
+    by querying the NkipyMemSpaceAttr's value directly.
     """
     ms = up_ir.MemRefType(ty).memory_space
     if ms is None:
         return None
-    m = _MEMSPACE_RE.search(str(ms))
-    return int(m.group(1)) if m else None
+    if not _nkipy_native.MemSpaceEnum.isinstance(ms):
+        return None
+    return _nkipy_native.MemSpaceEnum(ms).value
 
 
 def is_on_chip(ty: up_ir.Type) -> bool:

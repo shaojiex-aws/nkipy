@@ -67,13 +67,13 @@ findExistingMemSpace(Value value) {
       if (!layout || layout.getTarget() != v)
         continue;
       if (auto ms = layout.getMemSpace())
-        return *ms;
+        return ms->getValue();
     }
     // Memref path: check memref.alloc memory space.
     if (auto allocOp = v.getDefiningOp<memref::AllocOp>()) {
       auto memrefType = cast<MemRefType>(allocOp.getType());
       if (auto msAttr = memrefType.getMemorySpace()) {
-        if (auto nkipyMs = dyn_cast<nkipy::MemSpaceEnumAttr>(msAttr))
+        if (auto nkipyMs = dyn_cast<nkipy::MemSpaceAttr>(msAttr))
           return nkipyMs.getValue();
       }
       return std::nullopt;
@@ -82,7 +82,7 @@ findExistingMemSpace(Value value) {
     if (auto allocTensor =
             v.getDefiningOp<bufferization::AllocTensorOp>()) {
       if (auto ms = allocTensor.getMemorySpaceAttr()) {
-        if (auto nkipyMs = dyn_cast<nkipy::MemSpaceEnumAttr>(ms))
+        if (auto nkipyMs = dyn_cast<nkipy::MemSpaceAttr>(ms))
           return nkipyMs.getValue();
       }
       return std::nullopt;
@@ -121,7 +121,7 @@ transform::PromoteTensorOp::apply(transform::TransformRewriter &rewriter,
   // the source already lives there and skip the alloc+copy.
   std::optional<nkipy::MemSpaceEnum> targetMs;
   if (auto msAttr = getMemorySpaceAttr())
-    if (auto nkipyMs = dyn_cast<nkipy::MemSpaceEnumAttr>(msAttr))
+    if (auto nkipyMs = dyn_cast<nkipy::MemSpaceAttr>(msAttr))
       targetMs = nkipyMs.getValue();
 
   for (Value value : state.getPayloadValues(getTensor())) {
@@ -278,7 +278,7 @@ transform::NkipyTransposeMatmulOp::apply(transform::TransformRewriter &rewriter,
 
     Value transposedInit;
     if (auto memrefType = dyn_cast<MemRefType>(lhs.getType())) {
-      auto sbufAttr = nkipy::MemSpaceEnumAttr::get(
+      auto sbufAttr = nkipy::MemSpaceAttr::get(
           rewriter.getContext(), nkipy::MemSpaceEnum::Sbuf);
       auto transposedType = MemRefType::get(
           {K, M}, elemTy, MemRefLayoutAttrInterface{}, sbufAttr);

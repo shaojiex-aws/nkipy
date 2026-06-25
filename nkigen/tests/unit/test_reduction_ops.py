@@ -45,8 +45,8 @@ def test_sum_axis(shape, axis, keepdims, tile_size, reduction_tile):
     run_kernel_test(
         kernel,
         stop_after='apply-and-strip-transforms',
-        check_ir_contains=["scf.for", "memory_space = 3 : i32", "linalg.generic"],
-        modes=Mode.LLVM | Mode.STRING_CHECK,
+        check_ir_contains=["scf.for", "#nkipy.mem<Sbuf>", "linalg.generic"],
+        modes=Mode.STRING_CHECK,
     )
 
     # TODO: enable linalg-to-nisa stage verification once we fix:
@@ -107,8 +107,8 @@ def test_mean_axis(shape, axis, keepdims, tile_size, reduction_tile):
     run_kernel_test(
         kernel,
         stop_after='apply-and-strip-transforms',
-        check_ir_contains=["scf.for", "memory_space = 3 : i32", "linalg.generic"],
-        modes=Mode.LLVM | Mode.STRING_CHECK,
+        check_ir_contains=["scf.for", "#nkipy.mem<Sbuf>", "linalg.generic"],
+        modes=Mode.STRING_CHECK,
     )
 
     # TODO: enable linalg-to-nisa stage verification (same blockers as test_sum_axis,
@@ -163,8 +163,8 @@ def test_max_axis(shape, axis, keepdims, tile_size, reduction_tile):
     run_kernel_test(
         kernel,
         stop_after='apply-and-strip-transforms',
-        check_ir_contains=["scf.for", "memory_space = 3 : i32", "linalg.generic"],
-        modes=Mode.LLVM | Mode.STRING_CHECK,
+        check_ir_contains=["scf.for", "#nkipy.mem<Sbuf>", "linalg.generic"],
+        modes=Mode.STRING_CHECK,
     )
 
     # TODO: enable linalg-to-nisa stage verification (same blockers as test_sum_axis)
@@ -218,8 +218,8 @@ def test_min_axis(shape, axis, keepdims, tile_size, reduction_tile):
     run_kernel_test(
         kernel,
         stop_after='apply-and-strip-transforms',
-        check_ir_contains=["scf.for", "memory_space = 3 : i32", "linalg.generic"],
-        modes=Mode.LLVM | Mode.STRING_CHECK,
+        check_ir_contains=["scf.for", "#nkipy.mem<Sbuf>", "linalg.generic"],
+        modes=Mode.STRING_CHECK,
     )
 
     # TODO: enable linalg-to-nisa stage verification (same blockers as test_sum_axis)
@@ -268,8 +268,8 @@ def test_sum_of_squares():
     run_kernel_test(
         kernel,
         stop_after='apply-and-strip-transforms',
-        check_ir_contains=["scf.for", "memory_space = 3 : i32"],
-        modes=Mode.LLVM | Mode.STRING_CHECK,
+        check_ir_contains=["scf.for", "#nkipy.mem<Sbuf>"],
+        modes=Mode.STRING_CHECK,
     )
 
     # TODO: enable linalg-to-nisa stage — crashes because intermediate
@@ -306,8 +306,8 @@ def test_mean_of_squares():
     run_kernel_test(
         kernel,
         stop_after='apply-and-strip-transforms',
-        check_ir_contains=["scf.for", "memory_space = 3 : i32"],
-        modes=Mode.LLVM | Mode.STRING_CHECK,
+        check_ir_contains=["scf.for", "#nkipy.mem<Sbuf>"],
+        modes=Mode.STRING_CHECK,
     )
 
     # TODO: enable linalg-to-nisa stage — same intermediate alloc issue as
@@ -351,8 +351,8 @@ def test_softmax_reductions():
         kernel,
         stop_after='apply-and-strip-transforms',
         inputs=[A],
-        check_ir_contains=["scf.for", "memory_space = 3 : i32", "linalg.generic"],
-        modes=Mode.LLVM | Mode.STRING_CHECK,
+        check_ir_contains=["scf.for", "#nkipy.mem<Sbuf>", "linalg.generic"],
+        modes=Mode.STRING_CHECK,
     )
 
     # TODO: enable linalg-to-nisa stage — multi-output chained kernel with

@@ -74,7 +74,7 @@ struct NkipyAnnotateMemorySpacePass
     MLIRContext *ctx = func.getContext();
     FunctionType oldType = func.getFunctionType();
     auto sharedHbm =
-        nkipy::MemSpaceEnumAttr::get(ctx, nkipy::MemSpaceEnum::SharedHbm);
+        nkipy::MemSpaceAttr::get(ctx, nkipy::MemSpaceEnum::SharedHbm);
 
     SmallVector<Type> newInputs, newResults;
     bool changed = addMemSpaceToTypes(oldType.getInputs(), sharedHbm, newInputs);
@@ -119,7 +119,7 @@ struct NkipyAnnotateMemorySpacePass
       }
 
       // CONSTANT is a marker; verify it matches a scalar broadcast pattern.
-      if (*memSpace == nkipy::MemSpaceEnum::Constant &&
+      if (memSpace->getValue() == nkipy::MemSpaceEnum::Constant &&
           !isScalarBroadcast(target)) {
         layoutOp.emitError()
             << "CONSTANT memory space requires a scalar broadcast "
@@ -127,7 +127,7 @@ struct NkipyAnnotateMemorySpacePass
         signalPassFailure();
         return;
       }
-      Attribute memSpaceAttr = nkipy::MemSpaceEnumAttr::get(ctx, *memSpace);
+      Attribute memSpaceAttr = *memSpace;
 
       target.setType(MemRefType::get(memrefType.getShape(),
                                      memrefType.getElementType(),
@@ -302,7 +302,7 @@ struct NkipyAnnotateMemorySpacePass
       auto rootType = cast<MemRefType>(root.getType());
       if (rootType.getMemorySpace())
         return;
-      auto hbm = nkipy::MemSpaceEnumAttr::get(
+      auto hbm = nkipy::MemSpaceAttr::get(
           func.getContext(), nkipy::MemSpaceEnum::Hbm);
       root.setType(MemRefType::get(rootType.getShape(),
                                    rootType.getElementType(),

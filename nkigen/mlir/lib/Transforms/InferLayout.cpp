@@ -35,6 +35,7 @@
 
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/Linalg/IR/Linalg.h"
+#include "mlir/Dialect/MemRef/IR/MemRef.h"
 #include "mlir/Dialect/Tensor/IR/Tensor.h"
 #include "mlir/IR/Builders.h"
 #include "llvm/Support/raw_ostream.h"
@@ -43,6 +44,36 @@
 
 using namespace mlir;
 using namespace nkipy;
+
+/// Get the "output value" for a linalg op: the SSA result in tensor mode,
+/// or the DPS output operand in memref mode (where linalg ops have no results).
+static Value getLinalgOutputValue(linalg::LinalgOp op) {
+  if (op->getNumResults() > 0)
+    return op->getResult(0);
+  SmallVector<Value> inits(op.getDpsInits());
+  return inits.empty() ? Value() : inits[0];
+}
+
+/// Find the linalg op that "produces" this value. In tensor mode, it's the
+/// defining op. In memref mode, it's the linalg op that uses this value as
+/// its DPS output operand.
+static linalg::LinalgOp findProducerLinalgOp(Value val) {
+  if (Operation *defOp = val.getDefiningOp()) {
+    if (auto linalgOp = dyn_cast<linalg::LinalgOp>(defOp))
+      return linalgOp;
+  }
+  // Memref mode: the producer is a user that has val as DPS output.
+  for (Operation *user : val.getUsers()) {
+    auto linalgOp = dyn_cast<linalg::LinalgOp>(user);
+    if (!linalgOp)
+      continue;
+    for (Value init : linalgOp.getDpsInits()) {
+      if (init == val)
+        return linalgOp;
+    }
+  }
+  return nullptr;
+}
 
 namespace mlir {
 namespace nkipy {
@@ -85,7 +116,7 @@ struct MatmulDims {
 struct LayoutEntry {
   DenseI64ArrayAttr tileSize;  // One entry per iterator, in linalg iterator
                                // order (entry i -> iterator i).
-  MemSpaceEnumAttr memSpace;
+  MemSpaceAttr memSpace;
   IntegerAttr partitionDim;  // UI32Attr, optional
   int seedId = -1;           // Which seed originated this entry
 };
@@ -99,6 +130,7 @@ struct NkipyInferLayoutPass
 
   void getDependentDialects(DialectRegistry &registry) const override {
     registry.insert<linalg::LinalgDialect>();
+    registry.insert<memref::MemRefDialect>();
     registry.insert<nkipy::NkipyDialect>();
   }
 
@@ -138,6 +170,10 @@ struct NkipyInferLayoutPass
         val = extractOp.getSource();
         continue;
       }
+      if (auto subviewOp = dyn_cast<memref::SubViewOp>(def)) {
+        val = subviewOp.getSource();
+        continue;
+      }
       return false;
     }
     return false;
@@ -146,7 +182,7 @@ struct NkipyInferLayoutPass
   /// Determine the appropriate memory space for a value.  If the value
   /// already has a known mem_space (user annotation) respect it; if it
   /// traces to a function argument, use SharedHBM; otherwise default to SBUF.
-  MemSpaceEnumAttr inferMemSpace(Value val,
+  MemSpaceAttr inferMemSpace(Value val,
                                  const DenseMap<Value, LayoutEntry> &annotatedValues,
                                  MLIRContext *ctx) {
     auto it = annotatedValues.find(val);
@@ -157,13 +193,13 @@ struct NkipyInferLayoutPass
     return getSbufMemSpace(ctx);
   }
 
-  /// Create a default MemSpaceEnumAttr for SBUF.
-  MemSpaceEnumAttr getSbufMemSpace(MLIRContext *ctx) {
-    return MemSpaceEnumAttr::get(ctx, MemSpaceEnum::Sbuf);
+  /// Create a default MemSpaceAttr for SBUF.
+  MemSpaceAttr getSbufMemSpace(MLIRContext *ctx) {
+    return MemSpaceAttr::get(ctx, MemSpaceEnum::Sbuf);
   }
 
-  MemSpaceEnumAttr getSharedHbmMemSpace(MLIRContext *ctx) {
-    return MemSpaceEnumAttr::get(ctx, MemSpaceEnum::SharedHbm);
+  MemSpaceAttr getSharedHbmMemSpace(MLIRContext *ctx) {
+    return MemSpaceAttr::get(ctx, MemSpaceEnum::SharedHbm);
   }
 
   /// Create a UI32 IntegerAttr for partition_dim.
@@ -211,8 +247,7 @@ struct NkipyInferLayoutPass
     int64_t valueRank = shapedType.getRank();
     ArrayRef<int64_t> arr = iterTile.asArrayRef();
 
-    Operation *defOp = val.getDefiningOp();
-    auto linalgOp = defOp ? dyn_cast<linalg::LinalgOp>(defOp) : nullptr;
+    auto linalgOp = findProducerLinalgOp(val);
 
     // Matmul: iter-space is rank value+1 (trailing K); drop trailing.
     if (linalgOp && isMatmulOp(linalgOp) &&
@@ -541,8 +576,7 @@ struct NkipyInferLayoutPass
         continue;
       LayoutEntry layout = it->second;
 
-      Operation *defOp = current.getDefiningOp();
-      auto defLinalgOp = defOp ? dyn_cast<linalg::LinalgOp>(defOp) : nullptr;
+      auto defLinalgOp = findProducerLinalgOp(current);
 
       // --- Backward: from result to producer inputs ---
       if (defLinalgOp) {
@@ -550,19 +584,20 @@ struct NkipyInferLayoutPass
         SmallVector<Value> inputs(defLinalgOp.getDpsInputs());
 
         for (auto [idx, input] : llvm::enumerate(inputs)) {
-          Operation *producerOp = input.getDefiningOp();
-          if (!producerOp)
-            continue;
-
           Value targetValue = input;
           linalg::LinalgOp targetLinalgOp;
+          Operation *targetOp = input.getDefiningOp();
           if (!isMatmul) {
-            targetLinalgOp = dyn_cast<linalg::LinalgOp>(producerOp);
-            if (!targetLinalgOp || !isAnnotatableOp(targetLinalgOp) ||
-                targetLinalgOp->getNumResults() == 0)
+            targetLinalgOp = findProducerLinalgOp(input);
+            if (!targetLinalgOp || !isAnnotatableOp(targetLinalgOp))
               continue;
-            targetValue = targetLinalgOp->getResult(0);
+            targetValue = getLinalgOutputValue(targetLinalgOp);
+            if (!targetValue)
+              continue;
+            targetOp = targetLinalgOp;
           }
+          if (!targetOp)
+            continue;
 
           LayoutEntry propagated;
           bool computed = isMatmul
@@ -576,7 +611,7 @@ struct NkipyInferLayoutPass
             continue;
 
           auto result = tryInsertLayout(targetValue, propagated, layout,
-                                        producerOp, queue, annotatedValues,
+                                        targetOp, queue, annotatedValues,
                                         numInferred, "Backward");
           if (result == InsertResult::Conflict) {
             hasConflict = true;
@@ -592,10 +627,17 @@ struct NkipyInferLayoutPass
           continue;
         if (!isElementwiseOp(userLinalgOp) && !isReductionGeneric(userLinalgOp))
           continue;
-        if (userLinalgOp->getNumResults() == 0)
+        // Only propagate forward when current is an input to the consumer.
+        bool isInput = false;
+        for (Value inp : userLinalgOp.getDpsInputs()) {
+          if (inp == current) { isInput = true; break; }
+        }
+        if (!isInput)
           continue;
 
-        Value userResult = userLinalgOp->getResult(0);
+        Value userResult = getLinalgOutputValue(userLinalgOp);
+        if (!userResult)
+          continue;
 
         LayoutEntry propagated;
         if (!computePropagatedLayout(current, userResult, layout,
@@ -711,10 +753,12 @@ struct NkipyInferLayoutPass
       func.walk([&](linalg::LinalgOp linalgOp) {
         if (isInsideNkipyRegion(linalgOp))
           return;
-        if (!isMatmulOp(linalgOp) || linalgOp->getNumResults() == 0)
+        if (!isMatmulOp(linalgOp))
           return;
 
-        Value resultVal = linalgOp->getResult(0);
+        Value resultVal = getLinalgOutputValue(linalgOp);
+        if (!resultVal)
+          return;
         if (annotatedValues.count(resultVal))
           return;
 
@@ -772,10 +816,10 @@ struct NkipyInferLayoutPass
           return;
         if (!isAnnotatableOp(linalgOp))
           return;
-        if (linalgOp->getNumResults() == 0)
-          return;
 
-        Value result = linalgOp->getResult(0);
+        Value result = getLinalgOutputValue(linalgOp);
+        if (!result)
+          return;
         if (annotatedValues.count(result))
           return;
 
@@ -861,9 +905,9 @@ struct NkipyInferLayoutPass
         return;
       if (!isAnnotatableOp(linalgOp))
         return;
-      if (linalgOp->getNumResults() == 0)
+      Value result = getLinalgOutputValue(linalgOp);
+      if (!result)
         return;
-      Value result = linalgOp->getResult(0);
       if (!annotatedValues.count(result)) {
         linalgOp.emitError("infer-layout: unable to determine layout for op");
         hasError = true;
@@ -949,7 +993,12 @@ struct NkipyInferLayoutPass
         continue;
       }
 
-      builder.setInsertionPointAfterValue(val);
+      // In memref mode, insert after the linalg op that writes to val,
+      // not after val's definition (memref.alloc).
+      if (auto producerOp = findProducerLinalgOp(val))
+        builder.setInsertionPointAfter(producerOp);
+      else
+        builder.setInsertionPointAfterValue(val);
       builder.create<nkipy::LayoutOp>(
           val.getLoc(), val, layout.memSpace, layout.partitionDim,
           layoutTile);

@@ -51,54 +51,54 @@ MLIR_2D_SBUF_BASELINE = '''
 #map = affine_map<(d0, d1) -> (d0, d1)>
 module {
   func.func @test_2d_baseline(
-      %arg0: memref<256x128xf32, strided<[?, ?], offset: ?>, 4 : i32>,
-      %arg1: memref<256x128xf32, strided<[?, ?], offset: ?>, 4 : i32>
-  ) -> memref<256x128xf32, 4 : i32> {
+      %arg0: memref<256x128xf32, strided<[?, ?], offset: ?>, #nkipy.mem<SharedHbm>>,
+      %arg1: memref<256x128xf32, strided<[?, ?], offset: ?>, #nkipy.mem<SharedHbm>>
+  ) -> memref<256x128xf32, #nkipy.mem<SharedHbm>> {
     %c2 = arith.constant 2 : index
     %c1 = arith.constant 1 : index
     %c128 = arith.constant 128 : index
     %c0 = arith.constant 0 : index
 
-    %alloc_out = memref.alloc() {alignment = 64 : i64} : memref<256x128xf32, 3 : i32>
+    %alloc_out = memref.alloc() {alignment = 64 : i64} : memref<256x128xf32, #nkipy.mem<Sbuf>>
 
     scf.for %iv = %c0 to %c2 step %c1 {
       %off = arith.muli %iv, %c128 : index
 
       %sv_a = memref.subview %arg0[%off, 0] [128, 128] [1, 1]
-        : memref<256x128xf32, strided<[?, ?], offset: ?>, 4 : i32>
-        to memref<128x128xf32, strided<[?, ?], offset: ?>, 4 : i32>
-      %tile_a = memref.alloc() {alignment = 64 : i64} : memref<128x128xf32, 3 : i32>
+        : memref<256x128xf32, strided<[?, ?], offset: ?>, #nkipy.mem<SharedHbm>>
+        to memref<128x128xf32, strided<[?, ?], offset: ?>, #nkipy.mem<SharedHbm>>
+      %tile_a = memref.alloc() {alignment = 64 : i64} : memref<128x128xf32, #nkipy.mem<Sbuf>>
       memref.copy %sv_a, %tile_a
-        : memref<128x128xf32, strided<[?, ?], offset: ?>, 4 : i32>
-        to memref<128x128xf32, 3 : i32>
+        : memref<128x128xf32, strided<[?, ?], offset: ?>, #nkipy.mem<SharedHbm>>
+        to memref<128x128xf32, #nkipy.mem<Sbuf>>
 
       %sv_b = memref.subview %arg1[%off, 0] [128, 128] [1, 1]
-        : memref<256x128xf32, strided<[?, ?], offset: ?>, 4 : i32>
-        to memref<128x128xf32, strided<[?, ?], offset: ?>, 4 : i32>
-      %tile_b = memref.alloc() {alignment = 64 : i64} : memref<128x128xf32, 3 : i32>
+        : memref<256x128xf32, strided<[?, ?], offset: ?>, #nkipy.mem<SharedHbm>>
+        to memref<128x128xf32, strided<[?, ?], offset: ?>, #nkipy.mem<SharedHbm>>
+      %tile_b = memref.alloc() {alignment = 64 : i64} : memref<128x128xf32, #nkipy.mem<Sbuf>>
       memref.copy %sv_b, %tile_b
-        : memref<128x128xf32, strided<[?, ?], offset: ?>, 4 : i32>
-        to memref<128x128xf32, 3 : i32>
+        : memref<128x128xf32, strided<[?, ?], offset: ?>, #nkipy.mem<SharedHbm>>
+        to memref<128x128xf32, #nkipy.mem<Sbuf>>
 
-      %tile_out = memref.alloc() {alignment = 64 : i64} : memref<128x128xf32, 3 : i32>
+      %tile_out = memref.alloc() {alignment = 64 : i64} : memref<128x128xf32, #nkipy.mem<Sbuf>>
       linalg.add ins(%tile_a, %tile_b
-        : memref<128x128xf32, 3 : i32>,
-          memref<128x128xf32, 3 : i32>)
-        outs(%tile_out : memref<128x128xf32, 3 : i32>)
+        : memref<128x128xf32, #nkipy.mem<Sbuf>>,
+          memref<128x128xf32, #nkipy.mem<Sbuf>>)
+        outs(%tile_out : memref<128x128xf32, #nkipy.mem<Sbuf>>)
 
       %sv_out = memref.subview %alloc_out[%off, 0] [128, 128] [1, 1]
-        : memref<256x128xf32, 3 : i32>
-        to memref<128x128xf32, strided<[128, 1], offset: ?>, 3 : i32>
+        : memref<256x128xf32, #nkipy.mem<Sbuf>>
+        to memref<128x128xf32, strided<[128, 1], offset: ?>, #nkipy.mem<Sbuf>>
       memref.copy %tile_out, %sv_out
-        : memref<128x128xf32, 3 : i32>
-        to memref<128x128xf32, strided<[128, 1], offset: ?>, 3 : i32>
+        : memref<128x128xf32, #nkipy.mem<Sbuf>>
+        to memref<128x128xf32, strided<[128, 1], offset: ?>, #nkipy.mem<Sbuf>>
     }
 
-    %alloc_hbm = memref.alloc() {alignment = 64 : i64} : memref<256x128xf32, 4 : i32>
+    %alloc_hbm = memref.alloc() {alignment = 64 : i64} : memref<256x128xf32, #nkipy.mem<SharedHbm>>
     memref.copy %alloc_out, %alloc_hbm
-      : memref<256x128xf32, 3 : i32>
-      to memref<256x128xf32, 4 : i32>
-    return %alloc_hbm : memref<256x128xf32, 4 : i32>
+      : memref<256x128xf32, #nkipy.mem<Sbuf>>
+      to memref<256x128xf32, #nkipy.mem<SharedHbm>>
+    return %alloc_hbm : memref<256x128xf32, #nkipy.mem<SharedHbm>>
   }
 }
 '''
@@ -115,10 +115,10 @@ def test_2d_sbuf_baseline():
 
     check_patterns = '''
 CHECK: func.func @test_2d_baseline
-CHECK: memref.alloc(){{.*}}: memref<256x128xf32, #nkipy.sbuf_map<tile: [128, 128], blocks: [2, 1]>, 3 : i32>
+CHECK: memref.alloc(){{.*}}: memref<256x128xf32, #nkipy.sbuf_map<tile: [128, 128], blocks: [2, 1]>, #nkipy.mem<Sbuf>>
 CHECK: scf.for
 CHECK: linalg.add
-CHECK: return{{.*}}4 : i32
+CHECK: return{{.*}}#nkipy.mem<SharedHbm>
 '''
     run_filecheck(result, check_patterns)
 
@@ -130,58 +130,58 @@ CHECK: return{{.*}}4 : i32
 MLIR_3D_SBUF_COPY = '''
 module {
   func.func @test_3d_copy(
-      %arg0: memref<256x2x64xf32, strided<[?, ?, ?], offset: ?>, 4 : i32>,
-      %arg1: memref<256x2x64xf32, strided<[?, ?, ?], offset: ?>, 4 : i32>
-  ) -> memref<256x2x64xf32, 4 : i32> {
+      %arg0: memref<256x2x64xf32, strided<[?, ?, ?], offset: ?>, #nkipy.mem<SharedHbm>>,
+      %arg1: memref<256x2x64xf32, strided<[?, ?, ?], offset: ?>, #nkipy.mem<SharedHbm>>
+  ) -> memref<256x2x64xf32, #nkipy.mem<SharedHbm>> {
     %c2 = arith.constant 2 : index
     %c1 = arith.constant 1 : index
     %c128 = arith.constant 128 : index
     %c0 = arith.constant 0 : index
 
     // Full SBUF alloc loaded from HBM (no reshape -- ranks match)
-    %alloc = memref.alloc() {alignment = 64 : i64} : memref<256x2x64xf32, 3 : i32>
+    %alloc = memref.alloc() {alignment = 64 : i64} : memref<256x2x64xf32, #nkipy.mem<Sbuf>>
     memref.copy %arg1, %alloc
-      : memref<256x2x64xf32, strided<[?, ?, ?], offset: ?>, 4 : i32>
-      to memref<256x2x64xf32, 3 : i32>
+      : memref<256x2x64xf32, strided<[?, ?, ?], offset: ?>, #nkipy.mem<SharedHbm>>
+      to memref<256x2x64xf32, #nkipy.mem<Sbuf>>
 
-    %alloc_out = memref.alloc() {alignment = 64 : i64} : memref<256x2x64xf32, 3 : i32>
+    %alloc_out = memref.alloc() {alignment = 64 : i64} : memref<256x2x64xf32, #nkipy.mem<Sbuf>>
 
     // Linalg ops use 3D operands; legalize-layout flattens tile allocs to 2D
     scf.for %i = %c0 to %c2 step %c1 {
       %off = arith.muli %i, %c128 : index
       scf.for %j = %c0 to %c2 step %c1 {
         %sv_a = memref.subview %arg0[%off, %j, 0] [128, 1, 64] [1, 1, 1]
-          : memref<256x2x64xf32, strided<[?, ?, ?], offset: ?>, 4 : i32>
-          to memref<128x1x64xf32, strided<[?, ?, ?], offset: ?>, 4 : i32>
-        %tile_a = memref.alloc() {alignment = 64 : i64} : memref<128x1x64xf32, 3 : i32>
+          : memref<256x2x64xf32, strided<[?, ?, ?], offset: ?>, #nkipy.mem<SharedHbm>>
+          to memref<128x1x64xf32, strided<[?, ?, ?], offset: ?>, #nkipy.mem<SharedHbm>>
+        %tile_a = memref.alloc() {alignment = 64 : i64} : memref<128x1x64xf32, #nkipy.mem<Sbuf>>
         memref.copy %sv_a, %tile_a
-          : memref<128x1x64xf32, strided<[?, ?, ?], offset: ?>, 4 : i32>
-          to memref<128x1x64xf32, 3 : i32>
+          : memref<128x1x64xf32, strided<[?, ?, ?], offset: ?>, #nkipy.mem<SharedHbm>>
+          to memref<128x1x64xf32, #nkipy.mem<Sbuf>>
 
         %sv_b = memref.subview %alloc[%off, %j, 0] [128, 1, 64] [1, 1, 1]
-          : memref<256x2x64xf32, 3 : i32>
-          to memref<128x1x64xf32, strided<[128, 64, 1], offset: ?>, 3 : i32>
+          : memref<256x2x64xf32, #nkipy.mem<Sbuf>>
+          to memref<128x1x64xf32, strided<[128, 64, 1], offset: ?>, #nkipy.mem<Sbuf>>
 
-        %tile_out = memref.alloc() {alignment = 64 : i64} : memref<128x1x64xf32, 3 : i32>
+        %tile_out = memref.alloc() {alignment = 64 : i64} : memref<128x1x64xf32, #nkipy.mem<Sbuf>>
         linalg.add ins(%tile_a, %sv_b
-            : memref<128x1x64xf32, 3 : i32>,
-              memref<128x1x64xf32, strided<[128, 64, 1], offset: ?>, 3 : i32>)
-          outs(%tile_out : memref<128x1x64xf32, 3 : i32>)
+            : memref<128x1x64xf32, #nkipy.mem<Sbuf>>,
+              memref<128x1x64xf32, strided<[128, 64, 1], offset: ?>, #nkipy.mem<Sbuf>>)
+          outs(%tile_out : memref<128x1x64xf32, #nkipy.mem<Sbuf>>)
 
         %sv_out = memref.subview %alloc_out[%off, %j, 0] [128, 1, 64] [1, 1, 1]
-          : memref<256x2x64xf32, 3 : i32>
-          to memref<128x1x64xf32, strided<[128, 64, 1], offset: ?>, 3 : i32>
+          : memref<256x2x64xf32, #nkipy.mem<Sbuf>>
+          to memref<128x1x64xf32, strided<[128, 64, 1], offset: ?>, #nkipy.mem<Sbuf>>
         memref.copy %tile_out, %sv_out
-          : memref<128x1x64xf32, 3 : i32>
-          to memref<128x1x64xf32, strided<[128, 64, 1], offset: ?>, 3 : i32>
+          : memref<128x1x64xf32, #nkipy.mem<Sbuf>>
+          to memref<128x1x64xf32, strided<[128, 64, 1], offset: ?>, #nkipy.mem<Sbuf>>
       }
     }
 
-    %hbm = memref.alloc() {alignment = 64 : i64} : memref<256x2x64xf32, 4 : i32>
+    %hbm = memref.alloc() {alignment = 64 : i64} : memref<256x2x64xf32, #nkipy.mem<SharedHbm>>
     memref.copy %alloc_out, %hbm
-      : memref<256x2x64xf32, 3 : i32>
-      to memref<256x2x64xf32, 4 : i32>
-    return %hbm : memref<256x2x64xf32, 4 : i32>
+      : memref<256x2x64xf32, #nkipy.mem<Sbuf>>
+      to memref<256x2x64xf32, #nkipy.mem<SharedHbm>>
+    return %hbm : memref<256x2x64xf32, #nkipy.mem<SharedHbm>>
   }
 }
 '''
@@ -198,13 +198,13 @@ def test_3d_sbuf_full_copy():
 
     check_patterns = '''
 CHECK: func.func @test_3d_copy
-CHECK: memref.alloc(){{.*}}: memref<256x2x64xf32, #nkipy.sbuf_map<tile: [128, 1, 64], blocks: [2, 2, 1]>, 3 : i32>
+CHECK: memref.alloc(){{.*}}: memref<256x2x64xf32, #nkipy.sbuf_map<tile: [128, 1, 64], blocks: [2, 2, 1]>, #nkipy.mem<Sbuf>>
 CHECK: scf.for
 CHECK: scf.for
 CHECK: scf.for
-CHECK: memref.copy{{.*}}4 : i32>{{.*}}to{{.*}}3 : i32>
+CHECK: memref.copy{{.*}}#nkipy.mem<SharedHbm>>{{.*}}to{{.*}}#nkipy.mem<Sbuf>>
 CHECK: linalg.add
-CHECK: return{{.*}}4 : i32
+CHECK: return{{.*}}#nkipy.mem<SharedHbm>
 '''
     run_filecheck(result, check_patterns)
 

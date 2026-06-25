@@ -143,7 +143,7 @@ static DenseI64ArrayAttr permuteReducedTileSize(
 /// partition_dim=0 and the given mem_space/tile_size.
 static void annotateBoundaryTranspose(OpBuilder &builder, Location loc,
                                       Value transposed,
-                                      MemSpaceEnumAttr memSpace,
+                                      MemSpaceAttr memSpace,
                                       DenseI64ArrayAttr tileSize,
                                       ArrayRef<int64_t> perm, int64_t rank) {
   DenseI64ArrayAttr finalTileSize;
@@ -356,7 +356,7 @@ struct NkipyCanonicalizePartitionDimPass
         transposeTileSize =
             DenseI64ArrayAttr::get(builder.getContext(), permutedTile);
       }
-      auto sbufAttr = nkipy::MemSpaceEnumAttr::get(
+      auto sbufAttr = nkipy::MemSpaceAttr::get(
           builder.getContext(), nkipy::MemSpaceEnum::Sbuf);
       annotateBoundaryTranspose(builder, loc, transposed,
                                 sbufAttr, transposeTileSize, perm, rank);
@@ -510,7 +510,7 @@ struct NkipyCanonicalizePartitionDimPass
 
       // Derive tile_size and mem_space for the output annotation.
       DenseI64ArrayAttr outputTileSize;
-      MemSpaceEnumAttr outputMemSpace;
+      MemSpaceAttr outputMemSpace;
       auto annIt = valueAnnotateMap.find(output);
       if (annIt != valueAnnotateMap.end()) {
         outputMemSpace = annIt->second.getMemSpaceAttr();

@@ -144,7 +144,8 @@ abstraction layer (`_make_output`, `_linalg_result_types`, `_linalg_result`) tha
 dispatches on global `_backend_mode`. The `take` (GatherOp) is not yet dual-mode
 since it's a custom dialect op lowered directly by NISA — deferred to WI-6.
 
-**Files changed:** `mlir_utils.py`, `frontend/builder.py`, `frontend/trace.py`
+**Files changed:** `mlir_utils.py`, `frontend/builder.py`, `frontend/trace.py`,
+`frontend/custom_op.py`
 
 **Risk:** ~~Linalg on memref doesn't use DPS (result = init buffer), so tiling
 interface behavior differs.~~ **RESOLVED:** `tileUsingSCF` handles zero-result
@@ -200,15 +201,24 @@ NISA emit) not yet adapted.
 
 **Files changed:** `mlir/lib/Transforms/KnobDrivenFusion.cpp`
 
-### WI-4: Clean up layout legalization
+### WI-4: Clean up layout legalization (partial ✅)
 
-**Scope:** Remove tensor-related dead code from post-bufferize passes.
+**Scope:** Adapt post-bufferize passes for memref-native IR.
 
 **Sub-tasks:**
-1. Delete `eliminate-uninitialized-copies` pass
-2. Delete `eliminate-same-memspace-copy` pass  
-3. Simplify `AnnotateMemorySpace` (no tensor→memref boundary to reason about)
-4. Simplify `CanonicalizeReshape` (only memref reshape ops remain)
+1. `InferLayout.cpp` — full memref support: BFS propagation uses DPS output
+   operand (not SSA results), `findProducerLinalgOp` helper for memref
+   value-chain traversal, materialization inserts annotations after the
+   producing linalg op (not after the alloc) ✅
+2. `insert-spill-reload` — works with memref IR (test patterns updated from
+   old `3 : i32` format to `#nkipy.mem<Sbuf>`) ✅
+3. `CanonicalizePartitionDim` — still uses `RankedTensorType` for the
+   transpose logic; fails with non-zero partition_dim on memref. Pre-existing
+   failure (same with tensor backend). Needs refactor to use `ShapedType`.
+4. `AnnotateMemorySpace` — memref.expand_shape/collapse_shape memspace
+   propagation bug (mismatched memspaces on reshape). Needs fix.
+5. Delete `eliminate-uninitialized-copies` pass (deferred to WI-5)
+6. Delete `eliminate-same-memspace-copy` pass (deferred to WI-5)
 
 ### WI-5: Delete bufferization infrastructure
 

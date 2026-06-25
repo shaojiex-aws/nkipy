@@ -11,7 +11,8 @@ from mlir import ir
 from mlir.dialects import func
 
 from .traced_array import TracedArray
-from ..mlir_utils import to_mlir_type, ranked_tensor_of
+from .builder import _use_memref
+from ..mlir_utils import to_mlir_type, ranked_tensor_of, memref_of
 
 # Module-level registry for custom ops used during tracing.
 # No thread safety needed -- tracing is always single-threaded.
@@ -177,9 +178,9 @@ class CustomOp:
         loc = args[0]._get_caller_location()
         input_values = [a.value for a in args]
 
-        # Build result types: return-value style (tensor types)
+        type_fn = memref_of if _use_memref() else ranked_tensor_of
         result_types = [
-            ranked_tensor_of(shape, to_mlir_type(dtype))
+            type_fn(shape, to_mlir_type(dtype))
             for shape, dtype in zip(self.output_shapes, self.output_dtypes)
         ]
 
@@ -213,12 +214,13 @@ def emit_custom_op_declaration(custom: CustomOp):
     Return-value style: inputs only as arguments, outputs as return values.
     resolve-custom-ops will later convert to output-as-argument.
     """
+    type_fn = memref_of if _use_memref() else ranked_tensor_of
     input_types = [
-        ranked_tensor_of(s, to_mlir_type(d))
+        type_fn(s, to_mlir_type(d))
         for s, d in zip(custom.input_shapes, custom.input_dtypes)
     ]
     result_types = [
-        ranked_tensor_of(s, to_mlir_type(d))
+        type_fn(s, to_mlir_type(d))
         for s, d in zip(custom.output_shapes, custom.output_dtypes)
     ]
     fn_type = ir.FunctionType.get(input_types, result_types)

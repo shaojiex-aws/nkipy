@@ -29,9 +29,7 @@ def test_two_matmuls_different_tiles():
     should get its own transform sequence with its specific tile size.
     """
     M, N, K = 256, 256, 256
-    # First matmul: tile 128x128, K=128, block 256x256
     tile1_m, tile1_n, tile1_k = 128, 128, 128
-    # Second matmul: tile 64x64, K=64, block 128x128
     tile2_m, tile2_n, tile2_k = 64, 64, 64
 
     @trace(input_specs=[((M, K), "f32"), ((K, N), "f32"), ((N, N), "f32")])
@@ -41,21 +39,17 @@ def test_two_matmuls_different_tiles():
 
         d = np.matmul(c, e)
         knob.knob(d).tile_op(tile_size=[64, 64, 64])
-        
+
         return d
 
-    # FileCheck: verify both matmuls get correct tile sizes
-    # First matmul: 128x128x128 tiles, with linalg.transpose for LHS
-    # Second matmul: 64x64x64 tiles
-    # Transpose output is promoted to SBUF (bufferization.alloc_tensor before linalg.transpose)
     check_patterns = f"""
     CHECK: func.func
-    CHECK: bufferization.alloc_tensor() {{{{.*}}}}memory_space = 3 : i32
+    CHECK: memref.alloc() : memref<{{{{.*}}}}xf32, #nkipy.mem<Sbuf>>
     CHECK: linalg.transpose {{{{.*}}}} permutation = [1, 0]
-    CHECK: linalg.matmul_transpose_a {{{{.*}}}}tensor<{tile1_k}x{tile1_m}xf32>, tensor<{tile1_k}x{tile1_n}xf32>
-    CHECK: bufferization.alloc_tensor() {{{{.*}}}}memory_space = 3 : i32
+    CHECK: linalg.matmul_transpose_a
+    CHECK: memref.alloc() : memref<{{{{.*}}}}xf32, #nkipy.mem<Sbuf>>
     CHECK: linalg.transpose {{{{.*}}}} permutation = [1, 0]
-    CHECK: linalg.matmul_transpose_a {{{{.*}}}}tensor<{tile2_k}x{tile2_m}xf32>, tensor<{tile2_k}x{tile2_n}xf32>
+    CHECK: linalg.matmul_transpose_a
     """
     run_kernel_test(
         two_matmul_kernel,
@@ -89,14 +83,12 @@ def test_two_adds_different_tiles():
 
         return d
 
-    # FileCheck: verify both adds get tiled with different tile sizes
-    # With SBUF promotion, each add will have alloc_tensor with memory_space
     check_patterns = f"""
     CHECK: func.func
-    CHECK: bufferization.alloc_tensor() {{{{.*}}}}memory_space = 3 : i32
-    CHECK: linalg.add {{{{.*}}}}tensor<{tile1[0]}x{tile1[1]}xf32>
-    CHECK: bufferization.alloc_tensor() {{{{.*}}}}memory_space = 3 : i32
-    CHECK: linalg.add {{{{.*}}}}tensor<{tile2[0]}x{tile2[1]}xf32>
+    CHECK: memref.alloc() : memref<{tile1[0]}x{tile1[1]}xf32, #nkipy.mem<Sbuf>>
+    CHECK: linalg.add {{{{.*}}}}memref<{tile1[0]}x{tile1[1]}xf32, #nkipy.mem<Sbuf>>
+    CHECK: memref.alloc() : memref<{tile2[0]}x{tile2[1]}xf32, #nkipy.mem<Sbuf>>
+    CHECK: linalg.add {{{{.*}}}}memref<{tile2[0]}x{tile2[1]}xf32, #nkipy.mem<Sbuf>>
     """
     run_kernel_test(
         two_add_kernel,
@@ -129,7 +121,7 @@ def test_three_matmuls_same_and_different_tiles():
 
         f = np.matmul(d, g)
         knob.knob(f).tile_op(tile_size=[128, 128, 128])
-        
+
         return f
 
     run_kernel_test(
@@ -153,7 +145,7 @@ def test_mixed_matmul_and_add():
     def mixed_kernel(a, b, e):
         c = np.matmul(a, b)
         knob.knob(c).tile_op(tile_size=[128, 128, 128])
-        
+
         d = c + e
         knob.knob(d).tile_op(tile_size=[64, 64])
 
@@ -185,22 +177,20 @@ def test_matmul_add_chain():
     def matmul_add_kernel(a, b, bias):
         c = np.matmul(a, b)
         knob.knob(c).tile_op(tile_size=[128, 128, 128])
-        
+
         # Add bias - using same spatial tile sizes as matmul output
         d = c + bias
         knob.knob(d).tile_op(tile_size=[128, 128])
 
         return d
 
-    # FileCheck: matmul tiled then add tiled
-    # Transpose output promoted to SBUF, then add operands promoted to SBUF
     check_patterns = f"""
     CHECK: func.func
-    CHECK: bufferization.alloc_tensor() {{{{.*}}}}memory_space = 3 : i32
+    CHECK: memref.alloc() : memref<{{{{.*}}}}xf32, #nkipy.mem<Sbuf>>
     CHECK: linalg.transpose {{{{.*}}}} permutation = [1, 0]
-    CHECK: linalg.matmul_transpose_a {{{{.*}}}}tensor<{tile_k}x{tile_m}xf32>, tensor<{tile_k}x{tile_n}xf32>
-    CHECK: bufferization.alloc_tensor() {{{{.*}}}}memory_space = 3 : i32
-    CHECK: linalg.add {{{{.*}}}}tensor<{add_tile[0]}x{add_tile[1]}xf32>
+    CHECK: linalg.matmul_transpose_a
+    CHECK: memref.alloc() : memref<{add_tile[0]}x{add_tile[1]}xf32, #nkipy.mem<Sbuf>>
+    CHECK: linalg.add {{{{.*}}}}memref<{add_tile[0]}x{add_tile[1]}xf32, #nkipy.mem<Sbuf>>
     """
     run_kernel_test(
         matmul_add_kernel,

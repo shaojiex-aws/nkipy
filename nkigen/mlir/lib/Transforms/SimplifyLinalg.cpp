@@ -283,7 +283,7 @@ static void decomposeHighRankTranspose(func::FuncOp func) {
         b.create<memref::CopyOp>(loc, src2d, dst2d);
       } else {
         // HBM→HBM: route through SBUF temp.
-        auto sbufMemSpace = nkipy::MemSpaceEnumAttr::get(
+        auto sbufMemSpace = nkipy::MemSpaceAttr::get(
             b.getContext(), nkipy::MemSpaceEnum::Sbuf);
         auto shape2d = src2dType.getShape();
         auto sbufType = MemRefType::get(
@@ -361,7 +361,7 @@ static void decomposeHighRankTranspose(func::FuncOp func) {
         newOp->setAttr("nkipy.op_id", id);
     } else {
       // HBM→HBM: allocate SBUF temp, load src, transpose in SBUF, store to dst.
-      auto sbufMemSpace = nkipy::MemSpaceEnumAttr::get(
+      auto sbufMemSpace = nkipy::MemSpaceAttr::get(
           b.getContext(), nkipy::MemSpaceEnum::Sbuf);
       auto srcShape2d = src2dType.getShape();
       auto dstShape2d = dst2dType.getShape();

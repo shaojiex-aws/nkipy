@@ -16,6 +16,7 @@ MLIR_CAPI_EXPORTED MlirAttribute mlirIntegerSetAttrGet(MlirIntegerSet set);
 MLIR_CAPI_EXPORTED bool mlirAttributeIsAMemSpace(MlirAttribute attr);
 MLIR_CAPI_EXPORTED MlirAttribute mlirMemSpaceGet(MlirContext ctx,
                                                   MlirAttribute space);
+MLIR_CAPI_EXPORTED MlirStringRef mlirMemSpaceGetValue(MlirAttribute attr);
 
 MLIR_CAPI_EXPORTED bool mlirAttributeIsASbufMap(MlirAttribute attr);
 MLIR_CAPI_EXPORTED intptr_t mlirSbufMapAttrGetRank(MlirAttribute attr);

@@ -307,7 +307,7 @@ static Value createSpillSlot(AllocationInfo &alloc, OpBuilder &builder) {
   auto sbufType = cast<MemRefType>(alloc.value.getType());
 
   // Create HBM memory space attribute
-  auto hbmMemSpace = nkipy::MemSpaceEnumAttr::get(
+  auto hbmMemSpace = nkipy::MemSpaceAttr::get(
       builder.getContext(), nkipy::MemSpaceEnum::Hbm);
 
   // Create HBM type with same shape/element type

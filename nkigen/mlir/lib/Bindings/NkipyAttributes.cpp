@@ -62,7 +62,13 @@ void mlir::python::populateNkipyAttributes(nb::module_ &m) {
             return cls(mlirMemSpaceGet(ctx, space));
           },
           nb::arg("cls"), nb::arg("space"), nb::arg("context").none() = nb::none(),
-          "Gets an attribute wrapping a memory space.");
+          "Gets an attribute wrapping a memory space.")
+      .def_property_readonly(
+          "value",
+          [](MlirAttribute self) -> std::string {
+            MlirStringRef str = mlirMemSpaceGetValue(self);
+            return std::string(str.data, str.length);
+          });
 
   mlir_attribute_subclass(m, "SbufMapAttr", mlirAttributeIsASbufMap)
       .def_property_readonly(

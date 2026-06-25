@@ -207,7 +207,7 @@ def test_mlir_contains_scf_for():
 
     run_kernel_test(
         loop_func, stop_after="trace",
-        check_ir_contains=["scf.for", "scf.yield"],
+        check_ir_contains=["scf.for", "memref.subview"],
         modes=Mode.STRING_CHECK,
     )
 
@@ -225,7 +225,7 @@ def test_mlir_with_dynamic_slicing():
 
     run_kernel_test(
         dynamic_slice_func, stop_after="trace",
-        check_ir_contains=["scf.for", "tensor.extract_slice"],
+        check_ir_contains=["scf.for", "memref.subview"],
         modes=Mode.STRING_CHECK,
     )
 

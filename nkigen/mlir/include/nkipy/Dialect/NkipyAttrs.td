@@ -32,6 +32,29 @@ def MemSpaceEnum: I32EnumAttr<"MemSpaceEnum",
 }
 
 //===----------------------------------------------------------------------===//
+// NkipyMemSpaceAttr
+//===----------------------------------------------------------------------===//
+
+def NkipyMemSpaceAttr : Nkipy_Attr<"MemSpace"> {
+  let mnemonic = "mem";
+  let summary = "NKIPy memory space attribute for memref types";
+  let description = [{
+    A typed memory space attribute that prints as `#nkipy.mem<sbuf>` instead
+    of a raw integer. Used as the memory_space on memref types throughout
+    the pipeline.
+
+    Syntax: `#nkipy.mem<sbuf>` | `#nkipy.mem<psum>` | `#nkipy.mem<hbm>` |
+            `#nkipy.mem<shared_hbm>` | `#nkipy.mem<constant>`
+  }];
+
+  let parameters = (ins
+    EnumParameter<MemSpaceEnum>:$value
+  );
+
+  let assemblyFormat = "`<` $value `>`";
+}
+
+//===----------------------------------------------------------------------===//
 // NkipySbufMapAttr
 //===----------------------------------------------------------------------===//
 

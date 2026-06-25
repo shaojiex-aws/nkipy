@@ -128,7 +128,7 @@ void emitPromoteOperand(OpBuilder &builder, Location loc, Value tiledOp,
 /// Promote all DPS inputs and the output to SBUF.
 void emitPromoteAllToSbuf(OpBuilder &builder, Location loc, Value tiledOp,
                           int numInputs) {
-  auto sbufMemSpace = nkipy::MemSpaceEnumAttr::get(
+  auto sbufMemSpace = nkipy::MemSpaceAttr::get(
       builder.getContext(), nkipy::MemSpaceEnum::Sbuf);
   for (int i = 0; i < numInputs; ++i)
     emitPromoteOperand(builder, loc, tiledOp, i, sbufMemSpace);
@@ -408,7 +408,7 @@ std::map<std::string, std::vector<KnobInfo>> extractKnobsByOpType(
 void emitCacheAwarePromotion(OpBuilder &builder, Location loc,
                              Value tiledOp, int numInputs,
                              const SmallVector<CacheInfo> &caches) {
-  auto sbufMemSpace = nkipy::MemSpaceEnumAttr::get(
+  auto sbufMemSpace = nkipy::MemSpaceAttr::get(
       builder.getContext(), nkipy::MemSpaceEnum::Sbuf);
 
   if (caches.empty()) {
@@ -506,9 +506,9 @@ bool buildMatmulBlockingTransforms(OpBuilder &builder, Location loc,
                << "] (blocksM=" << blocksM << ", blocksN=" << blocksN << ")\n";
 
   auto anyOpType = transform::AnyOpType::get(builder.getContext());
-  auto sbufMemSpace = nkipy::MemSpaceEnumAttr::get(
+  auto sbufMemSpace = nkipy::MemSpaceAttr::get(
       builder.getContext(), nkipy::MemSpaceEnum::Sbuf);
-  auto psumMemSpace = nkipy::MemSpaceEnumAttr::get(
+  auto psumMemSpace = nkipy::MemSpaceAttr::get(
       builder.getContext(), nkipy::MemSpaceEnum::Psum);
 
   // --- Match ---
