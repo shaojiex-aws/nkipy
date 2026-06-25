@@ -564,7 +564,7 @@ class LLVMModule:
             if is_memref:
                 # INVOKE - memref return (including rank-0 memrefs)
                 self.execution_engine.invoke(self.top_func_name, return_ptr, *arg_ptrs)
-                ret = ranked_memref_to_numpy(return_ptr[0][0])
+                ret = ranked_memref_to_numpy(return_ptr[0][0]).copy()
                 if result_type == "f16":
                     ret = np.array(ret, dtype=np.int16).view(np.float16)
                 elif result_type == "bf16":
@@ -595,7 +595,7 @@ class LLVMModule:
                 elif res_type == "bf16":
                     ret_i = np.array(np_arr, dtype=np.int16).view(ml_dtypes.bfloat16)
                 else:
-                    ret_i = np_arr
+                    ret_i = np.array(np_arr)
                 ret.append(ret_i)
         return ret
 

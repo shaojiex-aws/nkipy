@@ -99,9 +99,9 @@ problems:
 
 | Current | New |
 |---------|-----|
-| Uses `transform.structured.tile_using_for` (tensor-only) | Custom tiling: emit `scf.for` + `memref.subview` + tiled linalg op directly |
-| Produces `tensor.extract_slice` / `tensor.insert_slice` around tiled ops | Produces `memref.subview` of input/output memrefs |
-| Needs `promote_tensor` (alloc_tensor + materialize) for SBUF promotion | Direct `memref.alloc(sbuf)` + `memref.copy` |
+| Uses `transform.structured.tile_using_for` | **Same** — `tile_using_for` works on memref ops (zero results → no insert_slice) |
+| Produces `tensor.extract_slice` / `tensor.insert_slice` around tiled ops | Produces `memref.subview` of input/output memrefs (automatic via TilingInterface) |
+| Needs `promote_tensor` (alloc_tensor + materialize) for SBUF promotion | `promote_memref` or dual-mode promotion: `memref.alloc(sbuf)` + `memref.copy` |
 
 ### Passes Deleted
 
@@ -146,33 +146,43 @@ since it's a custom dialect op lowered directly by NISA — deferred to WI-6.
 
 **Files changed:** `mlir_utils.py`, `frontend/builder.py`, `frontend/trace.py`
 
-**Risk:** Linalg on memref doesn't use DPS (result = init buffer), so tiling
-interface behavior differs. Verify `TilingInterface` implementations work on
-memref-typed linalg ops.
+**Risk:** ~~Linalg on memref doesn't use DPS (result = init buffer), so tiling
+interface behavior differs.~~ **RESOLVED:** `tileUsingSCF` handles zero-result
+(memref) ops correctly — it only emits `tensor.insert_slice` for loop-carried
+values, which don't exist for memref ops. `getTiledImplementation` already emits
+`memref.subview` for memref operands via `makeTiledShapes`.
 
-### WI-2: Rewrite tiling to emit memref.subview
+### WI-2: Adapt tiling pipeline for memref ✅
 
-**Scope:** Rewrite `KnobDrivenTiling.cpp` to directly emit `scf.for` +
-`memref.subview` instead of going through the Transform dialect's
-`tile_using_for`.
+**Scope:** Keep `KnobDrivenTiling.cpp` and the Transform dialect approach.
+`tile_using_for` already works on memref linalg ops (zero results → no
+`tensor.insert_slice` needed, `makeTiledShapes` emits `memref.subview`). The
+main work is replacing tensor-based promotion with memref promotion.
 
 **Sub-tasks:**
-1. For each linalg op with a knob annotation:
-   - Emit `scf.for` with the tile bounds
-   - Use linalg's `makeTiledShapes` / `computeSliceParameters` (from
-     `Linalg/Utils/Utils.cpp`) to compute subview offsets — these already
-     emit `memref.subview` for memref-typed operands
-   - Clone the linalg op with subviewed operands
-   - Fold loop-step canonicalization as a final cleanup stage
-2. Remove the Transform dialect dependency for tiling
-3. Remove `apply-and-strip-transforms` pass
-4. Implement SBUF promotion inline: after subview, emit
-   `memref.alloc(sbuf)` + `memref.copy` for inputs that need promotion
+1. `PromoteTensorOp` made dual-mode: memref path emits `memref.alloc(sbuf)` +
+   `memref.copy` (copy-in) + `memref.copy` (copy-back after DPS consumer) ✅
+2. `TransposeMatmulOp` skipped in memref mode (upstream op is tensor-only);
+   matmul blocking works without the LHS transpose ✅
+3. `KnobDrivenTiling` knob extraction updated: for zero-result ops (memref
+   linalg), match on DPS init operands instead of op results ✅
+4. `findExistingMemSpace` updated to walk through `memref.alloc` and
+   `memref.subview` aliasing chains ✅
+5. End-to-end verified: elementwise and matmul tiling produce correct
+   `scf.for` + `memref.subview` + SBUF promotion IR ✅
 
-**Risk:** We bypass the upstream `TileUsingSCFForOp` (which is tensor-only in
-its loop generation), but reuse the shape computation utilities. Our tiling is
-already heavily customized (knob-driven, not heuristic), so the upstream pass
-was mostly a dispatch mechanism.
+**Deferred:**
+- Remove `one-shot-bufferize` and post-bufferize cleanup passes from memref
+  pipeline path (WI-4/WI-5 — needs a pipeline flag to gate tensor-only passes)
+- Re-enable `TransposeMatmulOp` for memref (needs upstream support or custom
+  implementation)
+
+**Files changed:** `NkipyTransformOps.cpp`, `KnobDrivenTiling.cpp`,
+`mlir/lib/TransformOps/CMakeLists.txt`
+
+**Risk:** Low. Tensor path unchanged (all 303 tests pass). Memref path produces
+correct tiled IR but downstream passes (annotate-memory-space, legalize-layout,
+NISA emit) not yet adapted.
 
 ### WI-3: Simplify fusion pass
 
@@ -228,10 +238,11 @@ Verify they still work with the new pipeline output.
 
 **Incremental, phase by phase:**
 
-1. **WI-1** first (frontend). Produce memref IR from tracing. Run existing
-   passes with `--allow-unknown-ops` to verify linalg-on-memref propagates.
-2. **WI-2** next (tiling). This is the hardest piece — replace tile_using_for.
-   Keep old tiling behind a flag until new tiling passes all tests.
+1. **WI-1** ✅ (frontend). Produce memref IR from tracing, gated behind
+   `backend="memref"`. Tensor path unchanged.
+2. **WI-2** next (tiling). Much simpler than originally scoped — `tile_using_for`
+   already works on memref linalg ops. Main work: replace `PromoteTensorOp` with
+   memref-aware promotion (`memref.alloc(sbuf)` + `memref.copy`).
 3. **WI-3 + WI-4** together (fusion + cleanup).
 4. **WI-5** (delete bufferization). Only after all passes work on memref.
 5. **WI-6 + WI-7** (codegen verification + KV cache).
@@ -241,17 +252,12 @@ The 312 existing tests serve as the correctness oracle throughout.
 
 ## Open Questions
 
-1. **Linalg TilingInterface on memref** — **RESOLVED:** upstream's
-   `TileUsingSCFForOp` (the outer loop generation in `TileUsingInterface.cpp`)
-   is hard-coded to tensor: it emits `tensor.insert_slice` for yield values and
-   uses `tensor::getOrCreateDestinations`. However, linalg's *inner*
-   `getTiledImplementation` + `makeTiledShapes` / `materializeTiledShape` DO
-   support memref — they emit `memref.subview` via a TypeSwitch. So WI-2 must
-   bypass the upstream `tile_using_for` transform op, but can reuse
-   `makeTiledShapes` / `computeSliceParameters` from `Linalg/Utils/Utils.cpp`
-   to compute subview offsets/sizes. The tiling pass emits `scf.for` +
-   `memref.subview` + cloned linalg op directly (no insert_slice, no yield of
-   tensor results).
+1. **Linalg TilingInterface on memref** — **RESOLVED:** `tileUsingSCF` handles
+   zero-result (memref) ops correctly. It only creates `tensor.insert_slice` for
+   loop-carried values — memref linalg ops have zero results, so that code path
+   doesn't execute. `getTiledImplementation` + `makeTiledShapes` emit
+   `memref.subview` for memref operands. **We can keep `tile_using_for` as-is.**
+   No bypass needed — the original concern was wrong.
 
 2. **scf.for without iter_args** — currently loop-carried values (accumulators)
    use tensor iter_args. With memref, the accumulator is just a memref that gets

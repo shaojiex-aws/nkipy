@@ -309,13 +309,22 @@ std::map<std::string, std::vector<KnobInfo>> extractKnobsByOpType(
       if (!errorMsg.empty()) return WalkResult::interrupt();
       if (!isa<TilingInterface>(op))
         return WalkResult::advance();
-      if (op->getNumResults() == 0)
-        return WalkResult::advance();
       if (isInsideNkipyRegion(op))
         return WalkResult::advance();
 
-      for (Value result : op->getResults()) {
-        auto it = valueToKnob.find(result);
+      // Look for knob on op results (tensor mode) or on DPS init
+      // operands (memref mode, where ops have zero results).
+      SmallVector<Value> candidates;
+      for (Value result : op->getResults())
+        candidates.push_back(result);
+      if (candidates.empty()) {
+        if (auto dstOp = dyn_cast<DestinationStyleOpInterface>(op))
+          for (Value init : dstOp.getDpsInits())
+            candidates.push_back(init);
+      }
+
+      for (Value candidate : candidates) {
+        auto it = valueToKnob.find(candidate);
         if (it != valueToKnob.end()) {
           std::string opName = op->getName().getStringRef().str();
 
@@ -466,7 +475,8 @@ bool buildMatmulBlockingTransforms(OpBuilder &builder, Location loc,
                                     Value moduleArg,
                                     const std::string &opName,
                                     const KnobInfo &knob,
-                                    DictionaryAttr opAttrs) {
+                                    DictionaryAttr opAttrs,
+                                    bool isMemrefMode = false) {
   // Matmul tile_size is iter-space form [..., M, N, K] — at least 3 dims.
   if (knob.tileSize.size() < 3) {
     llvm::errs() << "[KnobDrivenTiling] Matmul tile_size must be "
@@ -509,27 +519,28 @@ bool buildMatmulBlockingTransforms(OpBuilder &builder, Location loc,
   // Tile M blocks
   Value blockMTiled = emitTile(builder, loc, matmul, {blockM, 0, 0});
 
-  // Transpose matmul: matmul(A,B) → matmul_transpose_a(transpose(A), B)
-  auto transposeMatmul = builder.create<transform::TransposeMatmulOp>(
-      loc, anyOpType, blockMTiled,
-      transform::TransposeMatmulInput::lhs);
-  Value transposedMatmul = transposeMatmul.getResult();
+  Value afterBlockM;
+  if (!isMemrefMode) {
+    // Transpose matmul: matmul(A,B) → matmul_transpose_a(transpose(A), B)
+    // (tensor mode only — upstream TransposeMatmulOp doesn't support memref)
+    auto transposeMatmul = builder.create<transform::TransposeMatmulOp>(
+        loc, anyOpType, blockMTiled,
+        transform::TransposeMatmulInput::lhs);
+    afterBlockM = transposeMatmul.getResult();
 
-  // Matmul always promotes both LHS and RHS to SBUF (hardware requirement).
-  // .cache() controls the level (future: use axes to pick promotion point).
-  // For now, cache annotations are collected but the promotion structure
-  // remains fixed: LHS at block-M, RHS at block-N.
-
-  // Promote the transpose output to SBUF (inserted by TransposeMatmulOp).
-  auto getTransposeOp = builder.create<transform::GetProducerOfOperand>(
-      loc, anyOpType, transposedMatmul, /*operand_number=*/0);
-  emitPromoteOperand(builder, loc, getTransposeOp.getResult(), 1, sbufMemSpace);
+    // Promote the transpose output to SBUF (inserted by TransposeMatmulOp).
+    auto getTransposeOp = builder.create<transform::GetProducerOfOperand>(
+        loc, anyOpType, afterBlockM, /*operand_number=*/0);
+    emitPromoteOperand(builder, loc, getTransposeOp.getResult(), 1, sbufMemSpace);
+  } else {
+    afterBlockM = blockMTiled;
+  }
 
   // Promote LHS at block-M level (reused across all N-blocks)
-  emitPromoteOperand(builder, loc, transposedMatmul, 0, sbufMemSpace);
+  emitPromoteOperand(builder, loc, afterBlockM, 0, sbufMemSpace);
 
   // Tile N blocks
-  Value blockNTiled = emitTile(builder, loc, transposedMatmul, {0, blockN, 0});
+  Value blockNTiled = emitTile(builder, loc, afterBlockM, {0, blockN, 0});
 
   // Promote RHS at block-N level (reused within this N-block)
   emitPromoteOperand(builder, loc, blockNTiled, 1, sbufMemSpace);
@@ -601,9 +612,21 @@ struct NkipyKnobDrivenTilingPass
       return;
     }
     
+    // Detect memref mode: check if any func arg is memref-typed.
+    bool isMemrefMode = false;
+    module.walk([&](func::FuncOp func) {
+      for (auto argType : func.getArgumentTypes()) {
+        if (isa<MemRefType>(argType)) {
+          isMemrefMode = true;
+          return WalkResult::interrupt();
+        }
+      }
+      return WalkResult::advance();
+    });
+
     OpBuilder builder(ctx);
     Location loc = module.getLoc();
-    
+
     // Add transform.with_named_sequence attribute to module
     module->setAttr("transform.with_named_sequence", builder.getUnitAttr());
     
@@ -648,7 +671,7 @@ struct NkipyKnobDrivenTilingPass
         
         if (isMatmulOp(opName)) {
           // Matmul gets special 6-level blocking treatment
-          if (!buildMatmulBlockingTransforms(builder, loc, moduleArg, opName, knob, opAttrs)) {
+          if (!buildMatmulBlockingTransforms(builder, loc, moduleArg, opName, knob, opAttrs, isMemrefMode)) {
             llvm::errs() << "[KnobDrivenTiling] Failed to build matmul transforms\n";
             continue;
           }

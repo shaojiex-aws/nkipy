@@ -12,6 +12,7 @@
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/Bufferization/IR/Bufferization.h"
 #include "mlir/Dialect/Linalg/IR/Linalg.h"
+#include "mlir/Dialect/MemRef/IR/MemRef.h"
 #include "mlir/Dialect/Tensor/IR/Tensor.h"
 #include "mlir/Dialect/Transform/IR/TransformDialect.h"
 #include "mlir/Dialect/Transform/Interfaces/TransformInterfaces.h"
@@ -54,11 +55,8 @@ static bool mayBeRead(Value value) {
 }
 
 /// Return the mem_space that `value` already lives in, if known.
-/// Walks back through no-alloc aliasing ops (tensor.extract_slice,
-/// linalg.transpose, bufferization.materialize_in_destination) so
-/// promote_tensor can skip alloc+copy whenever any aliased value on the
-/// chain already carries a mem_space annotation — either via a
-/// nkipy.layout side op or via the root bufferization.alloc_tensor.
+/// Walks back through no-alloc aliasing ops so promote_tensor can skip
+/// alloc+copy when the value already lives in the target memory space.
 static std::optional<nkipy::MemSpaceEnum>
 findExistingMemSpace(Value value) {
   Value v = value;
@@ -71,14 +69,23 @@ findExistingMemSpace(Value value) {
       if (auto ms = layout.getMemSpace())
         return *ms;
     }
-    // Root of the walk: an alloc_tensor whose memory_space is the answer.
+    // Memref path: check memref.alloc memory space.
+    if (auto allocOp = v.getDefiningOp<memref::AllocOp>()) {
+      auto memrefType = cast<MemRefType>(allocOp.getType());
+      if (auto msAttr = memrefType.getMemorySpace()) {
+        if (auto nkipyMs = dyn_cast<nkipy::MemSpaceEnumAttr>(msAttr))
+          return nkipyMs.getValue();
+      }
+      return std::nullopt;
+    }
+    // Tensor path: check bufferization.alloc_tensor memory space.
     if (auto allocTensor =
             v.getDefiningOp<bufferization::AllocTensorOp>()) {
       if (auto ms = allocTensor.getMemorySpaceAttr()) {
         if (auto nkipyMs = dyn_cast<nkipy::MemSpaceEnumAttr>(ms))
           return nkipyMs.getValue();
       }
-      return std::nullopt;  // untyped alloc; stop walking.
+      return std::nullopt;
     }
     // Step through one level of no-alloc aliasing.
     Operation *defOp = v.getDefiningOp();
@@ -86,6 +93,8 @@ findExistingMemSpace(Value value) {
       return std::nullopt;
     if (auto extract = dyn_cast<tensor::ExtractSliceOp>(defOp))
       v = extract.getSource();
+    else if (auto subview = dyn_cast<memref::SubViewOp>(defOp))
+      v = subview.getSource();
     else if (auto materialize =
                  dyn_cast<bufferization::MaterializeInDestinationOp>(defOp))
       v = materialize.getDest();
@@ -115,33 +124,89 @@ transform::PromoteTensorOp::apply(transform::TransformRewriter &rewriter,
     if (auto nkipyMs = dyn_cast<nkipy::MemSpaceEnumAttr>(msAttr))
       targetMs = nkipyMs.getValue();
 
-  for (Value tensor : state.getPayloadValues(getTensor())) {
-    auto type = dyn_cast<RankedTensorType>(tensor.getType());
-    if (!type) {
-      return emitSilenceableError() << "non-tensor type: " << tensor;
-    }
-
-    // Source-aware early exit: if the tensor is already annotated (via
-    // nkipy.layout or an existing alloc_tensor) to live in the target
-    // memory space, there is no promotion to do.  This kills redundant
-    // SBUF→SBUF copies that eliminate-same-memspace-copy used to clean
-    // up post-bufferize.
+  for (Value value : state.getPayloadValues(getTensor())) {
+    // Source-aware early exit: if the value already lives in the target
+    // memory space, there is no promotion to do.
     if (targetMs) {
-      auto sourceMs = findExistingMemSpace(tensor);
+      auto sourceMs = findExistingMemSpace(value);
       if (sourceMs && *sourceMs == *targetMs) {
-        promoted.push_back(tensor);
+        promoted.push_back(value);
         continue;
       }
     }
 
-    Operation *definingOp = tensor.getDefiningOp();
+    // --- Memref path ---
+    if (auto memrefType = dyn_cast<MemRefType>(value.getType())) {
+      // Scan uses before creating new ops to avoid iterator invalidation.
+      bool needsCopyIn = mayBeRead(value);
+      Operation *dpsConsumer = nullptr;
+      for (OpOperand &use : value.getUses()) {
+        auto dstOp = dyn_cast<DestinationStyleOpInterface>(use.getOwner());
+        if (dstOp && dstOp.isDpsInit(&use)) {
+          dpsConsumer = dstOp;
+          break;
+        }
+      }
+
+      Operation *definingOp = value.getDefiningOp();
+      if (definingOp)
+        rewriter.setInsertionPointAfter(definingOp);
+      else
+        rewriter.setInsertionPointToStart(
+            cast<BlockArgument>(value).getOwner());
+
+      // Allocate in the target memory space.
+      auto newMemrefType = MemRefType::get(
+          memrefType.getShape(), memrefType.getElementType(),
+          MemRefLayoutAttrInterface{}, getMemorySpaceAttr());
+      SmallVector<Value> dynamicDims;
+      for (auto [pos, dim] : llvm::enumerate(memrefType.getShape())) {
+        if (!ShapedType::isDynamic(dim))
+          continue;
+        Value idx = rewriter.create<arith::ConstantIndexOp>(
+            value.getLoc(), static_cast<int64_t>(pos));
+        dynamicDims.push_back(
+            rewriter.create<memref::DimOp>(value.getLoc(), value, idx));
+      }
+      auto alloc = rewriter.create<memref::AllocOp>(
+          value.getLoc(), newMemrefType, dynamicDims);
+
+      llvm::SmallPtrSet<Operation *, 4> preservedOps;
+      preservedOps.insert(alloc);
+
+      if (needsCopyIn) {
+        auto copyOp = rewriter.create<memref::CopyOp>(
+            value.getLoc(), value, alloc.getResult());
+        preservedOps.insert(copyOp);
+      }
+
+      // Copy-back: after the DPS consumer writes to the promoted buffer,
+      // copy the result back to the original location (e.g., HBM subview).
+      if (dpsConsumer) {
+        rewriter.setInsertionPointAfter(dpsConsumer);
+        auto copyBack = rewriter.create<memref::CopyOp>(
+            value.getLoc(), alloc.getResult(), value);
+        preservedOps.insert(copyBack);
+      }
+
+      promoted.push_back(alloc.getResult());
+      rewriter.replaceAllUsesExcept(value, promoted.back(), preservedOps);
+      continue;
+    }
+
+    // --- Tensor path ---
+    auto type = dyn_cast<RankedTensorType>(value.getType());
+    if (!type) {
+      return emitSilenceableError() << "unsupported type: " << value;
+    }
+
+    Operation *definingOp = value.getDefiningOp();
     if (definingOp)
       rewriter.setInsertionPointAfter(definingOp);
     else
-      rewriter.setInsertionPointToStart(cast<BlockArgument>(tensor).getOwner());
+      rewriter.setInsertionPointToStart(cast<BlockArgument>(value).getOwner());
 
-    // Check this before we emit operations using this value.
-    bool needsMaterialization = mayBeRead(tensor);
+    bool needsMaterialization = mayBeRead(value);
 
     SmallVector<Value> dynamicDims;
     llvm::SmallPtrSet<Operation *, 4> preservedOps;
@@ -149,30 +214,27 @@ transform::PromoteTensorOp::apply(transform::TransformRewriter &rewriter,
       if (!ShapedType::isDynamic(dim))
         continue;
       Value cst =
-          rewriter.create<arith::ConstantIndexOp>(tensor.getLoc(), static_cast<int64_t>(pos));
+          rewriter.create<arith::ConstantIndexOp>(value.getLoc(), static_cast<int64_t>(pos));
       auto dimOp =
-          rewriter.create<tensor::DimOp>(tensor.getLoc(), tensor, cst);
+          rewriter.create<tensor::DimOp>(value.getLoc(), value, cst);
       preservedOps.insert(dimOp);
       dynamicDims.push_back(dimOp);
     }
     auto allocation = rewriter.create<bufferization::AllocTensorOp>(
-        tensor.getLoc(), type, dynamicDims);
-    // Set memory space if provided.
+        value.getLoc(), type, dynamicDims);
     if (getMemorySpaceAttr())
       allocation.setMemorySpaceAttr(getMemorySpaceAttr());
     Value allocated = allocation;
 
-    // Only insert a materialization (typically bufferizes to a copy) when the
-    // value may be read from.
     if (needsMaterialization) {
       auto copy = rewriter.create<bufferization::MaterializeInDestinationOp>(
-          tensor.getLoc(), tensor, allocated);
+          value.getLoc(), value, allocated);
       preservedOps.insert(copy);
       promoted.push_back(copy.getResult());
     } else {
       promoted.push_back(allocated);
     }
-    rewriter.replaceAllUsesExcept(tensor, promoted.back(), preservedOps);
+    rewriter.replaceAllUsesExcept(value, promoted.back(), preservedOps);
   }
   results.setValues(cast<OpResult>(getPromoted()), promoted);
   return DiagnosedSilenceableFailure::success();

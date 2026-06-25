@@ -11,6 +11,7 @@ add_mlir_library(MLIRNkipyTransformOps
     MLIRArithDialect
     MLIRBufferizationDialect
     MLIRLinalgDialect
+    MLIRMemRefDialect
     MLIRTensorDialect
     MLIRTransformDialect
     MLIRTransformDialectInterfaces

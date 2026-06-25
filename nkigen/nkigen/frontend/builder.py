@@ -90,6 +90,15 @@ def _linalg_result_types(shape: tuple, elem_ty: ir.Type) -> list:
 # Type helpers
 # ---------------------------------------------------------------------------
 
+
+def _get_memref_strides(memref_type):
+    """Compute row-major strides for a memref type."""
+    shape = list(memref_type.shape)
+    strides = [1] * len(shape)
+    for i in range(len(shape) - 2, -1, -1):
+        strides[i] = strides[i + 1] * shape[i + 1]
+    return strides
+
 _MLIR_TO_NP: dict[str, np.dtype] = {
     "f16": np.dtype("float16"),
     "bf16": np.dtype("bfloat16"),
@@ -1186,13 +1195,18 @@ def concatenate(arrays: list[TensorHandle], axis: int = 0, loc=None) -> TensorHa
     output = _make_output(loc, out_shape, elem)
     offset = 0
     if _use_memref():
+        src_strides = _get_memref_strides(ir.MemRefType(output.type))
         for a in arrays:
             offsets = [0] * len(out_shape)
             offsets[axis] = offset
             sizes = list(a.shape)
-            strides = [1] * len(out_shape)
+            strides_list = [1] * len(out_shape)
+            sv_offset = sum(o * s for o, s in zip(offsets, src_strides))
+            layout = ir.StridedLayoutAttr.get(sv_offset, src_strides)
+            sv_type = ir.MemRefType.get(sizes, elem, layout)
             sv = memref.SubViewOp(
-                output, offsets, sizes, strides,
+                sv_type, output, [], [], [],
+                offsets, sizes, strides_list,
                 loc=loc,
             ).result
             memref.CopyOp(a._value, sv, loc=loc)
@@ -1466,12 +1480,16 @@ def static_slice(
         slice_shape.append((l - s + st - 1) // st)
 
     if _use_memref():
-        # Rank-reducing subview: drop squeeze_dims from result type
         if squeeze_dims:
             out_shape = tuple(s for i, s in enumerate(slice_shape) if i not in squeeze_dims)
         else:
             out_shape = tuple(slice_shape)
-        result_type = memref_of(out_shape, elem)
+        src_strides = _get_memref_strides(val.type)
+        out_strides = [src_strides[i] * strides[i]
+                       for i in range(len(shape)) if not squeeze_dims or i not in squeeze_dims]
+        offset = sum(s * st for s, st in zip(start_indices, src_strides))
+        layout = ir.StridedLayoutAttr.get(offset, out_strides)
+        result_type = ir.MemRefType.get(list(out_shape), elem, layout)
         sliced = memref.SubViewOp(
             result_type,
             val,
