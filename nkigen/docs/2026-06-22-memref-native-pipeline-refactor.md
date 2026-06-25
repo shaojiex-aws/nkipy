@@ -184,14 +184,23 @@ main work is replacing tensor-based promotion with memref promotion.
 correct tiled IR but downstream passes (annotate-memory-space, legalize-layout,
 NISA emit) not yet adapted.
 
-### WI-3: Simplify fusion pass
+### WI-3: Simplify fusion pass ✅
 
-**Scope:** `KnobDrivenFusion.cpp` already fuses `scf.for` loops. Verify it
-works without tensor iter_args and simplify any tensor-specific alias tracking.
+**Scope:** `KnobDrivenFusion.cpp` fuses `scf.for` loops. Adapted for memref
+(zero-result loops, no tensor iter_args).
 
 **Sub-tasks:**
-1. Remove any `tensor.extract_slice` → source walk logic
-2. Verify loop fusion with memref subviews (shared base memref detection)
+1. `findProducingForLoop` extended: memref path walks users to find the
+   outermost enclosing `scf.for` (since memref ops don't produce values) ✅
+2. `hoistSetupOpsBetween` made dominance-aware: only hoists ops whose
+   operands all dominate the hoist point (needed for memref.alloc between
+   loops that must move above the fused loop) ✅
+3. `eraseExtraYields`: new helper removes duplicate `scf.yield` ops left
+   by `fuseIndependentSiblingForLoops` when fusing zero-result loops ✅
+4. Verified: tensor fusion tests unchanged (4/4 pass), memref fusion
+   end-to-end with LLVM correctness check ✅
+
+**Files changed:** `mlir/lib/Transforms/KnobDrivenFusion.cpp`
 
 ### WI-4: Clean up layout legalization
 

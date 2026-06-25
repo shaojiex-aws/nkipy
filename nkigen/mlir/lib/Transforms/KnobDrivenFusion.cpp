@@ -1,7 +1,7 @@
 //===- KnobDrivenFusion.cpp - Fuse sibling scf.for loops via fuse_op -------===//
 //
 // Walks each `nkipy.fuse_op(%a, %b, ...)` in the function and fuses the
-// `scf.for` loops producing the listed tensors into a single loop using
+// `scf.for` loops associated with the listed values into a single loop using
 // upstream MLIR's fuseIndependentSiblingForLoops helper.
 //
 // Runs after apply-and-strip-transforms (so the per-op scf.for loops exist)
@@ -32,13 +32,26 @@ namespace mlir {
 namespace nkipy {
 namespace {
 
-/// Walk back through aliasing ops to find the scf.for whose result is
-/// `val`.  Returns null if `val`'s defining chain doesn't lead to one.
+/// Find the scf.for associated with `val`.
+/// Tensor mode: the value is produced by scf.for (loop-carried result).
+/// Memref mode: the value is used inside scf.for (via subview in loop body);
+/// walk up to the outermost scf.for nested inside the same func.
 static scf::ForOp findProducingForLoop(Value val) {
-  Operation *def = val.getDefiningOp();
-  if (!def)
-    return nullptr;
-  return dyn_cast<scf::ForOp>(def);
+  if (Operation *def = val.getDefiningOp())
+    if (auto forOp = dyn_cast<scf::ForOp>(def))
+      return forOp;
+
+  // Memref path: find the outermost scf.for that contains a user.
+  for (OpOperand &use : val.getUses()) {
+    Operation *user = use.getOwner();
+    scf::ForOp result;
+    for (auto parentFor = user->getParentOfType<scf::ForOp>(); parentFor;
+         parentFor = parentFor->getParentOfType<scf::ForOp>())
+      result = parentFor;
+    if (result)
+      return result;
+  }
+  return nullptr;
 }
 
 /// Returns true if two `scf.for` loops have matching lower bound, upper
@@ -59,18 +72,43 @@ static bool sameBounds(scf::ForOp a, scf::ForOp b) {
          sameBound(a.getStep(), b.getStep());
 }
 
-/// Hoist any pure setup ops textually between `first` and `second` above
-/// `first`, so their defs dominate the fused loop's position after sibling
-/// fusion merges `second` into `first`.
+/// Hoist ops textually between `first` and `second` above `first`, so
+/// their defs dominate the fused loop's position after sibling fusion
+/// merges `second` into `first`.  Only hoists ops whose operands all
+/// dominate `first` (i.e., don't depend on `first`'s results).
 static void hoistSetupOpsBetween(Operation *first, Operation *second) {
   SmallVector<Operation *> toHoist;
   for (Operation *op = first->getNextNode(); op && op != second;
        op = op->getNextNode()) {
-    if (isMemoryEffectFree(op))
+    if (isa<scf::ForOp>(op))
+      continue;
+    bool canHoist = true;
+    for (Value operand : op->getOperands()) {
+      Operation *defOp = operand.getDefiningOp();
+      if (defOp && !defOp->isBeforeInBlock(first)) {
+        canHoist = false;
+        break;
+      }
+    }
+    if (canHoist)
       toHoist.push_back(op);
   }
   for (Operation *op : toHoist)
     op->moveBefore(first);
+}
+
+/// After fusing zero-result scf.for loops, duplicate scf.yield ops may
+/// appear in the merged body. Remove all but the final (terminator) yield.
+static void eraseExtraYields(scf::ForOp loop) {
+  Block *body = loop.getBody();
+  Operation *terminator = body->getTerminator();
+  SmallVector<Operation *> toErase;
+  for (Operation &op : *body) {
+    if (isa<scf::YieldOp>(&op) && &op != terminator)
+      toErase.push_back(&op);
+  }
+  for (Operation *op : toErase)
+    op->erase();
 }
 
 /// Recursively fuse pairs of consecutive same-bounds sibling scf.for loops
@@ -93,6 +131,7 @@ static void fuseInnerSiblings(scf::ForOp parent, IRRewriter &rewriter) {
         hoistSetupOpsBetween(prev, curr);
         scf::ForOp fused =
             ::mlir::fuseIndependentSiblingForLoops(curr, prev, rewriter);
+        eraseExtraYields(fused);
         fuseInnerSiblings(fused, rewriter);
         changed = true;
         break;
@@ -144,9 +183,8 @@ struct NkipyKnobDrivenFusionPass
       }
 
       // Fuse outer loops into loops[0] left-to-right.  Each independently
-      // tiled loop and its setup ops (bound constants, tensor.empty inits)
-      // sit textually after loops[0]; hoist them before fusing so their
-      // defs dominate the fused loop's position.
+      // tiled loop and its setup ops sit textually after loops[0]; hoist
+      // them before fusing so their defs dominate the fused loop's position.
       // fuseIndependentSiblingForLoops takes (target, source): target is
       // merged INTO source, which becomes the surviving fused loop.
       scf::ForOp fused = loops[0];
@@ -154,6 +192,7 @@ struct NkipyKnobDrivenFusionPass
         hoistSetupOpsBetween(fused, loops[i]);
         fused = ::mlir::fuseIndependentSiblingForLoops(loops[i], fused,
                                                        rewriter);
+        eraseExtraYields(fused);
       }
 
       // Outer-level fusion brought along each loop's inner nest as a

@@ -127,3 +127,29 @@ def test_memref_tiling(specs, fn, tile_size, expected_ir):
         check_ir_not_contains=["tensor"],
         modes=Mode.STRING_CHECK | Mode.LLVM,
     )
+
+
+# ============================================================================
+# Fusion: verify sibling loop fusion on memref
+# ============================================================================
+
+
+def test_memref_fusion():
+    @trace(backend="memref", input_specs=[
+        ((256, 256), "f32"), ((256, 256), "f32"),
+        ((256, 256), "f32"), ((256, 256), "f32"),
+    ])
+    def kernel(a, b, c, d):
+        x = a + b
+        knob.knob(x).tile_op(tile_size=[128, 128])
+        y = c + d
+        knob.knob(y).tile_op(tile_size=[128, 128])
+        knob.fuse(x, y)
+        return x, y
+
+    run_kernel_test(
+        kernel, stop_after="knob-driven-fusion",
+        check_ir_contains=["scf.for", "linalg.add", "memref.subview"],
+        check_ir_not_contains=["tensor"],
+        modes=Mode.STRING_CHECK | Mode.LLVM,
+    )
