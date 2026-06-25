@@ -26,8 +26,7 @@ std::unique_ptr<OperationPass<func::FuncOp>> createCanonicalizeLoopStepPass();
 std::unique_ptr<OperationPass<func::FuncOp>> createLegalizeLayoutPass();
 std::unique_ptr<OperationPass<func::FuncOp>> createSimplifyLinalgPass();
 std::unique_ptr<OperationPass<ModuleOp>> createPrepareArithmeticPass();
-std::unique_ptr<OperationPass<ModuleOp>> createRemoveRedundantZeroFillPass();
-std::unique_ptr<OperationPass<func::FuncOp>> createDecomposeBatchMatmulPass();
+std::unique_ptr<OperationPass<func::FuncOp>> createPrepareMatmulPass();
 std::unique_ptr<OperationPass<func::FuncOp>> createInlineNkipyReferencePass();
 
 

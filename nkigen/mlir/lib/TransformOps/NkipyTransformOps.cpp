@@ -248,6 +248,73 @@ void transform::PromoteTensorOp::getEffects(
 }
 
 //===----------------------------------------------------------------------===//
+// NkipyTransposeMatmulOp
+//===----------------------------------------------------------------------===//
+
+DiagnosedSilenceableFailure
+transform::NkipyTransposeMatmulOp::apply(transform::TransformRewriter &rewriter,
+                                          transform::TransformResults &results,
+                                          transform::TransformState &state) {
+  SmallVector<Operation *> transformed;
+
+  for (Operation *op : state.getPayloadOps(getTarget())) {
+    auto matmulOp = dyn_cast<linalg::MatmulOp>(op);
+    if (!matmulOp) {
+      return emitSilenceableError()
+             << "expected linalg.matmul, got " << op->getName();
+    }
+
+    rewriter.setInsertionPoint(matmulOp);
+    Location loc = matmulOp.getLoc();
+
+    Value lhs = matmulOp.getInputs()[0];
+    Value rhs = matmulOp.getInputs()[1];
+    Value out = matmulOp.getOutputs()[0];
+
+    auto lhsType = cast<ShapedType>(lhs.getType());
+    int64_t M = lhsType.getDimSize(0);
+    int64_t K = lhsType.getDimSize(1);
+    Type elemTy = lhsType.getElementType();
+
+    Value transposedInit;
+    if (auto memrefType = dyn_cast<MemRefType>(lhs.getType())) {
+      auto sbufAttr = nkipy::MemSpaceEnumAttr::get(
+          rewriter.getContext(), nkipy::MemSpaceEnum::Sbuf);
+      auto transposedType = MemRefType::get(
+          {K, M}, elemTy, MemRefLayoutAttrInterface{}, sbufAttr);
+      transposedInit = rewriter.create<memref::AllocOp>(loc, transposedType);
+    } else {
+      transposedInit = rewriter.create<tensor::EmptyOp>(
+          loc, ArrayRef<int64_t>{K, M}, elemTy);
+    }
+
+    auto transposeOp = rewriter.create<linalg::TransposeOp>(
+        loc, lhs, transposedInit, ArrayRef<int64_t>{1, 0});
+
+    Value transposedLhs = isa<MemRefType>(lhs.getType())
+        ? transposedInit
+        : transposeOp.getResult()[0];
+
+    auto newMatmul = rewriter.create<linalg::MatmulTransposeAOp>(
+        loc, matmulOp.getResultTypes(), ValueRange{transposedLhs, rhs},
+        ValueRange{out});
+
+    rewriter.replaceOp(matmulOp, newMatmul.getResults());
+    transformed.push_back(newMatmul);
+  }
+
+  results.set(cast<OpResult>(getTransformed()), transformed);
+  return DiagnosedSilenceableFailure::success();
+}
+
+void transform::NkipyTransposeMatmulOp::getEffects(
+    SmallVectorImpl<MemoryEffects::EffectInstance> &effects) {
+  transform::onlyReadsHandle(getTargetMutable(), effects);
+  transform::producesHandle(getOperation()->getOpResults(), effects);
+  transform::modifiesPayload(effects);
+}
+
+//===----------------------------------------------------------------------===//
 // Transform dialect extension registration
 //===----------------------------------------------------------------------===//
 

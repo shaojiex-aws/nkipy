@@ -1,8 +1,8 @@
 """
-Tests for the memref-native backend (WI-1 + WI-2).
+Tests for the memref-native backend (WI-1 through WI-6).
 
-Verifies @trace(backend="memref") produces correct linalg-on-memref IR
-and that tiling + promotion works on memref-typed linalg ops.
+Verifies @trace(backend="memref") produces correct linalg-on-memref IR,
+tiling + promotion + fusion work, and full codegen pipeline succeeds.
 """
 
 import pytest
@@ -152,4 +152,44 @@ def test_memref_fusion():
         check_ir_contains=["scf.for", "linalg.add", "memref.subview"],
         check_ir_not_contains=["tensor"],
         modes=Mode.STRING_CHECK | Mode.LLVM,
+    )
+
+
+# ============================================================================
+# Full pipeline e2e: HW execution + KernelBuilder codegen on memref IR
+# ============================================================================
+
+E2E_CASES = [
+    pytest.param(
+        [((256, 256), "f32"), ((256, 256), "f32")],
+        lambda a, b: a + b,
+        [128, 128],
+        ["nisa.dma_copy", "nisa.tensor_tensor"],
+        id="add",
+    ),
+    pytest.param(
+        [((256, 128), "f32"), ((128, 256), "f32")],
+        lambda a, b: a @ b,
+        [128, 128, 64],
+        ["nisa.dma_copy", "nisa.matmul"],
+        id="matmul",
+    ),
+]
+
+
+@pytest.mark.parametrize("specs,fn,tile_size,expected_nisa", E2E_CASES)
+def test_memref_e2e(specs, fn, tile_size, expected_nisa):
+    @trace(backend="memref", input_specs=specs)
+    def kernel(*args):
+        a = args[0]
+        b = args[1] if len(args) > 1 else None
+        result = fn(a, b)
+        knob.knob(result).tile_op(tile_size=tile_size)
+        return result
+
+    run_kernel_test(
+        kernel,
+        check_ir_contains=expected_nisa,
+        check_ir_not_contains=["linalg.add", "linalg.matmul"],
+        modes=Mode.HW | Mode.STRING_CHECK | Mode.CODEGEN,
     )

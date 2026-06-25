@@ -174,8 +174,6 @@ main work is replacing tensor-based promotion with memref promotion.
 **Deferred:**
 - Remove `one-shot-bufferize` and post-bufferize cleanup passes from memref
   pipeline path (WI-4/WI-5 — needs a pipeline flag to gate tensor-only passes)
-- Re-enable `TransposeMatmulOp` for memref (needs upstream support or custom
-  implementation)
 
 **Files changed:** `NkipyTransformOps.cpp`, `KnobDrivenTiling.cpp`,
 `mlir/lib/TransformOps/CMakeLists.txt`
@@ -224,15 +222,32 @@ NISA emit) not yet adapted.
 4. Remove `bufferization` dialect registration from `nkipy-opt.cpp`
 5. Remove `_zero_fill_empty_tensors_ir()` from `execution/llvm.py`
 
-### WI-6: Update codegen backends
+### WI-6: Update codegen backends ✅
 
 **Scope:** Both NISA and KernelBuilder backends already consume memref IR.
 Verify they still work with the new pipeline output.
 
 **Sub-tasks:**
-1. `codegen/nisa/emit.py` — should be unchanged (already takes memref linalg)
-2. `codegen/kernelbuilder/` — should be unchanged (already reads memref.alloc, subview, etc.)
-3. Update test expectations for the new IR shapes
+1. `codegen/nisa/emit.py` — unchanged (already takes memref linalg) ✅
+2. `codegen/kernelbuilder/` — unchanged (already reads memref.alloc, subview, etc.) ✅
+3. Custom `nkipy.transpose_matmul` transform op for memref matmul path ✅
+4. Fix `RemoveZeroFillBeforeMatmul` for memref (in-place fill, no results) ✅
+5. End-to-end verified: memref matmul emits `nisa.matmul`, produces identical
+   NISA IR to tensor path ✅
+
+**Implementation:**
+- `NkipyTransposeMatmulOp` in `NkipyTransformOps.cpp`: rewrites `linalg.matmul`
+  → `linalg.transpose` + `linalg.matmul_transpose_a` for memref operands
+  (allocates transpose buffer in SBUF). Upstream `TransposeMatmulOp` only
+  handles tensor, so this custom op fills the gap.
+- `MatmulPrep.cpp` memref fill removal: `linalg.fill(0)` on memref has no
+  results (writes in-place). The pattern now checks that a matmul-like DPS init
+  consumes the same memref, then erases the fill.
+- HW execution (`Mode.HW`) passes for elementwise. Standalone matmul HW fails
+  due to a pre-existing neuronx-cc limitation (affects tensor path identically).
+
+**Files changed:** `NkipyTransformOps.td`, `NkipyTransformOps.cpp`,
+`KnobDrivenTiling.cpp`, `MatmulPrep.cpp`, `test_memref_backend.py`
 
 ### WI-7: Enable KV cache / in-place aliasing
 

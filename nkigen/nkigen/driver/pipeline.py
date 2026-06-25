@@ -23,11 +23,10 @@ from pathlib import Path
 # has run.
 PASS_GROUPS: dict[str, list[str]] = {
     # linalg-level rewrites that adapt programs to NISA's hardware
-    # constraints.  All operate on tensor IR before infer-layout / tiling.
+    # constraints.  Operate on tensor or memref IR before infer-layout / tiling.
     'canonicalize-linalg-for-nisa': [
-        'remove-redundant-zero-fill',
         'prepare-arithmetic',
-        'decompose-batch-matmul',
+        'prepare-matmul',
     ],
 }
 
@@ -215,9 +214,9 @@ def apply_complete_knob_pipeline(
     This avoids switching between Python bindings and nkipy-opt, running all
     passes through nkipy-opt in sequence:
 
-    Phase 0: Arithmetic Preparation
-     1. remove-redundant-zero-fill: Remove linalg.fill(0) before matmul (NISA auto-zeros PSUM)
-     2. prepare-arithmetic: Convert div to mul+reciprocal (NISA has no divide)
+    Phase 0: Linalg Canonicalization for NISA
+     1. prepare-arithmetic: Convert div to mul+reciprocal (NISA has no divide)
+     2. prepare-matmul: Decompose batch_matmul, transpose LHS, remove fill(0)
 
     Phase 1: Layout Inference, Partition Dim Canonicalization, and Tiling (on tensor IR)
      3. infer-layout: Infer tiling, placement, and partition_dim for unannotated ops
@@ -281,8 +280,8 @@ def apply_complete_knob_pipeline(
     """
     passes = [
         # Phase 0: Linalg-level rewrites for NISA hardware constraints
-        # (pre-tiling).  Expands to remove-redundant-zero-fill +
-        # prepare-arithmetic + decompose-batch-matmul.  See PASS_GROUPS
+        # (pre-tiling).  Expands to prepare-arithmetic +
+        # prepare-matmul.  See PASS_GROUPS
         # above for members.
         'canonicalize-linalg-for-nisa',
 

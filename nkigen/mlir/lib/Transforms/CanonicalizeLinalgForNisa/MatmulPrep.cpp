@@ -1,25 +1,14 @@
 //===- MatmulPrep.cpp - Prepare matmul-shaped ops for NISA ---------------===//
 //
-// Part of the "canonicalize linalg for NISA" family of passes.  Collects
-// rewrites that prepare matmul-like ops for NISA lowering.
+// Single combined pass `--prepare-matmul` that prepares all matmul-like ops
+// for NISA hardware.  Steps (in order):
 //
-// Passes in this file:
-//   --remove-redundant-zero-fill : Remove `linalg.fill(0)` ops whose only
-//     users are matmul-like.  NISA matmul auto-zeros PSUM, so the fill
-//     would otherwise become a redundant memref.copy / nisa.memset.
+//   1. Decompose `linalg.batch_matmul [B,M,N]` → `scf.for` + `linalg.matmul`
+//      (NISA only has 2D matmul).
+//   2. Remove `linalg.fill(0)` when all users are matmul-like
+//      (NISA matmul auto-zeros PSUM).
 //
-//   --decompose-batch-matmul : Rewrite `linalg.batch_matmul [B,M,N]` to
-//     `scf.for` + `linalg.matmul`.  NISA's tensor engine only supports 2D
-//     matmul, so every non-{M,K,N} dimension must be decomposed into a
-//     surrounding loop (tile_size on batch dims must be 1).  User
-//     annotations on the bmm are forwarded: the `nkipy.layout` is
-//     cloned onto the `scf.for` result; the `nkipy.tile_op` is split so
-//     the inner `linalg.matmul` carries the 2D (M,N) tile plus the K
-//     reduction tile.  Pdim/mem-space bridging (extra transposes/copies
-//     when the user's annotation doesn't match NISA's hardware contract)
-//     is the job of downstream passes.
-//
-// Both passes run on tensor IR before tiling/bufferization.
+// Works on both tensor and memref IR.  Must run before tiling.
 //
 //===----------------------------------------------------------------------===//
 
@@ -46,12 +35,10 @@ static bool isMatmulLikeOp(Operation *op) {
              linalg::BatchMatmulTransposeBOp>(op);
 }
 
-/// Check if a value is defined by arith.constant with a zero value.
 static bool isZeroConstant(Value value) {
   auto constOp = value.getDefiningOp<arith::ConstantOp>();
   if (!constOp)
     return false;
-
   if (auto intAttr = dyn_cast<IntegerAttr>(constOp.getValue()))
     return intAttr.getValue().isZero();
   if (auto fpAttr = dyn_cast<FloatAttr>(constOp.getValue()))
@@ -59,86 +46,10 @@ static bool isZeroConstant(Value value) {
   return false;
 }
 
-/// Remove linalg.fill(zero) when all users of the fill result are matmul-like.
-struct RemoveZeroFillBeforeMatmul : public OpRewritePattern<linalg::FillOp> {
-  using OpRewritePattern<linalg::FillOp>::OpRewritePattern;
-
-  LogicalResult matchAndRewrite(linalg::FillOp fillOp,
-                                PatternRewriter &rewriter) const override {
-    // Check fill value is zero
-    if (!isZeroConstant(fillOp.getInputs()[0]))
-      return failure();
-
-    // The fill must have exactly one result (the filled tensor)
-    if (fillOp.getNumResults() != 1)
-      return failure();
-
-    Value fillResult = fillOp.getResult(0);
-
-    // All users must be matmul-like ops
-    for (Operation *user : fillResult.getUsers()) {
-      if (!isMatmulLikeOp(user))
-        return failure();
-    }
-
-    // Replace fill result with the unfilled output tensor
-    Value outputTensor = fillOp.getOutputs()[0];
-    llvm::errs() << "[RemoveRedundantZeroFill] Removing zero fill before "
-                    "matmul: "
-                 << *fillOp << "\n";
-    rewriter.replaceOp(fillOp, outputTensor);
-    return success();
-  }
-};
-
 //===----------------------------------------------------------------------===//
-// Pass Definition
+// Step 1: Decompose batch_matmul → scf.for + matmul
 //===----------------------------------------------------------------------===//
 
-struct RemoveRedundantZeroFillPass
-    : public PassWrapper<RemoveRedundantZeroFillPass,
-                         OperationPass<ModuleOp>> {
-  MLIR_DEFINE_EXPLICIT_INTERNAL_INLINE_TYPE_ID(RemoveRedundantZeroFillPass)
-
-  StringRef getArgument() const final { return "remove-redundant-zero-fill"; }
-
-  StringRef getDescription() const final {
-    return "Remove linalg.fill ops with zero values when only used by "
-           "matmul-like ops (NISA matmul auto-zeros PSUM)";
-  }
-
-  void getDependentDialects(DialectRegistry &registry) const override {
-    registry.insert<arith::ArithDialect>();
-    registry.insert<linalg::LinalgDialect>();
-    registry.insert<tensor::TensorDialect>();
-  }
-
-  void runOnOperation() override {
-    ModuleOp module = getOperation();
-    MLIRContext *ctx = &getContext();
-
-    RewritePatternSet patterns(ctx);
-    patterns.add<RemoveZeroFillBeforeMatmul>(ctx);
-
-    if (failed(applyPatternsGreedily(module, std::move(patterns)))) {
-      llvm::errs()
-          << "[RemoveRedundantZeroFill] Pattern application failed\n";
-      signalPassFailure();
-      return;
-    }
-
-    llvm::errs() << "[RemoveRedundantZeroFill] Pass completed successfully\n";
-  }
-};
-
-//===----------------------------------------------------------------------===//
-// DecomposeBatchMatmul: linalg.batch_matmul -> scf.for + linalg.matmul
-//===----------------------------------------------------------------------===//
-
-/// Decompose one batch_matmul op into an scf.for of 2D linalg.matmul.
-/// Forwards user annotations (nkipy.layout / nkipy.tile_op) onto the
-/// loop result and the inner matmul respectively.  Returns failure on
-/// unsupported shapes or mis-specified batch tiles.
 static LogicalResult decomposeOneBatchMatmul(linalg::BatchMatmulOp bmmOp) {
   Value lhs = bmmOp.getInputs()[0];
   Value rhs = bmmOp.getInputs()[1];
@@ -147,11 +58,10 @@ static LogicalResult decomposeOneBatchMatmul(linalg::BatchMatmulOp bmmOp) {
   auto initType = cast<RankedTensorType>(init.getType());
   if (initType.getRank() != 3 || !initType.hasStaticShape()) {
     return bmmOp.emitError(
-        "decompose-batch-matmul: unsupported batch_matmul shape "
+        "prepare-matmul: unsupported batch_matmul shape "
         "(only static rank-3 [B,M,N] is supported)");
   }
 
-  // Collect paired annotations on the bmm result.
   SmallVector<nkipy::LayoutOp> layoutOps;
   SmallVector<nkipy::TileOp> tileOps;
   for (Operation *user : bmmOp.getResult(0).getUsers()) {
@@ -161,16 +71,13 @@ static LogicalResult decomposeOneBatchMatmul(linalg::BatchMatmulOp bmmOp) {
       tileOps.push_back(t);
   }
 
-  // NISA only has 2D matmul.  Any tile on the batch dim other than 1 is
-  // ill-defined — decomposition iterates the batch one at a time.
   for (auto lay : layoutOps) {
     if (auto ts = lay.getTileSizeAttr()) {
       auto arr = ts.asArrayRef();
       if (!arr.empty() && arr[0] != 1)
         return lay.emitError(
-            "decompose-batch-matmul: layout tile_size[0] on a "
-            "batch_matmul must be 1 (batch dim cannot be tiled; it is "
-            "iterated)");
+            "prepare-matmul: layout tile_size[0] on a "
+            "batch_matmul must be 1 (batch dim cannot be tiled)");
     }
   }
   for (auto t : tileOps) {
@@ -178,9 +85,8 @@ static LogicalResult decomposeOneBatchMatmul(linalg::BatchMatmulOp bmmOp) {
       auto arr = ts.asArrayRef();
       if (!arr.empty() && arr[0] != 1)
         return t.emitError(
-            "decompose-batch-matmul: tile_op tile_size[0] on a "
-            "batch_matmul must be 1 (batch dim cannot be tiled; it is "
-            "iterated)");
+            "prepare-matmul: tile_op tile_size[0] on a "
+            "batch_matmul must be 1 (batch dim cannot be tiled)");
     }
   }
 
@@ -196,15 +102,12 @@ static LogicalResult decomposeOneBatchMatmul(linalg::BatchMatmulOp bmmOp) {
   Value cB = builder.create<arith::ConstantIndexOp>(loc, B);
   Value c1 = builder.create<arith::ConstantIndexOp>(loc, 1);
 
-  // Accumulator stays in [B,M,N] layout.  Downstream passes decide
-  // whether to transpose / copy it based on annotations.
   auto forOp = builder.create<scf::ForOp>(loc, c0, cB, c1, ValueRange{init});
 
   builder.setInsertionPointToStart(forOp.getBody());
   Value iv = forOp.getInductionVar();
   Value acc = forOp.getRegionIterArg(0);
 
-  // Rank-reducing 2D slices from the 3D operands and accumulator.
   auto extract2D = [&](Value src) -> Value {
     auto srcType = cast<RankedTensorType>(src.getType());
     auto shape = srcType.getShape();
@@ -240,8 +143,6 @@ static LogicalResult decomposeOneBatchMatmul(linalg::BatchMatmulOp bmmOp) {
       loc, matmulOp.getResult(0), acc, sliceOffsets, sliceSizes,
       sliceStrides);
 
-  // Preserve nkipy.op_id across the decomposition so downstream tiling
-  // can address the inner matmul.
   if (auto opIdAttr = bmmOp->getAttrOfType<IntegerAttr>("nkipy.op_id"))
     matmulOp->setAttr("nkipy.op_id", opIdAttr);
 
@@ -249,13 +150,6 @@ static LogicalResult decomposeOneBatchMatmul(linalg::BatchMatmulOp bmmOp) {
 
   Value forResult = forOp.getResult(0);
 
-  // --- Annotation forwarding --------------------------------------------
-  // nkipy.layout describes where the accumulator lives; clone it onto
-  // the scf.for result.  If the layout has no tile_size, derive one
-  // from the user's tile_op by dropping the trailing K entry — that
-  // gives the value-shape placement tile for the bmm result.
-  // (After this pass runs, infer-layout no longer visits the scf.for
-  // result, so we have to populate its layout tile_size here.)
   DenseI64ArrayAttr derivedLayoutTile;
   if (!tileOps.empty()) {
     if (auto ts = tileOps.front().getLoopTileSizeAttr()) {
@@ -277,9 +171,6 @@ static LogicalResult decomposeOneBatchMatmul(linalg::BatchMatmulOp bmmOp) {
         lay.getPartitionDimAttr(), layoutTile);
   }
 
-  // nkipy.tile_op belongs on the inner matmul: strip the leading batch
-  // entry from tile_size [B, M, N, K] -> [M, N, K] (one entry per
-  // iterator, in linalg iterator order).
   for (auto t : tileOps) {
     DenseI64ArrayAttr innerTileSize;
     if (auto ts = t.getLoopTileSizeAttr()) {
@@ -297,8 +188,6 @@ static LogicalResult decomposeOneBatchMatmul(linalg::BatchMatmulOp bmmOp) {
     }
   }
 
-  // Replace non-annotation uses of the bmm result with the for result,
-  // then erase the old annotations and the bmm.
   SmallVector<OpOperand *> usesToReplace;
   for (OpOperand &use : bmmOp.getResult(0).getUses()) {
     Operation *owner = use.getOwner();
@@ -315,21 +204,74 @@ static LogicalResult decomposeOneBatchMatmul(linalg::BatchMatmulOp bmmOp) {
   }
   bmmOp.erase();
 
-  llvm::errs() << "[DecomposeBatchMatmul] decomposed B=" << B
+  llvm::errs() << "[PrepareMatmul] Decomposed batch_matmul B=" << B
                << " M=" << M << " N=" << N << "\n";
   return success();
 }
 
-struct DecomposeBatchMatmulPass
-    : public PassWrapper<DecomposeBatchMatmulPass,
-                         OperationPass<func::FuncOp>> {
-  MLIR_DEFINE_EXPLICIT_INTERNAL_INLINE_TYPE_ID(DecomposeBatchMatmulPass)
+//===----------------------------------------------------------------------===//
+// Step 2: Remove fill(0) before matmul-like ops
+//===----------------------------------------------------------------------===//
 
-  StringRef getArgument() const final { return "decompose-batch-matmul"; }
+struct RemoveZeroFillBeforeMatmul : public OpRewritePattern<linalg::FillOp> {
+  using OpRewritePattern<linalg::FillOp>::OpRewritePattern;
+
+  LogicalResult matchAndRewrite(linalg::FillOp fillOp,
+                                PatternRewriter &rewriter) const override {
+    if (!isZeroConstant(fillOp.getInputs()[0]))
+      return failure();
+
+    // Tensor path: fill produces a result that feeds into matmul.
+    if (fillOp.getNumResults() == 1) {
+      Value fillResult = fillOp.getResult(0);
+      for (Operation *user : fillResult.getUsers()) {
+        if (!isMatmulLikeOp(user))
+          return failure();
+      }
+      Value outputTensor = fillOp.getOutputs()[0];
+      llvm::errs() << "[PrepareMatmul] Removing zero fill before matmul\n";
+      rewriter.replaceOp(fillOp, outputTensor);
+      return success();
+    }
+
+    // Memref path: fill writes in-place, no results. Verify that at least
+    // one matmul-like op uses the same output memref as its DPS init
+    // (NISA matmul auto-zeros PSUM, so the fill is redundant).
+    Value outMemref = fillOp.getOutputs()[0];
+    bool hasMatmulConsumer = false;
+    for (OpOperand &use : outMemref.getUses()) {
+      Operation *user = use.getOwner();
+      if (user == fillOp)
+        continue;
+      if (!isMatmulLikeOp(user))
+        continue;
+      auto dpsUser = dyn_cast<DestinationStyleOpInterface>(user);
+      if (dpsUser && dpsUser.isDpsInit(&use)) {
+        hasMatmulConsumer = true;
+        break;
+      }
+    }
+    if (!hasMatmulConsumer)
+      return failure();
+    llvm::errs() << "[PrepareMatmul] Removing zero fill before matmul (memref)\n";
+    rewriter.eraseOp(fillOp);
+    return success();
+  }
+};
+
+//===----------------------------------------------------------------------===//
+// Combined pass
+//===----------------------------------------------------------------------===//
+
+struct PrepareMatmulPass
+    : public PassWrapper<PrepareMatmulPass, OperationPass<func::FuncOp>> {
+  MLIR_DEFINE_EXPLICIT_INTERNAL_INLINE_TYPE_ID(PrepareMatmulPass)
+
+  StringRef getArgument() const final { return "prepare-matmul"; }
 
   StringRef getDescription() const final {
-    return "Rewrite linalg.batch_matmul to scf.for + linalg.matmul; NISA "
-           "has no bmm engine, so every non-{M,K,N} dim must be iterated";
+    return "Prepare matmul ops for NISA: decompose batch_matmul, "
+           "remove redundant zero fills";
   }
 
   void getDependentDialects(DialectRegistry &registry) const override {
@@ -342,16 +284,27 @@ struct DecomposeBatchMatmulPass
 
   void runOnOperation() override {
     func::FuncOp func = getOperation();
+    MLIRContext *ctx = &getContext();
 
+    // Step 1: Decompose batch_matmul → scf.for + matmul.
     SmallVector<linalg::BatchMatmulOp> bmms;
     func.walk([&](linalg::BatchMatmulOp op) { bmms.push_back(op); });
-
     for (auto bmm : bmms) {
       if (failed(decomposeOneBatchMatmul(bmm))) {
         signalPassFailure();
         return;
       }
     }
+
+    // Step 2: Remove fill(0) before matmul-like ops.
+    RewritePatternSet patterns(ctx);
+    patterns.add<RemoveZeroFillBeforeMatmul>(ctx);
+    if (failed(applyPatternsGreedily(func, std::move(patterns)))) {
+      signalPassFailure();
+      return;
+    }
+
+    llvm::errs() << "[PrepareMatmul] Pass completed\n";
   }
 };
 
@@ -360,12 +313,8 @@ struct DecomposeBatchMatmulPass
 namespace mlir {
 namespace nkipy {
 
-std::unique_ptr<OperationPass<ModuleOp>> createRemoveRedundantZeroFillPass() {
-  return std::make_unique<RemoveRedundantZeroFillPass>();
-}
-
-std::unique_ptr<OperationPass<func::FuncOp>> createDecomposeBatchMatmulPass() {
-  return std::make_unique<DecomposeBatchMatmulPass>();
+std::unique_ptr<OperationPass<func::FuncOp>> createPrepareMatmulPass() {
+  return std::make_unique<PrepareMatmulPass>();
 }
 
 } // namespace nkipy

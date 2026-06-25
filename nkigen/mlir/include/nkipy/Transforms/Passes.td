@@ -450,56 +450,22 @@ def PrepareArithmetic : Pass<"prepare-arithmetic", "ModuleOp"> {
   let constructor = "mlir::nkipy::createPrepareArithmeticPass()";
 }
 
-def RemoveRedundantZeroFill : Pass<"remove-redundant-zero-fill", "ModuleOp"> {
-  let summary = "Remove linalg.fill ops with zero values when only used by matmul-like ops";
+def PrepareMatmul : Pass<"prepare-matmul", "func::FuncOp"> {
+  let summary = "Prepare matmul ops for NISA hardware";
   let description = [{
-    NISA matmul hardware initializes PSUM accumulators to zero automatically
-    (psum_zero_region), so linalg.fill ops that fill with zero and feed only
-    into matmul-like operations are redundant and can be removed.
+    Combined pass that prepares all matmul-like ops for NISA lowering:
 
-    This runs on tensor IR before tiling/bufferization. Removing the fill early
-    prevents it from becoming a memref.copy chain that would generate an
-    unnecessary nisa.memset instruction downstream.
+    1. Decompose `linalg.batch_matmul [B,M,N]` into `scf.for` + `linalg.matmul`
+       (NISA only has 2D matmul).
+    2. Transpose LHS: rewrite `linalg.matmul(A, B, C)` into
+       `linalg.transpose(A, A_T)` + `linalg.matmul_transpose_a(A_T, B, C)`
+       (NISA requires stationary operand in partition-dim-major layout).
+    3. Remove `linalg.fill(0)` when all users are matmul-like
+       (NISA matmul auto-zeros PSUM).
 
-    Example:
-      Before:
-        %cst = arith.constant 0.0 : f32
-        %empty = tensor.empty() : tensor<10x30xf32>
-        %filled = linalg.fill ins(%cst) outs(%empty) -> tensor<10x30xf32>
-        %result = linalg.matmul ins(%a, %b) outs(%filled) -> tensor<10x30xf32>
-
-      After:
-        %empty = tensor.empty() : tensor<10x30xf32>
-        %result = linalg.matmul ins(%a, %b) outs(%empty) -> tensor<10x30xf32>
+    Works on both tensor and memref IR.  Must run before tiling.
   }];
-  let constructor = "mlir::nkipy::createRemoveRedundantZeroFillPass()";
-}
-
-def DecomposeBatchMatmul : Pass<"decompose-batch-matmul", "func::FuncOp"> {
-  let summary = "Decompose linalg.batch_matmul into scf.for + linalg.matmul";
-  let description = [{
-    NISA's tensor engine only performs 2D matmul, so every non-{M,K,N}
-    dimension of a batch_matmul must be iterated rather than tiled.  This
-    pass rewrites each `linalg.batch_matmul` of shape `[B,M,N]` into an
-    `scf.for` loop containing a 2D `linalg.matmul` over the batch dim.
-
-    User annotations on the bmm result are forwarded:
-      * `nkipy.layout` is cloned onto the `scf.for` result (it describes
-        where the accumulator lives).  Any mismatch between the user's
-        request and NISA's hardware contract for matmul inputs/outputs
-        is resolved later by `canonicalize-partition-dim` (transposes)
-        and `legalize-layout` (copies).
-      * `nkipy.tile_op` is forwarded with the leading batch dim stripped:
-        `tile_size = [B, M_t, N_t, K_t]` becomes `[M_t, N_t, K_t]` on the
-        inner `linalg.matmul` (one entry per iterator, in linalg
-        iterator order).
-
-    The batch dim's tile size must be 1; any other value is rejected,
-    since NISA cannot tile across batch.
-
-    Runs on tensor IR before tiling/bufferization.
-  }];
-  let constructor = "mlir::nkipy::createDecomposeBatchMatmulPass()";
+  let constructor = "mlir::nkipy::createPrepareMatmulPass()";
 }
 
 def InlineNkipyReference : Pass<"inline-nkipy-reference", "func::FuncOp"> {

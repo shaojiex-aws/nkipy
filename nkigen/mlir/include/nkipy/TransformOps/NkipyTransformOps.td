@@ -50,4 +50,30 @@ def Nkipy_PromoteTensorOp : Op<Transform_Dialect, "nkipy.promote_tensor",
       "(`to` $memory_space^)? $tensor attr-dict `:` functional-type($tensor, $promoted)";
 }
 
+//===----------------------------------------------------------------------===//
+// NkipyTransposeMatmulOp
+//===----------------------------------------------------------------------===//
+
+def NkipyTransposeMatmulOp : Op<Transform_Dialect, "nkipy.transpose_matmul",
+                         [DeclareOpInterfaceMethods<TransformOpInterface>,
+                          DeclareOpInterfaceMethods<MemoryEffectsOpInterface>]> {
+  let summary = "Rewrite linalg.matmul to linalg.matmul_transpose_a with "
+                "explicit LHS transpose (supports both tensor and memref)";
+  let description = [{
+    Rewrites `linalg.matmul(A, B, C)` into
+    `linalg.transpose(A, A_T)` + `linalg.matmul_transpose_a(A_T, B, C)`.
+
+    For tensor operands: creates `tensor.empty` for the transpose output.
+    For memref operands: creates `memref.alloc` for the transpose output.
+
+    Returns a handle to the new `linalg.matmul_transpose_a` op.
+  }];
+
+  let arguments = (ins TransformHandleTypeInterface:$target);
+  let results = (outs TransformHandleTypeInterface:$transformed);
+
+  let assemblyFormat =
+      "$target attr-dict `:` functional-type($target, $transformed)";
+}
+
 #endif // NKIPY_TRANSFORM_OPS

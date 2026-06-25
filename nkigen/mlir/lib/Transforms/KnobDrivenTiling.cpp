@@ -522,18 +522,20 @@ bool buildMatmulBlockingTransforms(OpBuilder &builder, Location loc,
   Value afterBlockM;
   if (!isMemrefMode) {
     // Transpose matmul: matmul(A,B) → matmul_transpose_a(transpose(A), B)
-    // (tensor mode only — upstream TransposeMatmulOp doesn't support memref)
     auto transposeMatmul = builder.create<transform::TransposeMatmulOp>(
         loc, anyOpType, blockMTiled,
         transform::TransposeMatmulInput::lhs);
     afterBlockM = transposeMatmul.getResult();
 
-    // Promote the transpose output to SBUF (inserted by TransposeMatmulOp).
+    // Promote the transpose output to SBUF.
     auto getTransposeOp = builder.create<transform::GetProducerOfOperand>(
         loc, anyOpType, afterBlockM, /*operand_number=*/0);
     emitPromoteOperand(builder, loc, getTransposeOp.getResult(), 1, sbufMemSpace);
   } else {
-    afterBlockM = blockMTiled;
+    // Memref: use custom nkipy.transpose_matmul (upstream doesn't support memref)
+    auto transposeMatmul = builder.create<transform::NkipyTransposeMatmulOp>(
+        loc, anyOpType, blockMTiled);
+    afterBlockM = transposeMatmul.getTransformed();
   }
 
   // Promote LHS at block-M level (reused across all N-blocks)
