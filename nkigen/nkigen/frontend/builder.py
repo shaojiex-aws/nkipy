@@ -15,15 +15,19 @@ from typing import Callable, Optional, Union
 
 import numpy as np
 from mlir import ir
-from mlir.dialects import arith, func, linalg, scf, tensor
+from mlir.dialects import arith, func, linalg, memref, scf, tensor
 from mlir.dialects import math as mlir_math
 
 from nkigen._mlir.dialects import nkipy as nkipy_d
 from nkigen.mlir_utils import (
     const_scalar,
+    make_alloc,
+    make_alloc_filled,
+    make_alloc_zeros,
     make_empty,
     make_filled,
     make_zeros,
+    memref_of,
     ranked_tensor_of,
     to_mlir_type,
 )
@@ -31,6 +35,56 @@ from nkigen.mlir_utils import (
 Scalar = Union[int, float]
 
 _MEM_SPACE_CONSTANT = 5
+
+# Backend mode: "tensor" (default, existing behavior) or "memref" (WI-1)
+_backend_mode: str = "tensor"
+
+
+def _use_memref() -> bool:
+    return _backend_mode == "memref"
+
+
+def _shaped_type(shape: tuple, elem_ty: ir.Type):
+    """Return RankedTensorType or MemRefType depending on backend mode."""
+    if _use_memref():
+        return memref_of(shape, elem_ty)
+    return ranked_tensor_of(shape, elem_ty)
+
+
+def _make_output(loc: ir.Location, shape: tuple, elem_ty: ir.Type) -> ir.Value:
+    """Allocate an uninitialized output buffer (tensor.empty or memref.alloc)."""
+    if _use_memref():
+        return make_alloc(loc, shape, elem_ty)
+    return make_empty(loc, shape, elem_ty)
+
+
+def _make_output_filled(loc: ir.Location, shape: tuple, elem_ty: ir.Type,
+                        fill_value: Union[int, float]) -> ir.Value:
+    """Allocate a filled output buffer."""
+    if _use_memref():
+        return make_alloc_filled(loc, shape, elem_ty, fill_value)
+    return make_filled(loc, shape, elem_ty, fill_value)
+
+
+def _make_output_zeros(loc: ir.Location, shape: tuple, elem_ty: ir.Type) -> ir.Value:
+    """Allocate a zero-initialized output buffer."""
+    if _use_memref():
+        return make_alloc_zeros(loc, shape, elem_ty)
+    return make_zeros(loc, shape, elem_ty)
+
+
+def _linalg_result(op, outs_val: ir.Value):
+    """Return the result of a linalg op: op.results[0] for tensor, outs for memref."""
+    if _use_memref():
+        return outs_val
+    return op.results[0]
+
+
+def _linalg_result_types(shape: tuple, elem_ty: ir.Type) -> list:
+    """Return [result_type] for tensor mode, [] for memref mode."""
+    if _use_memref():
+        return []
+    return [ranked_tensor_of(shape, elem_ty)]
 
 # ---------------------------------------------------------------------------
 # Type helpers
@@ -122,7 +176,10 @@ class LoopIndexHandle:
 class IRBuilder:
     """Manages MLIR context, module, and function lifecycle."""
 
-    def __init__(self, source_file: str = "nkipy_kernel"):
+    def __init__(self, source_file: str = "nkipy_kernel", backend: str = "tensor"):
+        global _backend_mode
+        _backend_mode = backend
+
         self._ctx = ir.Context()
         nkipy_d.register_dialect(self._ctx)
         self._ctx.__enter__()
@@ -135,6 +192,7 @@ class IRBuilder:
         self._func_op = None
         self._entry_block = None
         self._ip = None
+        self._backend = backend
 
     @property
     def context(self):
@@ -151,7 +209,7 @@ class IRBuilder:
         arg_dtypes: list,
     ) -> list[TensorHandle]:
         arg_types = [
-            ranked_tensor_of(shape, _np_to_mlir(dtype))
+            _shaped_type(shape, _np_to_mlir(dtype))
             for shape, dtype in zip(arg_shapes, arg_dtypes)
         ]
         fn_type = ir.FunctionType.get(arg_types, [arg_types[0]])
@@ -177,7 +235,7 @@ class IRBuilder:
         self._ip.__exit__(None, None, None)
         self._ip = None
 
-        arg_types = [ranked_tensor_of(p.shape, p._elem_ty) for p in self._parameters]
+        arg_types = [p._value.type for p in self._parameters]
         res_types = [v.type for v in values]
         self._func_op.attributes["function_type"] = ir.TypeAttr.get(
             ir.FunctionType.get(arg_types, res_types)
@@ -219,11 +277,13 @@ class IRBuilder:
         return str(self._module)
 
     def cleanup(self):
+        global _backend_mode
         if self._ip is not None:
             self._ip.__exit__(None, None, None)
             self._ip = None
         self._file_loc.__exit__(None, None, None)
         self._ctx.__exit__(None, None, None)
+        _backend_mode = "tensor"
 
 
 # ---------------------------------------------------------------------------
@@ -269,12 +329,11 @@ def _broadcast_indexing_map(in_shape: tuple, out_shape: tuple) -> ir.AffineMap:
 
 def _cast_to_float(val, shape, elem_ty, loc):
     out_elem = ir.F32Type.get()
-    result_type = ranked_tensor_of(shape, out_elem)
-    out = make_empty(loc, shape, out_elem)
+    out = _make_output(loc, shape, out_elem)
     nd = len(shape)
     imap = ir.AffineMap.get_identity(nd)
     g = linalg.GenericOp(
-        [result_type],
+        _linalg_result_types(shape, out_elem),
         [val],
         [out],
         ir.ArrayAttr.get([ir.AffineMapAttr.get(imap)] * 2),
@@ -285,7 +344,7 @@ def _cast_to_float(val, shape, elem_ty, loc):
     with ir.InsertionPoint(blk):
         r = arith.SIToFPOp(out_elem, blk.arguments[0], loc=loc).result
         linalg.YieldOp([r], loc=loc)
-    return g.results[0], shape, out_elem
+    return _linalg_result(g, out), shape, out_elem
 
 
 # ---------------------------------------------------------------------------
@@ -302,12 +361,11 @@ def _scalar_binary(
     loc,
     scalar_is_lhs=False,
 ):
-    rt = ranked_tensor_of(tensor_shape, tensor_elem)
-    out = make_empty(loc, tensor_shape, tensor_elem)
+    out = _make_output(loc, tensor_shape, tensor_elem)
     nd = len(tensor_shape)
     imap = ir.AffineMap.get_identity(nd)
     g = linalg.GenericOp(
-        [rt],
+        _linalg_result_types(tensor_shape, tensor_elem),
         [tensor_val],
         [out],
         ir.ArrayAttr.get([ir.AffineMapAttr.get(imap)] * 2),
@@ -322,7 +380,7 @@ def _scalar_binary(
         else:
             r = arith_fn(blk.arguments[0], cst)
         linalg.YieldOp([r], loc=loc)
-    return g.results[0], tensor_shape, tensor_elem
+    return _linalg_result(g, out), tensor_shape, tensor_elem
 
 
 def _broadcast_binary(a_val, a_shape, a_elem, b_val, b_shape, b_elem, body_fn, loc):
@@ -330,13 +388,12 @@ def _broadcast_binary(a_val, a_shape, a_elem, b_val, b_shape, b_elem, body_fn, l
         raise TypeError(f"Element type mismatch: {a_elem} vs {b_elem}")
     elem = a_elem
     out_shape = _broadcast_shape(a_shape, b_shape)
-    rt = ranked_tensor_of(out_shape, elem)
-    out = make_empty(loc, out_shape, elem)
+    out = _make_output(loc, out_shape, elem)
     ma = _broadcast_indexing_map(a_shape, out_shape)
     mb = _broadcast_indexing_map(b_shape, out_shape)
     mo = ir.AffineMap.get_identity(len(out_shape))
     g = linalg.GenericOp(
-        [rt],
+        _linalg_result_types(out_shape, elem),
         [a_val, b_val],
         [out],
         ir.ArrayAttr.get(
@@ -355,7 +412,7 @@ def _broadcast_binary(a_val, a_shape, a_elem, b_val, b_shape, b_elem, body_fn, l
     with ir.InsertionPoint(blk):
         r = body_fn(blk.arguments[0], blk.arguments[1])
         linalg.YieldOp([r], loc=loc)
-    return g.results[0], out_shape, elem
+    return _linalg_result(g, out), out_shape, elem
 
 
 # ---------------------------------------------------------------------------
@@ -365,24 +422,22 @@ def _broadcast_binary(a_val, a_shape, a_elem, b_val, b_shape, b_elem, body_fn, l
 
 def _unary_named(x: TensorHandle, named_cls, body_fn, loc) -> TensorHandle:
     val, shape, elem = x._value, x.shape, x._elem_ty
-    rt = ranked_tensor_of(shape, elem)
-    out = make_empty(loc, shape, elem)
-    op = named_cls([rt], [val], [out], loc=loc)
+    out = _make_output(loc, shape, elem)
+    op = named_cls(_linalg_result_types(shape, elem), [val], [out], loc=loc)
     blk = op.regions[0].blocks.append(elem, elem)
     with ir.InsertionPoint(blk):
         r = body_fn(blk.arguments[0], elem, loc)
         linalg.YieldOp([r], loc=loc)
-    return _make_handle(op.results[0], shape, elem)
+    return _make_handle(_linalg_result(op, out), shape, elem)
 
 
 def _unary_generic(x: TensorHandle, body_fn, loc) -> TensorHandle:
     val, shape, elem = x._value, x.shape, x._elem_ty
-    rt = ranked_tensor_of(shape, elem)
-    out = make_empty(loc, shape, elem)
+    out = _make_output(loc, shape, elem)
     nd = len(shape)
     imap = ir.AffineMap.get_identity(nd)
     g = linalg.GenericOp(
-        [rt],
+        _linalg_result_types(shape, elem),
         [val],
         [out],
         ir.ArrayAttr.get([ir.AffineMapAttr.get(imap)] * 2),
@@ -393,7 +448,7 @@ def _unary_generic(x: TensorHandle, body_fn, loc) -> TensorHandle:
     with ir.InsertionPoint(blk):
         r = body_fn(blk.arguments[0], elem, loc)
         linalg.YieldOp([r], loc=loc)
-    return _make_handle(g.results[0], shape, elem)
+    return _make_handle(_linalg_result(g, out), shape, elem)
 
 
 # ---------------------------------------------------------------------------
@@ -435,15 +490,14 @@ def _binary_dispatch(x, y, float_cls, int_cls, named_cls, loc):
         return _make_handle(rv, rs, re)
 
     elem = xe
-    rt = ranked_tensor_of(xs, elem)
-    out = make_empty(loc, xs, elem)
-    nop = named_cls([rt], [xv, yv], [out], loc=loc)
+    out = _make_output(loc, xs, elem)
+    nop = named_cls(_linalg_result_types(xs, elem), [xv, yv], [out], loc=loc)
     blk = nop.regions[0].blocks.append(elem, elem, elem)
     with ir.InsertionPoint(blk):
         fn = float_op if _is_float(elem) else int_op
         r = fn(blk.arguments[0], blk.arguments[1])
         linalg.YieldOp([r], loc=loc)
-    return _make_handle(nop.results[0], xs, elem)
+    return _make_handle(_linalg_result(nop, out), xs, elem)
 
 
 # ---------------------------------------------------------------------------
@@ -452,9 +506,23 @@ def _binary_dispatch(x, y, float_cls, int_cls, named_cls, loc):
 
 
 def _emit_reshape(loc, value, old_shape, new_shape, elem_ty):
-    dst_ty = ranked_tensor_of(tuple(new_shape), elem_ty)
     if tuple(old_shape) == tuple(new_shape):
         return value
+
+    if _use_memref():
+        dst_ty = memref_of(tuple(new_shape), elem_ty)
+        strides = [1] * len(new_shape)
+        for i in range(len(new_shape) - 2, -1, -1):
+            strides[i] = strides[i + 1] * new_shape[i + 1]
+        return memref.ReinterpretCastOp(
+            dst_ty, value, [], [], [],
+            static_offsets=[0],
+            static_sizes=list(new_shape),
+            static_strides=strides,
+            loc=loc,
+        ).result
+
+    dst_ty = ranked_tensor_of(tuple(new_shape), elem_ty)
 
     def _reassoc(from_shape, to_shape):
         reassoc = []
@@ -829,11 +897,10 @@ def matmul(x: TensorHandle, y: TensorHandle, loc=None) -> TensorHandle:
 
     if len(xs) == 2 and len(ys) == 2:
         out_shape = (m, n)
-        out_val = make_zeros(loc, out_shape, xe)
-        rt = ranked_tensor_of(out_shape, xe)
-        mm = linalg.MatmulOp([rt], [xv, yv], [out_val], loc=loc)
+        out_val = _make_output_zeros(loc, out_shape, xe)
+        mm = linalg.MatmulOp(_linalg_result_types(out_shape, xe), [xv, yv], [out_val], loc=loc)
         _matmul_body(mm, xe, loc)
-        return _make_handle(mm.results[0], out_shape, xe)
+        return _make_handle(_linalg_result(mm, out_val), out_shape, xe)
 
     ba = xs[:-2]
     bb = ys[:-2]
@@ -853,16 +920,14 @@ def matmul(x: TensorHandle, y: TensorHandle, loc=None) -> TensorHandle:
     av = xv if xs == a3 else _emit_reshape(loc, xv, xs, a3, xe)
     bv = yv if ys == b3 else _emit_reshape(loc, yv, ys, b3, ye)
 
-    out_val = make_zeros(loc, o3, xe)
-    rt = ranked_tensor_of(o3, xe)
-    mm = linalg.BatchMatmulOp([rt], [av, bv], [out_val], loc=loc)
+    out_val = _make_output_zeros(loc, o3, xe)
+    mm = linalg.BatchMatmulOp(_linalg_result_types(o3, xe), [av, bv], [out_val], loc=loc)
     _matmul_body(mm, xe, loc)
 
     final = bs + (m, n)
-    if final == o3:
-        rv = mm.results[0]
-    else:
-        rv = _emit_reshape(loc, mm.results[0], o3, final, xe)
+    rv = _linalg_result(mm, out_val)
+    if final != o3:
+        rv = _emit_reshape(loc, rv, o3, final, xe)
     return _make_handle(rv, final, xe)
 
 
@@ -880,13 +945,12 @@ def transpose(x: TensorHandle, axes=None, loc=None) -> TensorHandle:
     else:
         perm = [ax if ax >= 0 else ax + rank for ax in axes]
     new_shape = tuple(shape[p] for p in perm)
-    out = make_empty(loc, new_shape, elem)
-    rt = ranked_tensor_of(new_shape, elem)
-    top = linalg.TransposeOp([rt], val, out, perm, loc=loc)
+    out = _make_output(loc, new_shape, elem)
+    top = linalg.TransposeOp(_linalg_result_types(new_shape, elem), val, out, perm, loc=loc)
     blk = top.regions[0].blocks.append(elem, elem)
     with ir.InsertionPoint(blk):
         linalg.YieldOp([blk.arguments[0]], loc=loc)
-    return _make_handle(top.results[0], new_shape, elem)
+    return _make_handle(_linalg_result(top, out), new_shape, elem)
 
 
 # ---------------------------------------------------------------------------
@@ -959,13 +1023,12 @@ def _reduce(x: TensorHandle, axis, keepdims, init_fn, body_fn, loc=None) -> Tens
         out_shape = tuple(shape[i] for i in range(rank) if i not in axis)
         out_exprs = [ir.AffineDimExpr.get(i) for i in range(rank) if i not in axis]
 
-    rt = ranked_tensor_of(out_shape, elem)
     init = init_fn(loc, out_shape, elem)
     imap = ir.AffineMap.get_identity(rank)
     omap = ir.AffineMap.get(rank, 0, out_exprs)
 
     g = linalg.GenericOp(
-        [rt],
+        _linalg_result_types(out_shape, elem),
         [val],
         [init],
         ir.ArrayAttr.get([ir.AffineMapAttr.get(imap), ir.AffineMapAttr.get(omap)]),
@@ -983,7 +1046,7 @@ def _reduce(x: TensorHandle, axis, keepdims, init_fn, body_fn, loc=None) -> Tens
     with ir.InsertionPoint(blk):
         r = body_fn(blk.arguments[0], blk.arguments[1], elem, loc)
         linalg.YieldOp([r], loc=loc)
-    return _make_handle(g.results[0], out_shape, elem)
+    return _make_handle(_linalg_result(g, init), out_shape, elem)
 
 
 def reduce_sum(x: TensorHandle, axis=None, keepdims=False, loc=None) -> TensorHandle:
@@ -994,12 +1057,12 @@ def reduce_sum(x: TensorHandle, axis=None, keepdims=False, loc=None) -> TensorHa
             return arith.AddFOp(acc, inp, loc=l).result
         return arith.AddIOp(acc, inp, loc=l).result
 
-    return _reduce(x, na, keepdims, make_zeros, body, loc)
+    return _reduce(x, na, keepdims, _make_output_zeros, body, loc)
 
 
 def reduce_prod(x: TensorHandle, axis=None, keepdims=False, loc=None) -> TensorHandle:
     na = _normalize_axis(axis, len(x.shape))
-    init_fn = lambda loc, shape, elem: make_filled(loc, shape, elem, 1.0)
+    init_fn = lambda loc, shape, elem: _make_output_filled(loc, shape, elem, 1.0)
 
     def body(inp, acc, elem, l):
         if _is_float(elem):
@@ -1011,7 +1074,7 @@ def reduce_prod(x: TensorHandle, axis=None, keepdims=False, loc=None) -> TensorH
 
 def reduce_max(x: TensorHandle, axis=None, keepdims=False, loc=None) -> TensorHandle:
     na = _normalize_axis(axis, len(x.shape))
-    init_fn = lambda loc, shape, elem: make_filled(loc, shape, elem, float("-inf"))
+    init_fn = lambda loc, shape, elem: _make_output_filled(loc, shape, elem, float("-inf"))
 
     def body(inp, acc, elem, l):
         if _is_float(elem):
@@ -1023,7 +1086,7 @@ def reduce_max(x: TensorHandle, axis=None, keepdims=False, loc=None) -> TensorHa
 
 def reduce_min(x: TensorHandle, axis=None, keepdims=False, loc=None) -> TensorHandle:
     na = _normalize_axis(axis, len(x.shape))
-    init_fn = lambda loc, shape, elem: make_filled(loc, shape, elem, float("inf"))
+    init_fn = lambda loc, shape, elem: _make_output_filled(loc, shape, elem, float("inf"))
 
     def body(inp, acc, elem, l):
         if _is_float(elem):
@@ -1067,30 +1130,30 @@ def reduce_var(x: TensorHandle, axis=None, keepdims=False, loc=None) -> TensorHa
 def zeros(shape: tuple, dtype, loc=None) -> TensorHandle:
     loc = loc or _loc()
     elem = _np_to_mlir(dtype)
-    v = make_filled(loc, tuple(shape), elem, 0.0)
+    v = _make_output_zeros(loc, tuple(shape), elem)
     return _make_handle(v, tuple(shape), elem)
 
 
 def full(shape: tuple, fill_value, dtype, loc=None) -> TensorHandle:
     loc = loc or _loc()
     elem = _np_to_mlir(dtype)
-    v = make_filled(loc, tuple(shape), elem, fill_value)
+    v = _make_output_filled(loc, tuple(shape), elem, fill_value)
     return _make_handle(v, tuple(shape), elem)
 
 
 def empty(shape: tuple, dtype, loc=None) -> TensorHandle:
     loc = loc or _loc()
     elem = _np_to_mlir(dtype)
-    v = make_empty(loc, tuple(shape), elem)
+    v = _make_output(loc, tuple(shape), elem)
     return _make_handle(v, tuple(shape), elem)
 
 
 def constant_tensor(val: Scalar, shape: tuple, elem_ty, loc=None) -> TensorHandle:
-    """Create a filled tensor annotated with CONSTANT memory space."""
+    """Create a filled tensor/memref annotated with CONSTANT memory space."""
     loc = loc or _loc()
     if not isinstance(elem_ty, ir.Type):
         elem_ty = _np_to_mlir(elem_ty)
-    v = make_filled(loc, tuple(shape), elem_ty, val)
+    v = _make_output_filled(loc, tuple(shape), elem_ty, val)
     ms_attr = ir.IntegerAttr.get(ir.IntegerType.get_signless(32), _MEM_SPACE_CONSTANT)
     nkipy_d.LayoutOp(
         target=v,
@@ -1120,25 +1183,38 @@ def concatenate(arrays: list[TensorHandle], axis: int = 0, loc=None) -> TensorHa
     out_shape[axis] = sum(a.shape[axis] for a in arrays)
     out_shape = tuple(out_shape)
 
-    output = make_empty(loc, out_shape, elem)
+    output = _make_output(loc, out_shape, elem)
     offset = 0
-    for a in arrays:
-        offsets = [0] * len(out_shape)
-        offsets[axis] = offset
-        sizes = list(a.shape)
-        strides = [1] * len(out_shape)
-        output = tensor.InsertSliceOp(
-            a._value,
-            output,
-            [],
-            [],
-            [],
-            offsets,
-            sizes,
-            strides,
-            loc=loc,
-        ).result
-        offset += a.shape[axis]
+    if _use_memref():
+        for a in arrays:
+            offsets = [0] * len(out_shape)
+            offsets[axis] = offset
+            sizes = list(a.shape)
+            strides = [1] * len(out_shape)
+            sv = memref.SubViewOp(
+                output, offsets, sizes, strides,
+                loc=loc,
+            ).result
+            memref.CopyOp(a._value, sv, loc=loc)
+            offset += a.shape[axis]
+    else:
+        for a in arrays:
+            offsets = [0] * len(out_shape)
+            offsets[axis] = offset
+            sizes = list(a.shape)
+            strides = [1] * len(out_shape)
+            output = tensor.InsertSliceOp(
+                a._value,
+                output,
+                [],
+                [],
+                [],
+                offsets,
+                sizes,
+                strides,
+                loc=loc,
+            ).result
+            offset += a.shape[axis]
 
     return _make_handle(output, out_shape, elem)
 
@@ -1154,12 +1230,11 @@ def broadcast_to(x: TensorHandle, shape: tuple, loc=None) -> TensorHandle:
     ts = tuple(shape)
     if xs == ts:
         return x
-    rt = ranked_tensor_of(ts, elem)
-    out = make_empty(loc, ts, elem)
+    out = _make_output(loc, ts, elem)
     im = _broadcast_indexing_map(xs, ts)
     om = ir.AffineMap.get_identity(len(ts))
     g = linalg.GenericOp(
-        [rt],
+        _linalg_result_types(ts, elem),
         [val],
         [out],
         ir.ArrayAttr.get([ir.AffineMapAttr.get(im), ir.AffineMapAttr.get(om)]),
@@ -1171,7 +1246,7 @@ def broadcast_to(x: TensorHandle, shape: tuple, loc=None) -> TensorHandle:
     blk = g.regions[0].blocks.append(elem, elem)
     with ir.InsertionPoint(blk):
         linalg.YieldOp([blk.arguments[0]], loc=loc)
-    return _make_handle(g.results[0], ts, elem)
+    return _make_handle(_linalg_result(g, out), ts, elem)
 
 
 # ---------------------------------------------------------------------------
@@ -1210,8 +1285,7 @@ def where(condition, x, y, loc=None) -> TensorHandle:
     for s in shapes[1:]:
         out_shape = _broadcast_shape(out_shape, s)
 
-    rt = ranked_tensor_of(out_shape, out_elem)
-    out = make_empty(loc, out_shape, out_elem)
+    out = _make_output(loc, out_shape, out_elem)
 
     inputs = [condition._value]
     in_maps = [_broadcast_indexing_map(condition.shape, out_shape)]
@@ -1231,7 +1305,7 @@ def where(condition, x, y, loc=None) -> TensorHandle:
     all_maps.append(ir.AffineMapAttr.get(om))
 
     g = linalg.GenericOp(
-        [rt],
+        _linalg_result_types(out_shape, out_elem),
         inputs,
         [out],
         ir.ArrayAttr.get(all_maps),
@@ -1256,7 +1330,7 @@ def where(condition, x, y, loc=None) -> TensorHandle:
         r = arith.AddFOp(t1, t2, loc=loc).result
         linalg.YieldOp([r], loc=loc)
 
-    return _make_handle(g.results[0], tuple(out_shape), out_elem)
+    return _make_handle(_linalg_result(g, out), tuple(out_shape), out_elem)
 
 
 # ---------------------------------------------------------------------------
@@ -1333,12 +1407,11 @@ def astype(x: TensorHandle, dtype, loc=None) -> TensorHandle:
     if str(src_elem) == str(dst_elem):
         return x
 
-    rt = ranked_tensor_of(shape, dst_elem)
-    out = make_empty(loc, shape, dst_elem)
+    out = _make_output(loc, shape, dst_elem)
     nd = len(shape)
     imap = ir.AffineMap.get_identity(nd)
     g = linalg.GenericOp(
-        [rt],
+        _linalg_result_types(shape, dst_elem),
         [val],
         [out],
         ir.ArrayAttr.get([ir.AffineMapAttr.get(imap)] * 2),
@@ -1369,7 +1442,7 @@ def astype(x: TensorHandle, dtype, loc=None) -> TensorHandle:
             else:
                 oe = in_e
         linalg.YieldOp([oe], loc=loc)
-    return _make_handle(g.results[0], shape, dst_elem)
+    return _make_handle(_linalg_result(g, out), shape, dst_elem)
 
 
 # ---------------------------------------------------------------------------
@@ -1391,6 +1464,26 @@ def static_slice(
     slice_shape = []
     for s, l, st in zip(start_indices, limit_indices, strides):
         slice_shape.append((l - s + st - 1) // st)
+
+    if _use_memref():
+        # Rank-reducing subview: drop squeeze_dims from result type
+        if squeeze_dims:
+            out_shape = tuple(s for i, s in enumerate(slice_shape) if i not in squeeze_dims)
+        else:
+            out_shape = tuple(slice_shape)
+        result_type = memref_of(out_shape, elem)
+        sliced = memref.SubViewOp(
+            result_type,
+            val,
+            [],
+            [],
+            [],
+            start_indices,
+            slice_shape,
+            strides,
+            loc=loc,
+        ).result
+        return _make_handle(sliced, out_shape, elem)
 
     rt = ranked_tensor_of(tuple(slice_shape), elem)
     sliced = tensor.ExtractSliceOp(
@@ -1488,6 +1581,21 @@ def dynamic_slice(x: TensorHandle, indices, loc=None) -> TensorHandle:
         if size != DYNAMIC:
             result_shape.append(size // stride if stride > 1 else size)
 
+    if _use_memref():
+        result_type = memref_of(tuple(result_shape), elem)
+        sv = memref.SubViewOp(
+            result_type,
+            val,
+            dynamic_offsets,
+            [],
+            [],
+            static_offsets,
+            static_sizes,
+            static_strides,
+            loc=loc,
+        )
+        return _make_handle(sv.result, tuple(result_shape), elem)
+
     rt = ranked_tensor_of(tuple(result_shape), elem)
     extract = tensor.ExtractSliceOp(
         rt,
@@ -1517,6 +1625,13 @@ def static_insert_slice(
     loc=None,
 ) -> TensorHandle:
     loc = loc or _loc()
+    if _use_memref():
+        sv = memref.SubViewOp(
+            dest._value, offsets, sizes, strides, loc=loc,
+        ).result
+        memref.CopyOp(src._value, sv, loc=loc)
+        return dest
+
     new_tensor = tensor.InsertSliceOp(
         src._value,
         dest._value,
@@ -1541,6 +1656,15 @@ def dynamic_insert_slice(
 
     static_offsets, static_sizes, static_strides, dynamic_offsets, _ = \
         _parse_dynamic_indices(indices, dest.shape, loc)
+
+    if _use_memref():
+        sv = memref.SubViewOp(
+            dest._value, dynamic_offsets, [], [],
+            static_offsets, static_sizes, static_strides,
+            loc=loc,
+        ).result
+        memref.CopyOp(src._value, sv, loc=loc)
+        return dest
 
     new_tensor = tensor.InsertSliceOp(
         src._value,
@@ -1591,7 +1715,11 @@ def fori_loop(
     body_fn: Callable,
     init_handles: list[TensorHandle],
 ) -> list[TensorHandle]:
-    """Build an ``scf.for`` loop with loop-carried tensor accumulators.
+    """Build an ``scf.for`` loop with loop-carried accumulators.
+
+    In tensor mode: uses scf.for iter_args (functional loop-carry).
+    In memref mode: no iter_args needed since memrefs are mutable. The loop
+    body mutates buffers in-place; init_handles are returned as-is.
 
     Args:
         lower: inclusive lower bound
@@ -1608,6 +1736,20 @@ def fori_loop(
     ub = arith.ConstantOp(i32, upper, loc=loc)
     step = arith.ConstantOp(i32, 1, loc=loc)
 
+    if _use_memref():
+        # Memref mode: no iter_args, loop body mutates in-place.
+        loop_op = scf.ForOp(lb.result, ub.result, step.result, [], loc=loc)
+        loop_block = loop_op.body
+        loop_idx_value = loop_block.arguments[0]
+        loop_idx = LoopIndexHandle(loop_idx_value)
+
+        with ir.InsertionPoint(loop_block):
+            body_fn(loop_idx, init_handles)
+            scf.YieldOp([], loc=loc)
+
+        return init_handles
+
+    # Tensor mode: loop-carried iter_args.
     loop_op = scf.ForOp(
         lb.result,
         ub.result,
@@ -1669,13 +1811,13 @@ def fori_loop(
 
 
 def lift_scalar_to_tensor(val, dtype_hint: str = "float") -> TensorHandle:
-    """Lift a Python scalar to a 0-d tensor handle."""
+    """Lift a Python scalar to a 0-d tensor/memref handle."""
     loc = _loc()
     if dtype_hint == "float" or isinstance(val, float):
         elem = ir.F32Type.get()
     else:
         elem = ir.IntegerType.get_signless(32)
-    v = make_filled(loc, (), elem, val)
+    v = _make_output_filled(loc, (), elem, val)
     return _make_handle(v, (), elem)
 
 

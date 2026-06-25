@@ -154,10 +154,10 @@ This is deferred — the fixed structure works well for the common case and `.ca
 
 Files: `mlir/lib/Transforms/KnobDrivenTiling.cpp` (`buildMatmulBlockingTransforms`)
 
-### Step 9: Remove legacy "strip leading 1s" workarounds
+### Step 9: Remove legacy "strip leading 1s" workarounds — deferred
 
-Only safe after Step 7 is done. Remove the workarounds that exist because temp SBUF allocs were naively copied from the tile shape:
+Deferred to the memref-native pipeline refactor. The 3D SBUF shapes (`memref<1x128x64, sbuf>`) are inherent to linalg tiling: `tile_using_for` preserves all iteration dims, so operands keep the unit-extent batch dim. Eliminating this within the current pipeline would require collapse/expand_shape pairs around every promoted alloc — making IR analysis harder for no real gain.
 
-- 4a: emitter strips leading unit dims (`nkigen/codegen/nisa/emit.py`) — remove
-- 4b: alloc pass strips leading 1s — remove
-- 4c: LegalizeLayout "middle dims must be unit" restriction removed ✅ — keep (still correct)
+The emitter's strip-leading-1s logic (6 lines for allocs, ~20 for accesses) is the correct simple solution. Once `KnobDrivenTiling` emits `scf.for + memref.subview` directly (memref-native refactor), allocs will be 2D from the start and the emitter workaround becomes dead code.
+
+Files: `nkigen/codegen/nisa/emit.py` (lines 116–124, 462–484)

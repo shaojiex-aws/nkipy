@@ -88,8 +88,13 @@ def trace(
     *,
     input_specs: Optional[list] = None,
     name: Optional[str] = None,
+    backend: str = "tensor",
 ) -> Callable:
-    """Decorator to trace a Python function with NumPy APIs into MLIR."""
+    """Decorator to trace a Python function with NumPy APIs into MLIR.
+
+    Args:
+        backend: "tensor" (default) for tensor SSA IR, "memref" for memref-native IR.
+    """
 
     def decorator(f: Callable) -> Callable:
         func_name = name or f.__name__
@@ -110,7 +115,7 @@ def trace(
 
             _clear_registry()
 
-            b = IRBuilder(source_file=source_file)
+            b = IRBuilder(source_file=source_file, backend=backend)
             arg_shapes = [s for s, _ in specs]
             arg_dtypes = [d for _, d in specs]
             handles = b.begin_function(func_name, arg_shapes, arg_dtypes)

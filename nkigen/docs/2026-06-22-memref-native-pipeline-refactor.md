@@ -123,21 +123,28 @@ These become unnecessary:
 
 ## Detailed Work Items
 
-### WI-1: Memref-native frontend (`builder.py` + `traced_array.py`)
+### WI-1: Memref-native frontend (`builder.py` + `traced_array.py`) ✅
 
 **Scope:** Replace `TensorHandle` with `MemrefHandle`. Change all op builders to
 produce linalg-on-memref.
 
 **Sub-tasks:**
-1. Replace `make_empty()` → `memref.AllocOp` (returns `memref<...>`)
-2. Replace `ranked_tensor_of()` → `MemRefType.get()` throughout
-3. Change `linalg.GenericOp` / named linalg calls to accept memref operands
-   (linalg already supports this — the `outs` operand just needs to be memref)
-4. Change `begin_function()` signature to `(memref<...>, ...) → ()`
-5. Replace `__setitem__` (`tensor.insert_slice`) with `memref.subview` + store/copy
-6. Replace `__getitem__` (`tensor.extract_slice`) with `memref.subview`
-7. Remove `scf.for` tensor iter_args — loops just mutate memrefs in-place
-8. Kill the DPS-rewiring hack (builder.py:1634-1656)
+1. Replace `make_empty()` → `memref.AllocOp` (returns `memref<...>`) ✅
+2. Replace `ranked_tensor_of()` → `MemRefType.get()` throughout ✅
+3. Change `linalg.GenericOp` / named linalg calls to accept memref operands ✅
+4. Change `begin_function()` signature to `(memref<...>, ...) → memref<...>` ✅
+5. Replace `__setitem__` (`tensor.insert_slice`) with `memref.subview` + copy ✅
+6. Replace `__getitem__` (`tensor.extract_slice`) with `memref.subview` ✅
+7. Remove `scf.for` tensor iter_args — loops just mutate memrefs in-place ✅
+8. DPS-rewiring: `finish_function` uses `p._value.type` — no separate hack needed ✅
+
+**Implementation:** Gated behind `backend="memref"` flag on `@trace()`. Tensor
+path unchanged — all 303 passing tests remain green. Dual-mode via thin
+abstraction layer (`_make_output`, `_linalg_result_types`, `_linalg_result`) that
+dispatches on global `_backend_mode`. The `take` (GatherOp) is not yet dual-mode
+since it's a custom dialect op lowered directly by NISA — deferred to WI-6.
+
+**Files changed:** `mlir_utils.py`, `frontend/builder.py`, `frontend/trace.py`
 
 **Risk:** Linalg on memref doesn't use DPS (result = init buffer), so tiling
 interface behavior differs. Verify `TilingInterface` implementations work on
