@@ -1,6 +1,5 @@
 add_mlir_library(MLIRNkipyPasses
     Passes.cpp
-    AnnotateMemorySpace.cpp
     CanonicalizeReshape.cpp
     CanonicalizePartitionDim.cpp
     AssignLinalgOpIds.cpp

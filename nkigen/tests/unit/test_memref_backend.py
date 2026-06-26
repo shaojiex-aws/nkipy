@@ -53,7 +53,7 @@ FRONTEND_CASES = [
     pytest.param(
         [((128, 64), "f32")],
         lambda x, _: x.reshape(1, 128, 64),
-        ["memref.reinterpret_cast", "memref<1x128x64xf32, #nkipy.mem<SharedHbm>>"],
+        ["memref.reinterpret_cast", "memref<1x128x64xf32>"],
         id="reshape",
     ),
     pytest.param(

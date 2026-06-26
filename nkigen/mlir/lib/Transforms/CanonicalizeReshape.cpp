@@ -27,6 +27,8 @@
 
 #include "nkipy/Transforms/Passes.h"
 #include "nkipy/Transforms/IRHelpers.h"
+#include "nkipy/Dialect/NkipyAttrs.h"
+#include "nkipy/Dialect/NkipyOps.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/MemRef/IR/MemRef.h"
 #include "mlir/Pass/Pass.h"
@@ -106,8 +108,71 @@ struct CanonicalizeReshapePass
     registry.insert<memref::MemRefDialect>();
   }
 
+  /// Apply mem_space from nkipy.layout ops to memref types and stamp
+  /// SharedHbm on func args/returns that lack a mem_space.
+  void applyMemSpaceAnnotations(func::FuncOp func) {
+    MLIRContext *ctx = func.getContext();
+    auto sharedHbm =
+        nkipy::MemSpaceAttr::get(ctx, nkipy::MemSpaceEnum::SharedHbm);
+
+    func.walk([&](nkipy::LayoutOp layoutOp) {
+      Value target = layoutOp.getTarget();
+      auto memSpace = layoutOp.getMemSpace();
+      if (!memSpace) return;
+      auto memrefType = dyn_cast<MemRefType>(target.getType());
+      if (!memrefType) return;
+      target.setType(MemRefType::get(memrefType.getShape(),
+                                     memrefType.getElementType(),
+                                     memrefType.getLayout(),
+                                     Attribute(*memSpace)));
+    });
+
+    for (auto arg : func.getArguments()) {
+      auto mt = dyn_cast<MemRefType>(arg.getType());
+      if (!mt || mt.getMemorySpace()) continue;
+      arg.setType(MemRefType::get(mt.getShape(), mt.getElementType(),
+                                  mt.getLayout(), sharedHbm));
+    }
+
+    auto returnOp =
+        cast<func::ReturnOp>(func.getBody().front().getTerminator());
+    for (auto operand : returnOp.getOperands()) {
+      auto mt = dyn_cast<MemRefType>(operand.getType());
+      if (!mt || mt.getMemorySpace()) continue;
+      operand.setType(MemRefType::get(mt.getShape(), mt.getElementType(),
+                                      mt.getLayout(), sharedHbm));
+    }
+
+    // Propagate mem_space through view ops until convergence.
+    bool changed = true;
+    while (changed) {
+      changed = false;
+      func.walk([&](Operation *op) {
+        if (!isa<memref::SubViewOp, memref::CastOp, memref::CollapseShapeOp,
+                 memref::ExpandShapeOp, memref::ReinterpretCastOp>(op))
+          return;
+        auto srcType = dyn_cast<MemRefType>(op->getOperand(0).getType());
+        auto resType = dyn_cast<MemRefType>(op->getResult(0).getType());
+        if (!srcType || !resType) return;
+        if (resType.getMemorySpace() || !srcType.getMemorySpace()) return;
+        op->getResult(0).setType(MemRefType::get(
+            resType.getShape(), resType.getElementType(),
+            resType.getLayout(), srcType.getMemorySpace()));
+        changed = true;
+      });
+    }
+
+    SmallVector<Type> argTypes, resTypes;
+    for (auto arg : func.getArguments()) argTypes.push_back(arg.getType());
+    for (auto operand : returnOp.getOperands())
+      resTypes.push_back(operand.getType());
+    func.setType(FunctionType::get(ctx, argTypes, resTypes));
+  }
+
   void runOnOperation() override {
     func::FuncOp func = getOperation();
+
+    applyMemSpaceAnnotations(func);
 
     // ---------------------------------------------------------------
     // Phase 0: Convert memref.reshape to memref.reinterpret_cast.

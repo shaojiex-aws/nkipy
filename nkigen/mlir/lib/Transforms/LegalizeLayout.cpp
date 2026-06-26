@@ -200,6 +200,7 @@ struct NkipyLegalizeLayoutPass
       op.erase();
   }
 
+
   void runOnOperation() override {
     func::FuncOp func = getOperation();
     hasError = false;

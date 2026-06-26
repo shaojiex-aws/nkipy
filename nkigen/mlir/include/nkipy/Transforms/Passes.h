@@ -10,7 +10,6 @@
 namespace mlir {
 namespace nkipy {
 
-std::unique_ptr<OperationPass<func::FuncOp>> createAnnotateMemorySpacePass();
 std::unique_ptr<OperationPass<func::FuncOp>> createCanonicalizeReshapePass();
 std::unique_ptr<OperationPass<func::FuncOp>> createCanonicalizePartitionDimPass();
 std::unique_ptr<OperationPass<func::FuncOp>> createAssignLinalgOpIdsPass();

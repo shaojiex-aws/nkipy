@@ -155,6 +155,11 @@ transform::PromoteTensorOp::apply(transform::TransformRewriter &rewriter,
       auto copyBack = rewriter.create<memref::CopyOp>(
           value.getLoc(), alloc.getResult(), value);
       preservedOps.insert(copyBack);
+    } else if (!needsCopyIn) {
+      rewriter.setInsertionPoint(value.getParentBlock()->getTerminator());
+      auto copyBack = rewriter.create<memref::CopyOp>(
+          value.getLoc(), alloc.getResult(), value);
+      preservedOps.insert(copyBack);
     }
 
     promoted.push_back(alloc.getResult());

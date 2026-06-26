@@ -295,7 +295,7 @@ static LogicalResult decomposeOneBatchMatmul(linalg::BatchMatmulOp bmmOp) {
   if (auto opIdAttr = bmmOp->getAttrOfType<IntegerAttr>("nkipy.op_id"))
     matmulOp->setAttr("nkipy.op_id", opIdAttr);
 
-  // Transfer annotations: tile_size drops the batch dim (first entry).
+  // Transfer annotations to initSlice, dropping the batch dim (first entry).
   for (auto t : tileOps)
     if (auto ts = t.getLoopTileSizeAttr()) {
       auto arr = ts.asArrayRef();
@@ -305,6 +305,19 @@ static LogicalResult decomposeOneBatchMatmul(linalg::BatchMatmulOp bmmOp) {
         builder.create<nkipy::TileOp>(t.getLoc(), initSlice, innerTileSize);
       }
     }
+  for (auto lay : layoutOps) {
+    DenseI64ArrayAttr innerTs;
+    if (auto ts = lay.getTileSizeAttr()) {
+      auto arr = ts.asArrayRef();
+      if (arr.size() >= 2) {
+        SmallVector<int64_t> inner(arr.begin() + 1, arr.end());
+        innerTs = DenseI64ArrayAttr::get(bmmOp.getContext(), inner);
+      }
+    }
+    builder.create<nkipy::LayoutOp>(lay.getLoc(), initSlice,
+                                    lay.getMemSpaceAttr(),
+                                    lay.getPartitionDimAttr(), innerTs);
+  }
 
   // Erase old annotations and the batch_matmul op.
   for (auto lay : layoutOps) lay.erase();
@@ -380,7 +393,16 @@ struct CanonicalizeComputePass
       return;
     }
 
-    // Step 2: Decompose batch_matmul → scf.for + matmul.
+    // Step 2: Remove fill(0) before matmul-like ops (before decomposition,
+    // so batch_matmul is still a direct user of the fill output).
+    RewritePatternSet matmulPatterns(ctx);
+    matmulPatterns.add<RemoveZeroFillBeforeMatmul>(ctx);
+    if (failed(applyPatternsGreedily(module, std::move(matmulPatterns)))) {
+      signalPassFailure();
+      return;
+    }
+
+    // Step 3: Decompose batch_matmul → scf.for + matmul.
     module.walk([&](func::FuncOp func) {
       SmallVector<linalg::BatchMatmulOp> bmms;
       func.walk([&](linalg::BatchMatmulOp op) { bmms.push_back(op); });
@@ -390,14 +412,6 @@ struct CanonicalizeComputePass
           return;
         }
     });
-
-    // Step 3: Remove fill(0) before matmul-like ops.
-    RewritePatternSet matmulPatterns(ctx);
-    matmulPatterns.add<RemoveZeroFillBeforeMatmul>(ctx);
-    if (failed(applyPatternsGreedily(module, std::move(matmulPatterns)))) {
-      signalPassFailure();
-      return;
-    }
   }
 };
 

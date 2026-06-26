@@ -182,22 +182,19 @@ def apply_complete_knob_pipeline(
      6. knob-driven-fusion: Fuse sibling loops + canonicalize-loop-step + canonicalize
 
     Phase 4: Layout Legalization
-     9. annotate-memory-space: Apply HBM / SBUF / PSUM memory space attributes
-    10. canonicalize-reshape: Classify expand/collapse_shape + canonicalize
-    11. legalize-layout: Attach #sbuf_map, tile HBM↔SBUF copies + canonicalize
+     9. canonicalize-reshape: Classify expand/collapse_shape + canonicalize
+    10. legalize-layout: Apply mem_space, attach #sbuf_map, tile HBM↔SBUF copies
 
     Phase 5: Scheduling
-    12. simplify-linalg: Decompose high-rank transposes, canonicalize trivial-broadcast generics
-    13. insert-spill-reload: Insert spill/reload for SBUF overflow
-    14. insert-memref-dealloc: Insert deallocs + canonicalize
+    11. simplify-linalg: Decompose high-rank transposes, canonicalize trivial-broadcast generics
+    12. insert-spill-reload: Insert spill/reload for SBUF overflow
+    13. insert-memref-dealloc: Insert deallocs + canonicalize
 
     Phase 6: Codegen
-    15. py:linalg-to-nisa: Lower to NISA instructions (Python backend)
+    14. py:linalg-to-nisa: Lower to NISA instructions (Python backend)
 
-    Note: nkipy.annotate ops are removed in annotate-memory-space (pass 9).
-    Note: The prior NISA-lowering steps (linalg-to-nisa, resolve-custom-ops,
-    prepare-for-nki) are currently stripped. They will be reimplemented in
-    Python using the public nki wheel as part of open-sourcing.
+    Note: nkipy.layout ops are consumed by legalize-layout (mem_space + tile_size).
+    Note: nkipy.tile_op/cache ops are erased by knob-driven-tiling after consumption.
 
     Args:
         mlir_module: MLIR module text with tensor operations and knob annotations
@@ -247,10 +244,11 @@ def apply_complete_knob_pipeline(
         'knob-driven-fusion',                                                   # 8
 
         # Phase 4: Layout Legalization
-        'annotate-memory-space',                                                 # 9
+        # (annotate-memory-space deleted — mem_space is now applied in
+        # legalize-layout prologue; tile_op/cache erased in knob-driven-tiling)
         # CanonicalizeReshape: classify expand/collapse_shape by mem_space and
         # partition_dim. Internally canonicalizes dead allocs/subviews.
-        'canonicalize-reshape',                                                  # 10
+        'canonicalize-reshape',                                                  # 9
         # LegalizeLayout attaches #nkipy.sbuf_map to multi-block SBUF allocs
         # and tiles HBM↔SBUF copies/transposes into block loops.
         # Internally canonicalizes after tiling.

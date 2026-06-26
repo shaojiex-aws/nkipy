@@ -689,6 +689,12 @@ struct NkipyKnobDrivenTilingPass
 
     // Epilogue: apply the generated transforms and strip the transform module.
     applyAndStripTransforms(module);
+
+    // Erase tile_op and cache ops (consumed above).
+    SmallVector<Operation *> knobOpsToErase;
+    module.walk([&](nkipy::TileOp op) { knobOpsToErase.push_back(op); });
+    module.walk([&](nkipy::CacheOp op) { knobOpsToErase.push_back(op); });
+    for (auto *op : knobOpsToErase) op->erase();
   }
 
   void applyAndStripTransforms(ModuleOp module) {

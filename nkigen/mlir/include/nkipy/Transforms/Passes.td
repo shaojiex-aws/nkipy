@@ -4,23 +4,6 @@
 
 include "mlir/Pass/PassBase.td"
 
-def AnnotateMemorySpace : Pass<"annotate-memory-space", "func::FuncOp"> {
-  let summary = "Annotate memrefs with memory space attributes from knobs";
-  let description = [{
-    This pass annotates memref types with memory space attributes based on
-    nkipy.annotate operations. It performs two main tasks:
-    
-    1. Annotates function inputs/outputs with SharedHbm memory space
-    2. Processes nkipy.annotate ops to apply memory spaces (Sbuf, Psum, etc.)
-       to internal memrefs
-    3. Propagates memory space attributes through memref.subview operations
-    4. Removes nkipy.annotate ops after processing
-    
-    This prepares memrefs for subsequent lowering to NISA dialect.
-  }];
-  let constructor = "mlir::nkipy::createAnnotateMemorySpacePass()";
-}
-
 
 def CanonicalizeReshape : Pass<"canonicalize-reshape", "func::FuncOp"> {
   let summary = "Classify and canonicalize memref reshape ops by mem_space and partition_dim";
@@ -36,8 +19,9 @@ def CanonicalizeReshape : Pass<"canonicalize-reshape", "func::FuncOp"> {
     - Returned expand_shape views of func args: alloc+copy (NISA requires
       separate output allocations)
 
-    Runs after annotate-memory-space so all memrefs have explicit memory
-    spaces and partition_dim is guaranteed to be 0.
+    Applies nkipy.layout mem_space to memref types as a prologue, then
+    classifies reshapes. partition_dim is guaranteed to be 0 from
+    canonicalize-partition-dim.
   }];
   let constructor = "mlir::nkipy::createCanonicalizeReshapePass()";
 }

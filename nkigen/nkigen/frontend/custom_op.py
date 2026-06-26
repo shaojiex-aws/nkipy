@@ -11,7 +11,7 @@ from mlir import ir
 from mlir.dialects import func
 
 from .traced_array import TracedArray
-from ..mlir_utils import to_mlir_type, memref_of, mem_space_attr
+from ..mlir_utils import to_mlir_type, memref_of
 
 # Module-level registry for custom ops used during tracing.
 # No thread safety needed -- tracing is always single-threaded.
@@ -177,9 +177,8 @@ class CustomOp:
         loc = args[0]._get_caller_location()
         input_values = [a.value for a in args]
 
-        shared_hbm = mem_space_attr("SharedHbm")
         result_types = [
-            memref_of(shape, to_mlir_type(dtype), memory_space=shared_hbm)
+            memref_of(shape, to_mlir_type(dtype))
             for shape, dtype in zip(self.output_shapes, self.output_dtypes)
         ]
 
