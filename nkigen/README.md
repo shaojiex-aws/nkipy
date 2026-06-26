@@ -90,8 +90,8 @@ Defined in `nkigen/driver/pipeline.py` -> `apply_complete_knob_pipeline()`.
                                  ▼
 ┌─────────────────────────────────────────────────────────────────────┐
 │  PHASE 2: TILING + PROMOTION                                        │
-│  • knob-driven-tiling → apply-and-strip-transforms                  │
-│    (tile_op → scf.for loops, SBUF/PSUM promotion via cache knobs)   │
+│  • knob-driven-tiling (tile_op → scf.for loops, SBUF/PSUM           │
+│    promotion via cache knobs, apply + strip transforms)             │
 └────────────────────────────────┬────────────────────────────────────┘
                                  │
                                  ▼

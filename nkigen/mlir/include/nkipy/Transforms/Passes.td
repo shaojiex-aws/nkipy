@@ -171,26 +171,6 @@ def KnobDrivenTiling : Pass<"knob-driven-tiling", "ModuleOp"> {
   let constructor = "mlir::nkipy::createKnobDrivenTilingPass()";
 }
 
-def ApplyAndStripTransforms : Pass<"apply-and-strip-transforms", "ModuleOp"> {
-  let summary = "Run @__transform_main, then erase the transform module";
-  let description = [{
-    Fused replacement for `--transform-interpreter` followed by manual
-    stripping of the transform module. Applies the `@__transform_main`
-    named sequence to the enclosing ModuleOp (same semantics as upstream
-    `--transform-interpreter`), then erases every top-level op in the
-    transform dialect and clears the `transform.with_named_sequence`
-    module attribute.
-
-    This lives in our pipeline in place of `--transform-interpreter`.
-    After this pass runs, the IR contains no transform-dialect ops, so
-    the downstream Python linalg→NISA phase can parse the module through
-    upstream MLIR bindings (which don't know about our custom transform
-    op `transform.nkipy.promote_tensor`).
-
-    No-op if no `@__transform_main` entry point is present.
-  }];
-  let constructor = "mlir::nkipy::createApplyAndStripTransformsPass()";
-}
 
 
 

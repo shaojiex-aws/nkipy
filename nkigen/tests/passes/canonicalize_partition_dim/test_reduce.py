@@ -56,7 +56,7 @@ def test_3d_reduction_max_partition_dim_1():
     # Numerical correctness via LLVM JIT
     run_kernel_test(
         kernel,
-        stop_after='apply-and-strip-transforms',
+        stop_after='knob-driven-tiling',
         modes=Mode.LLVM,
         rtol=1e-5,
         atol=1e-5,
@@ -102,7 +102,7 @@ def test_3d_reduction_sum_partition_dim_1():
     # Numerical correctness via LLVM JIT
     run_kernel_test(
         kernel,
-        stop_after='apply-and-strip-transforms',
+        stop_after='knob-driven-tiling',
         modes=Mode.LLVM,
         rtol=1e-5,
         atol=1e-5,

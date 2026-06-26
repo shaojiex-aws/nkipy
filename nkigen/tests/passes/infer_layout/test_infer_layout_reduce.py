@@ -76,7 +76,7 @@ def test_mean_propagates_to_sum():
     # If InferLayout propagates [128, 1] instead of [128], this will error out.
     run_kernel_test(
         kernel,
-        stop_after='apply-and-strip-transforms',
+        stop_after='knob-driven-tiling',
         modes=Mode.LLVM,
         rtol=1e-3,
         atol=1e-3,
@@ -120,7 +120,7 @@ def test_rmsnorm_reduction_knob_propagation():
     # Verify knob-driven-tiling succeeds (would fail if reduction_tile is missing)
     run_kernel_test(
         kernel,
-        stop_after='apply-and-strip-transforms',
+        stop_after='knob-driven-tiling',
         modes=Mode.LLVM,
         rtol=1e-3,
         atol=1e-3,

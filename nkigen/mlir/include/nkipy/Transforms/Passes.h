@@ -17,7 +17,6 @@ std::unique_ptr<OperationPass<func::FuncOp>> createAssignLinalgOpIdsPass();
 std::unique_ptr<OperationPass<func::FuncOp>> createInferLayoutPass();
 std::unique_ptr<OperationPass<ModuleOp>> createKnobDrivenTilingPass();
 std::unique_ptr<OperationPass<func::FuncOp>> createKnobDrivenFusionPass();
-std::unique_ptr<OperationPass<ModuleOp>> createApplyAndStripTransformsPass();
 std::unique_ptr<OperationPass<func::FuncOp>> createInsertSpillReloadPass();
 std::unique_ptr<OperationPass<func::FuncOp>> createInsertMemRefDeallocPass();
 std::unique_ptr<OperationPass<func::FuncOp>> createLegalizeLayoutPass();

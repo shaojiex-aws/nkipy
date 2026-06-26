@@ -15,7 +15,7 @@ Usage:
     # Decorator form (non-parametrized tests):
     @nkigen_test(
         input_specs=[((256, 256), "f32"), ((256, 256), "f32")],
-        stop_after="apply-and-strip-transforms",
+        stop_after="knob-driven-tiling",
         check_patterns="CHECK: scf.for\\nCHECK: linalg.matmul",
         modes=Mode.LLVM | Mode.FILECHECK,
     )
@@ -30,7 +30,7 @@ Usage:
         @trace(input_specs=[(shape, "f32"), (shape, "f32")])
         def kernel(a, b):
             ...
-        run_kernel_test(kernel, stop_after="apply-and-strip-transforms",
+        run_kernel_test(kernel, stop_after="knob-driven-tiling",
                         modes=Mode.LLVM | Mode.FILECHECK, request=request)
 """
 
@@ -711,7 +711,7 @@ def nkigen_test(
     Example:
         @nkigen_test(
             input_specs=[((256, 256), "f32"), ((256, 256), "f32")],
-            stop_after="apply-and-strip-transforms",
+            stop_after="knob-driven-tiling",
             check_patterns="CHECK: scf.for",
             modes=Mode.LLVM | Mode.FILECHECK,
         )

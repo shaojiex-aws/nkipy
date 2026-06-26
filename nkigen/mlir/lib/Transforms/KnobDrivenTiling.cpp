@@ -31,6 +31,8 @@
 #include "mlir/Dialect/Transform/IR/TransformDialect.h"
 #include "mlir/Dialect/Transform/IR/TransformOps.h"
 #include "mlir/Dialect/Transform/IR/TransformTypes.h"
+#include "mlir/Dialect/Transform/Interfaces/TransformInterfaces.h"
+#include "mlir/Dialect/Transform/Transforms/TransformInterpreterUtils.h"
 #include "mlir/IR/Builders.h"
 #include "mlir/IR/BuiltinOps.h"
 #include "llvm/Support/raw_ostream.h"
@@ -592,25 +594,6 @@ struct NkipyKnobDrivenTilingPass
     
     if (knobsByOp.empty()) {
       llvm::errs() << "[KnobDrivenTiling] No knob annotations found\n";
-      // Still emit an empty __transform_main so transform-interpreter
-      // doesn't crash.  This happens when a kernel has only data-movement
-      // ops (e.g. np.concatenate) and no compute linalg ops.
-      OpBuilder emptyBuilder(ctx);
-      module->setAttr("transform.with_named_sequence",
-                       emptyBuilder.getUnitAttr());
-      emptyBuilder.setInsertionPointToEnd(module.getBody());
-      auto anyOpType = transform::AnyOpType::get(ctx);
-      auto emptySeq = emptyBuilder.create<transform::NamedSequenceOp>(
-          module.getLoc(), "__transform_main",
-          TypeAttr::get(FunctionType::get(ctx, {anyOpType}, {})),
-          /*sym_visibility=*/StringAttr{},
-          /*arg_attrs=*/ArrayAttr{},
-          /*res_attrs=*/ArrayAttr{});
-      emptySeq.addEntryBlock();
-      emptySeq.setArgAttr(0, "transform.readonly",
-                           emptyBuilder.getUnitAttr());
-      emptyBuilder.setInsertionPointToStart(&emptySeq.getBody().front());
-      emptyBuilder.create<transform::YieldOp>(module.getLoc());
       return;
     }
     
@@ -696,14 +679,42 @@ struct NkipyKnobDrivenTilingPass
     builder.create<transform::YieldOp>(loc);
     
     if (!hasAnyTransforms) {
-      // No transforms generated - clean up
       namedSeq.erase();
       module->removeAttr("transform.with_named_sequence");
       llvm::errs() << "[KnobDrivenTiling] No transforms generated\n";
       return;
     }
-    
+
     llvm::errs() << "[KnobDrivenTiling] Generated transform sequence\n";
+
+    // Epilogue: apply the generated transforms and strip the transform module.
+    applyAndStripTransforms(module);
+  }
+
+  void applyAndStripTransforms(ModuleOp module) {
+    transform::TransformOpInterface entry =
+        transform::detail::findTransformEntryPoint(
+            module, /*module=*/ModuleOp(),
+            transform::TransformDialect::kTransformEntryPointSymbolName);
+    if (entry) {
+      if (failed(transform::applyTransformNamedSequence(
+              module, entry, /*transformModule=*/ModuleOp(),
+              transform::TransformOptions()))) {
+        module->emitError()
+            << "[KnobDrivenTiling] transform interpretation failed";
+        return signalPassFailure();
+      }
+    }
+
+    SmallVector<Operation *> toErase;
+    for (Operation &op : module.getBody()->getOperations())
+      if (isa<transform::TransformDialect>(op.getDialect()))
+        toErase.push_back(&op);
+    for (Operation *op : toErase)
+      op->erase();
+
+    if (module->hasAttr("transform.with_named_sequence"))
+      module->removeAttr("transform.with_named_sequence");
   }
 };
 

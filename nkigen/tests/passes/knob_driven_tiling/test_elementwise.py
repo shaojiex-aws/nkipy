@@ -70,7 +70,7 @@ def test_add_tiling(shape, tile_size):
 
     run_kernel_test(
         add_kernel,
-        stop_after='apply-and-strip-transforms',
+        stop_after='knob-driven-tiling',
         check_patterns=check_patterns,
         modes=Mode.FILECHECK,
     )
@@ -91,7 +91,7 @@ def test_sub_2d():
 
     run_kernel_test(
         sub_kernel,
-        stop_after='apply-and-strip-transforms',
+        stop_after='knob-driven-tiling',
         modes=Mode.LLVM,
     )
 
@@ -111,7 +111,7 @@ def test_mul_2d():
 
     run_kernel_test(
         mul_kernel,
-        stop_after='apply-and-strip-transforms',
+        stop_after='knob-driven-tiling',
         modes=Mode.LLVM,
     )
 
@@ -149,7 +149,7 @@ def test_add_simple():
     """
     run_kernel_test(
         add_kernel,
-        stop_after='apply-and-strip-transforms',
+        stop_after='knob-driven-tiling',
         check_patterns=check_patterns,
         modes=Mode.FILECHECK,
     )
@@ -195,7 +195,7 @@ def test_tensor_add_scalar():
     """
     run_kernel_test(
         kernel,
-        stop_after='apply-and-strip-transforms',
+        stop_after='knob-driven-tiling',
         check_patterns=check_patterns,
         modes=Mode.FILECHECK,
     )
@@ -232,7 +232,7 @@ def test_scalar_minus_tensor():
     """
     run_kernel_test(
         kernel,
-        stop_after='apply-and-strip-transforms',
+        stop_after='knob-driven-tiling',
         check_patterns=check_patterns,
         modes=Mode.FILECHECK,
     )
@@ -268,7 +268,7 @@ def test_tensor_mul_scalar():
     """
     run_kernel_test(
         kernel,
-        stop_after='apply-and-strip-transforms',
+        stop_after='knob-driven-tiling',
         check_patterns=check_patterns,
         modes=Mode.FILECHECK,
     )
@@ -304,7 +304,7 @@ def test_tensor_div_scalar():
     """
     run_kernel_test(
         kernel,
-        stop_after='apply-and-strip-transforms',
+        stop_after='knob-driven-tiling',
         check_patterns=check_patterns,
         modes=Mode.FILECHECK,
     )
@@ -341,7 +341,7 @@ def test_scalar_div_tensor():
     """
     run_kernel_test(
         kernel,
-        stop_after='apply-and-strip-transforms',
+        stop_after='knob-driven-tiling',
         check_patterns=check_patterns,
         modes=Mode.FILECHECK,
     )

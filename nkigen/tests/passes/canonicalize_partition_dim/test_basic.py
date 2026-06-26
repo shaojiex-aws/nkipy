@@ -146,7 +146,7 @@ def test_partition_dim_1_tiling_executes():
 
     run_kernel_test(
         kernel,
-        stop_after='apply-and-strip-transforms',
+        stop_after='knob-driven-tiling',
         modes=Mode.LLVM,
         rtol=1e-5,
         atol=1e-5,
@@ -208,7 +208,7 @@ def test_3d_partition_dim_2_executes():
 
     run_kernel_test(
         kernel,
-        stop_after='apply-and-strip-transforms',
+        stop_after='knob-driven-tiling',
         modes=Mode.LLVM,
         rtol=1e-5,
         atol=1e-5,
@@ -281,7 +281,7 @@ def test_3d_broadcast_generic_executes():
 
     run_kernel_test(
         kernel,
-        stop_after='apply-and-strip-transforms',
+        stop_after='knob-driven-tiling',
         modes=Mode.LLVM,
         rtol=1e-5,
         atol=1e-5,

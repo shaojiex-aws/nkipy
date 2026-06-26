@@ -90,7 +90,7 @@ def test_silu_chain_tiling_executes():
 
     run_kernel_test(
         silu_kernel,
-        stop_after='apply-and-strip-transforms',
+        stop_after='knob-driven-tiling',
         modes=Mode.LLVM,
         rtol=1e-5,
         atol=1e-5,
@@ -150,7 +150,7 @@ def test_simple_chain_tiling_executes():
 
     run_kernel_test(
         chain_kernel,
-        stop_after='apply-and-strip-transforms',
+        stop_after='knob-driven-tiling',
         modes=Mode.LLVM,
     )
 
@@ -264,7 +264,7 @@ def test_matmul_plus_elementwise_tiling_executes():
 
     run_kernel_test(
         kernel,
-        stop_after='apply-and-strip-transforms',
+        stop_after='knob-driven-tiling',
         modes=Mode.LLVM,
         rtol=1e-3,
         atol=1e-3,

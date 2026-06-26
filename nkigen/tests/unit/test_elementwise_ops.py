@@ -44,7 +44,7 @@ def test_binary_op(op, ir_op, shape, dtype, tile_size):
     )
 
     run_kernel_test(
-        kernel, stop_after="apply-and-strip-transforms",
+        kernel, stop_after="knob-driven-tiling",
         check_ir_contains=["scf.for", "#nkipy.mem<Sbuf>", ir_op],
         rtol=rtol, atol=atol,
         modes=Mode.STRING_CHECK,
@@ -88,7 +88,7 @@ def test_divide(shape, dtype, tile_size):
     )
 
     run_kernel_test(
-        kernel, stop_after="apply-and-strip-transforms",
+        kernel, stop_after="knob-driven-tiling",
         check_ir_contains=["scf.for", "#nkipy.mem<Sbuf>"],
         inputs=[A, B], rtol=rtol, atol=atol,
         modes=Mode.STRING_CHECK,
@@ -114,7 +114,7 @@ def test_scalar_op(op, scalar, tile_size):
     run_kernel_test(kernel, stop_after="trace", modes=Mode.LLVM)
 
     run_kernel_test(
-        kernel, stop_after="apply-and-strip-transforms",
+        kernel, stop_after="knob-driven-tiling",
         check_ir_contains=["scf.for", "#nkipy.mem<Sbuf>"],
         modes=Mode.STRING_CHECK,
     )
@@ -154,7 +154,7 @@ def test_unary_op(op, ir_op, nisa_op, shape, dtype, tile_size):
     )
 
     run_kernel_test(
-        kernel, stop_after="apply-and-strip-transforms",
+        kernel, stop_after="knob-driven-tiling",
         check_ir_contains=["scf.for", "#nkipy.mem<Sbuf>", ir_op],
         rtol=rtol, atol=atol,
         modes=Mode.STRING_CHECK,
@@ -211,7 +211,7 @@ def test_sqrt(shape, dtype, tile_size):
     )
 
     run_kernel_test(
-        kernel, stop_after="apply-and-strip-transforms",
+        kernel, stop_after="knob-driven-tiling",
         check_ir_contains=["scf.for", "#nkipy.mem<Sbuf>", "linalg.sqrt"],
         inputs=[A], rtol=rtol, atol=atol,
         modes=Mode.STRING_CHECK,
@@ -248,7 +248,7 @@ def test_exp(shape, dtype, tile_size):
     )
 
     run_kernel_test(
-        kernel, stop_after="apply-and-strip-transforms",
+        kernel, stop_after="knob-driven-tiling",
         check_ir_contains=["scf.for", "#nkipy.mem<Sbuf>", "linalg.exp"],
         inputs=[A], rtol=rtol, atol=atol,
         modes=Mode.STRING_CHECK,
@@ -279,7 +279,7 @@ def test_add_then_multiply():
     )
 
     run_kernel_test(
-        kernel, stop_after="apply-and-strip-transforms",
+        kernel, stop_after="knob-driven-tiling",
         check_ir_contains=["scf.for", "#nkipy.mem<Sbuf>"],
         modes=Mode.STRING_CHECK,
     )
@@ -299,7 +299,7 @@ def test_add_then_square():
     )
 
     run_kernel_test(
-        kernel, stop_after="apply-and-strip-transforms",
+        kernel, stop_after="knob-driven-tiling",
         check_ir_contains=["scf.for", "#nkipy.mem<Sbuf>"],
         modes=Mode.STRING_CHECK,
     )
@@ -324,7 +324,7 @@ def test_square_then_divide():
     )
 
     run_kernel_test(
-        kernel, stop_after="apply-and-strip-transforms",
+        kernel, stop_after="knob-driven-tiling",
         check_ir_contains=["scf.for", "#nkipy.mem<Sbuf>"],
         inputs=[A, B],
         modes=Mode.STRING_CHECK,
@@ -354,7 +354,7 @@ def test_complex_expression():
     )
 
     run_kernel_test(
-        kernel, stop_after="apply-and-strip-transforms",
+        kernel, stop_after="knob-driven-tiling",
         check_ir_contains=["scf.for", "#nkipy.mem<Sbuf>"],
         inputs=[A, B, C],
         modes=Mode.STRING_CHECK,
@@ -375,7 +375,7 @@ def test_square_in_expression():
     )
 
     run_kernel_test(
-        kernel, stop_after="apply-and-strip-transforms",
+        kernel, stop_after="knob-driven-tiling",
         check_ir_contains=["scf.for", "#nkipy.mem<Sbuf>"],
         modes=Mode.STRING_CHECK,
     )
@@ -399,7 +399,7 @@ def test_exp_in_expression():
     )
 
     run_kernel_test(
-        kernel, stop_after="apply-and-strip-transforms",
+        kernel, stop_after="knob-driven-tiling",
         check_ir_contains=["scf.for", "#nkipy.mem<Sbuf>"],
         inputs=[A],
         modes=Mode.STRING_CHECK,
@@ -424,7 +424,7 @@ def test_sqrt_in_expression():
     )
 
     run_kernel_test(
-        kernel, stop_after="apply-and-strip-transforms",
+        kernel, stop_after="knob-driven-tiling",
         check_ir_contains=["scf.for", "#nkipy.mem<Sbuf>"],
         inputs=[A],
         modes=Mode.STRING_CHECK,

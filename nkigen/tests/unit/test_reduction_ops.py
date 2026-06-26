@@ -3,7 +3,7 @@ Tests for reduction operations: sum, mean, max, min.
 
 These tests verify that MLIR/LLVM execution matches NumPy CPU execution
 and that the tracer emits linalg.generic with reduction iterator types.
-Tests with knobs also verify KnobDrivenTiling + apply-and-strip-transforms
+Tests with knobs also verify KnobDrivenTiling + knob-driven-tiling
 produces tiled scf.for loops with SBUF promotion, and linalg-to-nisa
 converts reduction generics to nisa.tensor_reduce_arith.
 """
@@ -44,7 +44,7 @@ def test_sum_axis(shape, axis, keepdims, tile_size, reduction_tile):
 
     run_kernel_test(
         kernel,
-        stop_after='apply-and-strip-transforms',
+        stop_after='knob-driven-tiling',
         check_ir_contains=["scf.for", "#nkipy.mem<Sbuf>", "linalg.generic"],
         modes=Mode.STRING_CHECK,
     )
@@ -106,7 +106,7 @@ def test_mean_axis(shape, axis, keepdims, tile_size, reduction_tile):
 
     run_kernel_test(
         kernel,
-        stop_after='apply-and-strip-transforms',
+        stop_after='knob-driven-tiling',
         check_ir_contains=["scf.for", "#nkipy.mem<Sbuf>", "linalg.generic"],
         modes=Mode.STRING_CHECK,
     )
@@ -162,7 +162,7 @@ def test_max_axis(shape, axis, keepdims, tile_size, reduction_tile):
 
     run_kernel_test(
         kernel,
-        stop_after='apply-and-strip-transforms',
+        stop_after='knob-driven-tiling',
         check_ir_contains=["scf.for", "#nkipy.mem<Sbuf>", "linalg.generic"],
         modes=Mode.STRING_CHECK,
     )
@@ -217,7 +217,7 @@ def test_min_axis(shape, axis, keepdims, tile_size, reduction_tile):
 
     run_kernel_test(
         kernel,
-        stop_after='apply-and-strip-transforms',
+        stop_after='knob-driven-tiling',
         check_ir_contains=["scf.for", "#nkipy.mem<Sbuf>", "linalg.generic"],
         modes=Mode.STRING_CHECK,
     )
@@ -267,7 +267,7 @@ def test_sum_of_squares():
 
     run_kernel_test(
         kernel,
-        stop_after='apply-and-strip-transforms',
+        stop_after='knob-driven-tiling',
         check_ir_contains=["scf.for", "#nkipy.mem<Sbuf>"],
         modes=Mode.STRING_CHECK,
     )
@@ -305,7 +305,7 @@ def test_mean_of_squares():
 
     run_kernel_test(
         kernel,
-        stop_after='apply-and-strip-transforms',
+        stop_after='knob-driven-tiling',
         check_ir_contains=["scf.for", "#nkipy.mem<Sbuf>"],
         modes=Mode.STRING_CHECK,
     )
@@ -349,7 +349,7 @@ def test_softmax_reductions():
 
     run_kernel_test(
         kernel,
-        stop_after='apply-and-strip-transforms',
+        stop_after='knob-driven-tiling',
         inputs=[A],
         check_ir_contains=["scf.for", "#nkipy.mem<Sbuf>", "linalg.generic"],
         modes=Mode.STRING_CHECK,

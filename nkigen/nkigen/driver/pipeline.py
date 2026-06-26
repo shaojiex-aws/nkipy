@@ -176,11 +176,10 @@ def apply_complete_knob_pipeline(
      4. assign-linalg-op-ids: Assign unique IDs to linalg ops
 
     Phase 2: Loop Tiling
-     5. knob-driven-tiling: Rewrite linalg ops to tiled loops via transform dialect
-     6. apply-and-strip-transforms: Apply transforms, erase transform module
+     5. knob-driven-tiling: Tile + promote + apply transforms + strip
 
     Phase 3: Fusion
-     8. knob-driven-fusion: Fuse sibling loops + canonicalize-loop-step + canonicalize
+     6. knob-driven-fusion: Fuse sibling loops + canonicalize-loop-step + canonicalize
 
     Phase 4: Layout Legalization
      9. annotate-memory-space: Apply HBM / SBUF / PSUM memory space attributes
@@ -237,12 +236,9 @@ def apply_complete_knob_pipeline(
         'assign-linalg-op-ids',                                                 # 5
 
         # Phase 2: Loop Tiling
-        # KnobDrivenTiling generates Transform dialect IR; the fused pass
-        # applies it and then erases the transform module so downstream
-        # (including the Python linalg->NISA phase) sees no transform-dialect
-        # ops in the IR.
-        'knob-driven-tiling',                                                   # 6
-        'apply-and-strip-transforms',                                           # 7
+        # KnobDrivenTiling generates Transform dialect IR, applies it, and
+        # strips the transform module. Includes SBUF/PSUM promotion.
+        'knob-driven-tiling',                                                   # 5
 
         # Phase 3: Fusion
         # KnobDrivenFusion fuses sibling scf.for loops sharing a knob.fuse()

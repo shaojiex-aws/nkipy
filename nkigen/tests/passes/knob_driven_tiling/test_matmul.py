@@ -83,7 +83,7 @@ def test_matmul_tiling(M, N, K, tile_size, reduction_tile, request):
     """
     run_kernel_test(
         matmul_kernel,
-        stop_after='apply-and-strip-transforms',
+        stop_after='knob-driven-tiling',
         check_patterns=check_patterns,
         modes=Mode.LLVM | Mode.FILECHECK,
     )
@@ -122,7 +122,7 @@ def test_matmul_simple_256():
     """
     run_kernel_test(
         matmul_kernel,
-        stop_after='apply-and-strip-transforms',
+        stop_after='knob-driven-tiling',
         check_patterns=check_patterns,
         modes=Mode.LLVM | Mode.FILECHECK,
     )
@@ -172,7 +172,7 @@ def test_batch_matmul_tiling(B, M, N, K, tile_size, reduction_tile, request):
     """
     run_kernel_test(
         batch_matmul_kernel,
-        stop_after='apply-and-strip-transforms',
+        stop_after='knob-driven-tiling',
         check_patterns=check_patterns,
         modes=Mode.LLVM | Mode.FILECHECK,
     )
@@ -199,7 +199,7 @@ def test_matmul_k_tile_too_large():
 
     # This should raise an exception
     with pytest.raises(Exception) as excinfo:
-        compile_knob_pipeline(matmul_kernel, stop_after='apply-and-strip-transforms')
+        compile_knob_pipeline(matmul_kernel, stop_after='knob-driven-tiling')
 
     error_msg = str(excinfo.value)
 

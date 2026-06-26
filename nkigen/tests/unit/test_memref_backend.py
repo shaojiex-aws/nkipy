@@ -122,7 +122,7 @@ def test_memref_tiling(specs, fn, tile_size, expected_ir):
         return result
 
     run_kernel_test(
-        kernel, stop_after="apply-and-strip-transforms",
+        kernel, stop_after="knob-driven-tiling",
         check_ir_contains=expected_ir,
         check_ir_not_contains=["tensor"],
         modes=Mode.STRING_CHECK | Mode.LLVM,

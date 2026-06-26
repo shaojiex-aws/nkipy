@@ -4,7 +4,6 @@ add_mlir_library(MLIRNkipyPasses
     CanonicalizeReshape.cpp
     CanonicalizePartitionDim.cpp
     AssignLinalgOpIds.cpp
-    ApplyAndStripTransforms.cpp
     InferLayout.cpp
     KnobDrivenTiling.cpp
     KnobDrivenFusion.cpp

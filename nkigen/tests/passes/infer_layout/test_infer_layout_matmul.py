@@ -163,7 +163,7 @@ def test_matmul_elementwise_chain_executes():
 
     run_kernel_test(
         kernel,
-        stop_after='apply-and-strip-transforms',
+        stop_after='knob-driven-tiling',
         modes=Mode.LLVM,
         rtol=1e-3,
         atol=1e-3,
@@ -257,7 +257,7 @@ def test_compatible_tile_sizes_executes():
 
     run_kernel_test(
         kernel,
-        stop_after='apply-and-strip-transforms',
+        stop_after='knob-driven-tiling',
         modes=Mode.LLVM,
     )
 
@@ -392,7 +392,7 @@ def test_fallback_chain_executes():
 
     run_kernel_test(
         kernel,
-        stop_after='apply-and-strip-transforms',
+        stop_after='knob-driven-tiling',
         modes=Mode.LLVM,
     )
 

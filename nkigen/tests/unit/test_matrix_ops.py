@@ -112,7 +112,7 @@ def test_bmm_e2e(B, M, N, K, tile_size, reduction_tile):
 
     run_kernel_test(
         bmm_kernel,
-        stop_after="apply-and-strip-transforms",
+        stop_after="knob-driven-tiling",
         modes=Mode.LLVM,
     )
     run_kernel_test(

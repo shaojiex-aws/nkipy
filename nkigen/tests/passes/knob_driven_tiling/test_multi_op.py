@@ -53,7 +53,7 @@ def test_two_matmuls_different_tiles():
     """
     run_kernel_test(
         two_matmul_kernel,
-        stop_after='apply-and-strip-transforms',
+        stop_after='knob-driven-tiling',
         check_patterns=check_patterns,
         modes=Mode.LLVM | Mode.FILECHECK,
     )
@@ -92,7 +92,7 @@ def test_two_adds_different_tiles():
     """
     run_kernel_test(
         two_add_kernel,
-        stop_after='apply-and-strip-transforms',
+        stop_after='knob-driven-tiling',
         check_patterns=check_patterns,
         modes=Mode.LLVM | Mode.FILECHECK,
     )
@@ -126,7 +126,7 @@ def test_three_matmuls_same_and_different_tiles():
 
     run_kernel_test(
         three_matmul_kernel,
-        stop_after='apply-and-strip-transforms',
+        stop_after='knob-driven-tiling',
         modes=Mode.LLVM,
     )
 
@@ -153,7 +153,7 @@ def test_mixed_matmul_and_add():
 
     run_kernel_test(
         mixed_kernel,
-        stop_after='apply-and-strip-transforms',
+        stop_after='knob-driven-tiling',
         modes=Mode.LLVM,
     )
 
@@ -194,7 +194,7 @@ def test_matmul_add_chain():
     """
     run_kernel_test(
         matmul_add_kernel,
-        stop_after='apply-and-strip-transforms',
+        stop_after='knob-driven-tiling',
         check_patterns=check_patterns,
         modes=Mode.LLVM | Mode.FILECHECK,
     )
