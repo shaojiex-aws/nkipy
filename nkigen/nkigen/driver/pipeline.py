@@ -241,7 +241,7 @@ def apply_complete_knob_pipeline(
     10. annotate-memory-space: Apply HBM / SBUF / PSUM memory space attributes
     11. canonicalize-reshape: Classify expand/collapse_shape by mem_space and partition_dim
     12. canonicalize: Clean up dead allocs
-    13. legalize-layout: Transform SBUF tensors to physical 4D layout
+    13. legalize-layout: Attach #sbuf_map to multi-block SBUF allocs, tile HBM↔SBUF copies
     14. canonicalize: Clean up after layout legalization
 
     Phase 5: Scheduling
@@ -330,7 +330,8 @@ def apply_complete_knob_pipeline(
         # args get alloc+copy (NISA needs separate output allocations).
         'canonicalize-reshape',                                                  # 11
         'canonicalize',  # Clean up dead allocs and subviews                     # 12
-        # LegalizeLayout transforms SBUF tensors from 2D to 4D physical layout
+        # LegalizeLayout attaches #nkipy.sbuf_map to multi-block SBUF allocs
+        # and tiles HBM↔SBUF copies/transposes into block loops
         f'legalize-layout="target={target}"',                                    # 13
         'canonicalize',                                                          # 14
 

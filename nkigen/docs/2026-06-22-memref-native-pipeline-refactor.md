@@ -60,9 +60,8 @@ problems:
 ┌─────────────────────────────────────────────────────────────────────┐
 │  PHASE 4: LAYOUT LEGALIZATION                                       │
 │  • annotate-memory-space (HBM / SBUF / PSUM assignment)             │
-│  • insert SBUF promotion (memref.alloc in SBUF + memref.copy)       │
-│  • legalize-layout (2D → 4D physical layout for SBUF)               │
-│  • canonicalize-reshape                                             │
+│  • canonicalize-reshape (materialize SBUF partition-dim reshapes)    │
+│  • legalize-layout (attach #sbuf_map, tile HBM↔SBUF copies)        │
 └────────────────────────────────┬────────────────────────────────────┘
                                  │
                                  ▼
