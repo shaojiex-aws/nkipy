@@ -27,7 +27,6 @@
 #include "mlir/Dialect/Transform/Transforms/Passes.h"
 #include "mlir/Dialect/SCF/TransformOps/SCFTransformOps.h"
 #include "mlir/Dialect/Linalg/TransformOps/DialectExtension.h"
-#include "mlir/Dialect/Bufferization/TransformOps/BufferizationTransformOps.h"
 
 int main(int argc, char **argv) {
   mlir::registerAllPasses();
@@ -38,12 +37,8 @@ int main(int argc, char **argv) {
   registry.insert<mlir::nkipy::NkipyDialect>();
   registry.insert<mlir::transform::TransformDialect>();  // Required for knob-driven-tiling
   
-  // Note: bufferization dialect is included in registerAllDialects(), but
-  // we explicitly register the transform extension below
-
   mlir::scf::registerTransformDialectExtension(registry);
   mlir::linalg::registerTransformDialectExtension(registry);
-  mlir::bufferization::registerTransformDialectExtension(registry);
   mlir::nkipy::registerTransformDialectExtension(registry);
 
   return mlir::asMainReturnCode(

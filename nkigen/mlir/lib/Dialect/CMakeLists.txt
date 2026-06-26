@@ -12,9 +12,9 @@ add_mlir_dialect_library(MLIRNkipy
 
 	LINK_LIBS PUBLIC
 	MLIRIR
-	MLIRBufferizationDialect
 	MLIRDestinationStyleOpInterface
 	MLIRLinalgDialect
+	MLIRMemRefDialect
 	MLIRTensorDialect
 	MLIRTilingInterface
 	)

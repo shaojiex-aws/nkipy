@@ -15,7 +15,6 @@
 #include "mlir/Interfaces/DestinationStyleOpInterface.h"
 #include "mlir/Interfaces/SideEffectInterfaces.h"
 #include "mlir/Interfaces/TilingInterface.h"
-#include "mlir/Dialect/Bufferization/IR/BufferizableOpInterface.h"
 
 #include "nkipy/Dialect/NkipyDialect.h"
 #include "nkipy/Dialect/NkipyAttrs.h"

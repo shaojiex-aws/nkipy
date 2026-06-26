@@ -9,10 +9,8 @@ add_mlir_library(MLIRNkipyTransformOps
 
     LINK_LIBS PUBLIC
     MLIRArithDialect
-    MLIRBufferizationDialect
     MLIRLinalgDialect
     MLIRMemRefDialect
-    MLIRTensorDialect
     MLIRTransformDialect
     MLIRTransformDialectInterfaces
     MLIRIR

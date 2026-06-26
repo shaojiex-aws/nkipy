@@ -15,14 +15,10 @@ include "mlir/Interfaces/InferTypeOpInterface.td"
 include "mlir/Interfaces/DestinationStyleOpInterface.td"
 include "mlir/Interfaces/SideEffectInterfaces.td"
 include "mlir/Interfaces/TilingInterface.td"
-include "mlir/Dialect/Bufferization/IR/BufferizableOpInterface.td"
 include "mlir/IR/SymbolInterfaces.td"
 
 
-def Nkipy_LayoutOp : Nkipy_Op<"layout", [
-    DeclareOpInterfaceMethods<BufferizableOpInterface,
-      ["bufferizesToMemoryRead", "bufferizesToMemoryWrite",
-       "getAliasingValues", "bufferize"]>]>
+def Nkipy_LayoutOp : Nkipy_Op<"layout", []>
 {
     let summary = "layout";
     let description = [{
@@ -49,10 +45,7 @@ def Nkipy_LayoutOp : Nkipy_Op<"layout", [
     }];
 }
 
-def Nkipy_TileOp : Nkipy_Op<"tile_op", [
-    DeclareOpInterfaceMethods<BufferizableOpInterface,
-      ["bufferizesToMemoryRead", "bufferizesToMemoryWrite",
-       "getAliasingValues", "bufferize"]>]>
+def Nkipy_TileOp : Nkipy_Op<"tile_op", []>
 {
     let summary = "tile_op";
     let description = [{
@@ -103,10 +96,7 @@ def Nkipy_FuseOp : Nkipy_Op<"fuse_op">
     let hasVerifier = 1;
 }
 
-def Nkipy_CacheOp : Nkipy_Op<"cache", [
-    DeclareOpInterfaceMethods<BufferizableOpInterface,
-      ["bufferizesToMemoryRead", "bufferizesToMemoryWrite",
-       "getAliasingValues", "bufferize"]>]>
+def Nkipy_CacheOp : Nkipy_Op<"cache", []>
 {
     let summary = "cache";
     let description = [{
@@ -149,9 +139,6 @@ def Nkipy_YieldOp : Nkipy_Op<"yield", [Pure, ReturnLike, Terminator]>
 
 def Nkipy_GatherOp : Nkipy_Op<"gather", [
     DeclareOpInterfaceMethods<DestinationStyleOpInterface>,
-    DeclareOpInterfaceMethods<BufferizableOpInterface,
-      ["bufferizesToMemoryRead", "bufferizesToMemoryWrite",
-       "getAliasingValues", "bufferize"]>,
     DeclareOpInterfaceMethods<TilingInterface,
       ["getLoopIteratorTypes", "getIterationDomain",
        "getTiledImplementation", "getResultTilePosition"]>]>

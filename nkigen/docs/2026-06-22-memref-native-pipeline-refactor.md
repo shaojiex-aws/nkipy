@@ -225,16 +225,18 @@ NISA emit) not yet adapted.
    bufferization-artifact copies) ✅
 7. Delete `eliminate-same-memspace-copy` pass — removed from pipeline ✅
 
-### WI-5: Delete bufferization infrastructure (partial ✅)
+### WI-5: Delete bufferization infrastructure ✅
 
 **Scope:** Remove all tensor/bufferization dialect usage.
 
 **Sub-tasks:**
-1. Remove `BufferizableOpInterface` from `NkipyOps.cpp` (LayoutOp, TileOp, GatherOp)
+1. Remove `BufferizableOpInterface` from `NkipyOps.td`/`NkipyOps.cpp`
+   (LayoutOp, TileOp, CacheOp, GatherOp) ✅
 2. Remove `bufferization.alloc_tensor` / `materialize_in_destination` from
-   `NkipyTransformOps.cpp`
+   `NkipyTransformOps.cpp` (tensor path of PromoteTensorOp deleted) ✅
 3. Remove `one-shot-bufferize` from pipeline ✅
-4. Remove `bufferization` dialect registration from `nkipy-opt.cpp`
+4. Remove `bufferization` transform extension from `nkipy-opt.cpp` and
+   CMakeLists link deps ✅
 5. Remove `_zero_fill_empty_tensors_ir()` from `execution/llvm.py` ✅
 6. Remove `tensor` dialect import from frontend (`builder.py`, `mlir_utils.py`) ✅
 7. Remove `ranked_tensor_of`, `make_empty`, `make_filled`, `make_zeros`
