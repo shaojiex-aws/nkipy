@@ -192,63 +192,7 @@ def ApplyAndStripTransforms : Pass<"apply-and-strip-transforms", "ModuleOp"> {
   let constructor = "mlir::nkipy::createApplyAndStripTransformsPass()";
 }
 
-def EliminateUninitializedCopies : Pass<"eliminate-uninitialized-copies", "func::FuncOp"> {
-  let summary = "Eliminate copies from uninitialized allocations";
-  let description = [{
-    This pass eliminates memref.copy operations where the source is a freshly
-    allocated buffer that has never been written to (contains undefined values).
-    Such copies are effectively no-ops and can be safely eliminated.
-    
-    This commonly occurs after buffer promotion when the original tensor was
-    freshly allocated (e.g., for accumulator initialization). The promoted
-    buffer copies from the original uninitialized HBM allocation, which is
-    unnecessary since operations like matmul will zero their PSUM accumulator
-    via psum_zero_region anyway.
-    
-    Example transformation:
-      Before:
-        %uninit = memref.alloc() : memref<128x128xf32>  // Never written to
-        memref.copy %uninit, %dst : memref<128x128xf32> to memref<128x128xf32>
-        linalg.matmul ins(%a, %b) outs(%dst)
-      
-      After:
-        %uninit = memref.alloc() : memref<128x128xf32>  // Never written to
-        // Copy eliminated - %uninit was uninitialized
-        linalg.matmul ins(%a, %b) outs(%dst)
-  }];
-  let constructor = "mlir::nkipy::createEliminateUninitializedCopiesPass()";
-}
 
-def EliminateSameMemSpaceCopy : Pass<"eliminate-same-memspace-copy", "func::FuncOp"> {
-  let summary = "Eliminate redundant copies between same memory space";
-  let description = [{
-    This pass eliminates redundant memref.copy operations where both source and 
-    destination are in the same memory space (e.g., SBUF to SBUF).
-    
-    When the destination is a fresh allocation that is only used after the copy,
-    we can directly use the source instead, eliminating both the copy and the
-    unnecessary allocation.
-    
-    This is particularly useful after bufferization + memory space annotation,
-    where operand promotion may create intermediate SBUF buffers that are
-    immediately copied from another SBUF location.
-    
-    Example transformation:
-      Before:
-        %src = memref.subview ... : memref<128x128xf32, #sbuf>
-        %dst = memref.alloc() : memref<128x128xf32, #sbuf>
-        memref.copy %src, %dst : memref<128x128xf32, #sbuf> to memref<128x128xf32, #sbuf>
-        linalg.add ins(%dst, ...) outs(...)
-      
-      After:
-        %src = memref.subview ... : memref<128x128xf32, #sbuf>
-        linalg.add ins(%src, ...) outs(...)
-    
-    Note: PSUM to SBUF copies are NOT eliminated as they transfer data between
-    different memory spaces (accumulator to scratch buffer).
-  }];
-  let constructor = "mlir::nkipy::createEliminateSameMemSpaceCopyPass()";
-}
 
 def InsertSpillReload : Pass<"insert-spill-reload", "func::FuncOp"> {
   let summary = "Insert spill/reload operations for SBUF memory pressure";
@@ -326,42 +270,6 @@ def InsertMemRefDealloc : Pass<"insert-memref-dealloc", "func::FuncOp"> {
   let constructor = "mlir::nkipy::createInsertMemRefDeallocPass()";
 }
 
-def CanonicalizeLoopStep : Pass<"canonicalize-loop-step", "func::FuncOp"> {
-  let summary = "Canonicalize scf.for loop steps to 1";
-  let description = [{
-    This pass transforms scf.for loops to have step=1, simplifying index computation.
-    This is essential for NISA lowering because the NISA dialect cannot handle
-    arith.divsi and arith.remsi operations in index computations.
-    
-    The transformation:
-      Before:
-        scf.for %i = %lb to %ub step %step {
-          // uses %i
-        }
-      
-      After:
-        scf.for %i_new = 0 to (%ub - %lb) / %step step 1 {
-          %i = %lb + %i_new * %step
-          // uses %i (now computed from %i_new)
-        }
-    
-    For the common case where lb=0 and step is a constant power of 2:
-      Before:
-        scf.for %i = 0 to 256 step 128 {
-          // %slice = tensor.extract_slice %tensor[%i, %j] ...
-        }
-      
-      After:
-        scf.for %i_idx = 0 to 2 step 1 {
-          %i = %i_idx * 128
-          // %slice = tensor.extract_slice %tensor[%i, %j] ...
-        }
-    
-    This enables subsequent passes to work with simple loop indices [0, 1, 2, ...]
-    rather than scaled indices [0, 128, 256, ...].
-  }];
-  let constructor = "mlir::nkipy::createCanonicalizeLoopStepPass()";
-}
 
 def LegalizeLayout : Pass<"legalize-layout", "func::FuncOp"> {
   let summary = "Legalize SBUF tensor layouts to satisfy NKI hardware constraints";
@@ -433,39 +341,18 @@ def SimplifyLinalg : Pass<"simplify-linalg", "func::FuncOp"> {
   let constructor = "mlir::nkipy::createSimplifyLinalgPass()";
 }
 
-def PrepareArithmetic : Pass<"prepare-arithmetic", "ModuleOp"> {
-  let summary = "Prepare arithmetic operations for NISA lowering";
+def CanonicalizeCompute : Pass<"canonicalize-compute", "ModuleOp"> {
+  let summary = "Canonicalize linalg compute ops for NISA hardware";
   let description = [{
-    This pass prepares arithmetic operations for NISA lowering by transforming
-    operations that don't have direct NISA equivalents.
+    Combined pass that rewrites linalg ops for NISA hardware constraints:
 
-    Transformations:
-    - linalg.div(A, B) -> linalg.mul(A, linalg.reciprocal(B))
-      NISA's tensor_tensor_arith doesn't support DIVIDE, so we convert division
-      to multiplication by reciprocal.
+    1. Convert division to reciprocal+multiply (NISA has no divide).
+    2. Decompose batch_matmul → scf.for + matmul (NISA only has 2D matmul).
+    3. Remove fill(0) before matmul-like ops (NISA matmul auto-zeros PSUM).
 
-    This pass runs before tiling so that the generated reciprocal operations
-    get tiled and bufferized normally.
+    Runs before infer-layout / tiling.
   }];
-  let constructor = "mlir::nkipy::createPrepareArithmeticPass()";
-}
-
-def PrepareMatmul : Pass<"prepare-matmul", "func::FuncOp"> {
-  let summary = "Prepare matmul ops for NISA hardware";
-  let description = [{
-    Combined pass that prepares all matmul-like ops for NISA lowering:
-
-    1. Decompose `linalg.batch_matmul [B,M,N]` into `scf.for` + `linalg.matmul`
-       (NISA only has 2D matmul).
-    2. Transpose LHS: rewrite `linalg.matmul(A, B, C)` into
-       `linalg.transpose(A, A_T)` + `linalg.matmul_transpose_a(A_T, B, C)`
-       (NISA requires stationary operand in partition-dim-major layout).
-    3. Remove `linalg.fill(0)` when all users are matmul-like
-       (NISA matmul auto-zeros PSUM).
-
-    Works on both tensor and memref IR.  Must run before tiling.
-  }];
-  let constructor = "mlir::nkipy::createPrepareMatmulPass()";
+  let constructor = "mlir::nkipy::createCanonicalizeComputePass()";
 }
 
 def InlineNkipyReference : Pass<"inline-nkipy-reference", "func::FuncOp"> {

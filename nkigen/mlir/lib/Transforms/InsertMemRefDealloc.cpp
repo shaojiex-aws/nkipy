@@ -19,6 +19,7 @@
 #include "mlir/Dialect/MemRef/IR/MemRef.h"
 #include "mlir/Interfaces/ViewLikeInterface.h"
 #include "mlir/Pass/Pass.h"
+#include "mlir/Transforms/GreedyPatternRewriteDriver.h"
 #include "nkipy/Dialect/NkipyAttrs.h"
 #include "llvm/ADT/DenseSet.h"
 #include "llvm/Support/Debug.h"
@@ -173,6 +174,12 @@ struct InsertMemRefDeallocPass
 
     LLVM_DEBUG(llvm::dbgs() << "Inserted " << numInserted
                            << " dealloc operation(s)\n");
+
+    // Epilogue: canonicalize to clean up unused subviews and constants.
+    RewritePatternSet patterns(&getContext());
+    for (auto *dialect : getContext().getLoadedDialects())
+      dialect->getCanonicalizationPatterns(patterns);
+    (void)applyPatternsAndFoldGreedily(func, std::move(patterns));
   }
 };
 

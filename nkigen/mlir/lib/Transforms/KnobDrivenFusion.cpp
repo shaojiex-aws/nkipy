@@ -13,9 +13,11 @@
 
 #include "PassGen.h"
 #include "nkipy/Transforms/Passes.h"
+#include "nkipy/Transforms/IRHelpers.h"
 #include "nkipy/Dialect/NkipyDialect.h"
 #include "nkipy/Dialect/NkipyOps.h"
 
+#include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/SCF/IR/SCF.h"
 #include "mlir/Dialect/SCF/Utils/Utils.h"
@@ -23,6 +25,7 @@
 #include "mlir/IR/Builders.h"
 #include "mlir/IR/PatternMatch.h"
 #include "mlir/Interfaces/SideEffectInterfaces.h"
+#include "mlir/Transforms/GreedyPatternRewriteDriver.h"
 #include "llvm/Support/raw_ostream.h"
 
 using namespace mlir;
@@ -154,9 +157,7 @@ struct NkipyKnobDrivenFusionPass
     SmallVector<nkipy::FuseOp> fuseOps;
     func.walk([&](nkipy::FuseOp op) { fuseOps.push_back(op); });
 
-    if (fuseOps.empty())
-      return;
-
+    if (!fuseOps.empty()) {
     IRRewriter rewriter(&getContext());
 
     for (nkipy::FuseOp fuseOp : fuseOps) {
@@ -207,6 +208,50 @@ struct NkipyKnobDrivenFusionPass
 
       rewriter.eraseOp(fuseOp);
     }
+    } // end if (!fuseOps.empty())
+
+    // Epilogue: canonicalize loop steps to 1 and run greedy canonicalization.
+    canonicalizeLoopSteps(func);
+    RewritePatternSet patterns(&getContext());
+    for (auto *dialect : getContext().getLoadedDialects())
+      dialect->getCanonicalizationPatterns(patterns);
+    (void)applyPatternsAndFoldGreedily(func, std::move(patterns));
+  }
+
+  void canonicalizeLoopSteps(func::FuncOp func) {
+    func.walk<WalkOrder::PostOrder>([&](scf::ForOp forOp) {
+      auto stepConst = getConstantInt(forOp.getStep());
+      if (!stepConst || *stepConst == 1)
+        return;
+      auto lbConst = getConstantInt(forOp.getLowerBound());
+      auto ubConst = getConstantInt(forOp.getUpperBound());
+      if (lbConst && ubConst && (*ubConst - *lbConst) % *stepConst != 0)
+        return;
+
+      OpBuilder builder(forOp);
+      Location loc = forOp.getLoc();
+      Value lb = forOp.getLowerBound();
+      Value ub = forOp.getUpperBound();
+      Value step = forOp.getStep();
+
+      Value range = builder.create<arith::SubIOp>(loc, ub, lb);
+      Value tripCount = builder.create<arith::DivUIOp>(loc, range, step);
+      Value zero = builder.create<arith::ConstantIndexOp>(loc, 0);
+      Value one = builder.create<arith::ConstantIndexOp>(loc, 1);
+
+      builder.setInsertionPointToStart(forOp.getBody());
+      Value iv = forOp.getInductionVar();
+      Value scaled = builder.create<arith::MulIOp>(loc, iv, step);
+      Value originalIV = builder.create<arith::AddIOp>(loc, lb, scaled);
+      SmallPtrSet<Operation *, 2> exceptions;
+      exceptions.insert(scaled.getDefiningOp());
+      exceptions.insert(originalIV.getDefiningOp());
+      iv.replaceAllUsesExcept(originalIV, exceptions);
+
+      forOp.setLowerBound(zero);
+      forOp.setUpperBound(tripCount);
+      forOp.setStep(one);
+    });
   }
 };
 

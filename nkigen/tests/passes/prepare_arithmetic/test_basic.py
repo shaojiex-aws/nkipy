@@ -54,7 +54,7 @@ def test_tensor_div_tensor_same_shape():
     """
     run_kernel_test(
         kernel,
-        stop_after='prepare-arithmetic',
+        stop_after='canonicalize-compute',
         check_patterns=check_patterns,
         inputs=[A, B],
         modes=Mode.LLVM | Mode.FILECHECK,
@@ -91,7 +91,7 @@ def test_tensor_div_scalar():
     """
     run_kernel_test(
         kernel,
-        stop_after='prepare-arithmetic',
+        stop_after='canonicalize-compute',
         check_patterns=check_patterns,
         modes=Mode.LLVM | Mode.FILECHECK,
     )
@@ -126,7 +126,7 @@ def test_scalar_div_tensor():
     """
     run_kernel_test(
         kernel,
-        stop_after='prepare-arithmetic',
+        stop_after='canonicalize-compute',
         check_patterns=check_patterns,
         modes=Mode.LLVM | Mode.FILECHECK,
     )
@@ -170,7 +170,7 @@ def test_broadcast_div_column():
     """
     run_kernel_test(
         kernel,
-        stop_after='prepare-arithmetic',
+        stop_after='canonicalize-compute',
         check_patterns=check_patterns,
         inputs=[A, B],
         modes=Mode.LLVM | Mode.FILECHECK,
@@ -205,7 +205,7 @@ def test_broadcast_div_row():
     """
     run_kernel_test(
         kernel,
-        stop_after='prepare-arithmetic',
+        stop_after='canonicalize-compute',
         check_patterns=check_patterns,
         inputs=[A, B],
         modes=Mode.LLVM | Mode.FILECHECK,
@@ -243,7 +243,7 @@ def test_broadcast_div_rmsnorm_pattern():
     """
     run_kernel_test(
         kernel,
-        stop_after='prepare-arithmetic',
+        stop_after='canonicalize-compute',
         check_patterns=check_patterns,
         inputs=[A, B],
         modes=Mode.LLVM | Mode.FILECHECK,

@@ -11,74 +11,25 @@ import tempfile
 from pathlib import Path
 
 
-# ---------------------------------------------------------------------------
-# Pass groups
-# ---------------------------------------------------------------------------
-# A pass group is a single name in `passes = [...]` that expands to a list
-# of underlying passes when the pipeline runs.  Groups keep the top-level
-# pipeline readable (one entry per "phase") without giving up per-pass
-# debugging — each member is still callable individually via nkipy-opt.
-#
-# `stop_after='<group-name>'` stops *after* the last member of the group
-# has run.
-PASS_GROUPS: dict[str, list[str]] = {
-    # linalg-level rewrites that adapt programs to NISA's hardware
-    # constraints.  Operate on tensor or memref IR before infer-layout / tiling.
-    'canonicalize-linalg-for-nisa': [
-        'prepare-arithmetic',
-        'prepare-matmul',
-    ],
-}
-
-
-def _expand_pass_groups(passes: list[str]) -> list[str]:
-    """Expand any pass group entries in-place into their member passes."""
-    out: list[str] = []
-    for p in passes:
-        base = p.split('=')[0].split('"')[0].strip()
-        if base in PASS_GROUPS:
-            out.extend(PASS_GROUPS[base])
-        else:
-            out.append(p)
-    return out
-
-
 def _resolve_pass_index(passes: list[str], spec: str) -> int:
     """Return the index of the pass named by ``spec`` in the flat pass list.
 
-    ``spec`` accepts a bare pass name, a ``py:`` prefix (matched the same as
-    the bare name), a pass-group name (resolves to its last member), and a
-    ``name:N`` suffix selecting the Nth (1-indexed) occurrence. Raises
-    ValueError if not found.
+    ``spec`` accepts a bare pass name or a ``py:`` prefix (matched the same as
+    the bare name). Raises ValueError if not found.
     """
-    name = spec
-    nth = 1
-    if ':' in spec:
-        head, tail = spec.rsplit(':', 1)
-        if tail.isdigit():
-            name, nth = head, int(tail)
+    req_name = spec[len('py:'):] if spec.startswith('py:') else spec
 
-    req_name = name[len('py:'):] if name.startswith('py:') else name
-    if req_name in PASS_GROUPS:
-        members = PASS_GROUPS[req_name]
-        if not members:
-            raise ValueError(f"Pass group '{req_name}' is empty")
-        req_name = members[-1]
-
-    occurrence = 0
     for i, p in enumerate(passes):
         raw = p[len('py:'):] if p.startswith('py:') else p
         base_name = raw.split('=')[0].split('"')[0].strip()
         if base_name == req_name:
-            occurrence += 1
-            if occurrence == nth:
-                return i
+            return i
 
     available = [
         (p[len('py:'):] if p.startswith('py:') else p)
         .split('=')[0].split('"')[0].strip()
         for p in passes
-    ] + list(PASS_GROUPS)
+    ]
     raise ValueError(
         f"Pass '{spec}' not found in pipeline. Available passes: {available}"
     )
@@ -88,8 +39,7 @@ def _pass_to_arg(pass_name: str) -> str:
     """Convert a pass spec to a CLI argument.
 
     Examples:
-        'prepare-arithmetic' -> '--prepare-arithmetic'
-        'one-shot-bufferize="opt1 opt2"' -> '--one-shot-bufferize=opt1 opt2'
+        'canonicalize-compute' -> '--canonicalize-compute'
         'insert-spill-reload="target=trn2"' -> '--insert-spill-reload=target=trn2'
     """
     if '=' in pass_name:
@@ -220,41 +170,32 @@ def apply_complete_knob_pipeline(
     docs/2026-06-22-memref-native-pipeline-refactor.md.
 
     Phase 1: Canonicalization
-     1. prepare-arithmetic: Convert div to mul+reciprocal (NISA has no divide)
-     2. prepare-matmul: Decompose batch_matmul, transpose LHS, remove fill(0)
-     3. infer-layout: Infer tiling, placement, and partition_dim for unannotated ops
-     4. canonicalize-partition-dim: Insert transposes to ensure partition_dim=0 everywhere
-     5. assign-linalg-op-ids: Assign unique IDs to linalg ops (incl. new transposes)
+     1. canonicalize-compute: div→recip*mul, decompose batch_matmul, remove fill(0)
+     2. infer-layout: Infer tiling, placement, and partition_dim for unannotated ops
+     3. canonicalize-partition-dim: Insert transposes to ensure partition_dim=0
+     4. assign-linalg-op-ids: Assign unique IDs to linalg ops
 
     Phase 2: Loop Tiling
-     6. knob-driven-tiling: Rewrite linalg ops to tiled loops using transform dialect
-     7. apply-and-strip-transforms: Apply the generated transforms, then erase
-        the transform module (so downstream passes — including the Python
-        linalg->NISA phase — see no transform-dialect ops).
+     5. knob-driven-tiling: Rewrite linalg ops to tiled loops via transform dialect
+     6. apply-and-strip-transforms: Apply transforms, erase transform module
 
     Phase 3: Fusion
-     8. knob-driven-fusion: Fuse sibling scf.for loops sharing a knob.fuse()
-     9. canonicalize-loop-step: Normalize loop steps to 1 (then canonicalize
-        cleans up memref operations)
+     8. knob-driven-fusion: Fuse sibling loops + canonicalize-loop-step + canonicalize
 
     Phase 4: Layout Legalization
-    10. annotate-memory-space: Apply HBM / SBUF / PSUM memory space attributes
-    11. canonicalize-reshape: Classify expand/collapse_shape by mem_space and partition_dim
-    12. canonicalize: Clean up dead allocs
-    13. legalize-layout: Attach #sbuf_map to multi-block SBUF allocs, tile HBM↔SBUF copies
-    14. canonicalize: Clean up after layout legalization
+     9. annotate-memory-space: Apply HBM / SBUF / PSUM memory space attributes
+    10. canonicalize-reshape: Classify expand/collapse_shape + canonicalize
+    11. legalize-layout: Attach #sbuf_map, tile HBM↔SBUF copies + canonicalize
 
     Phase 5: Scheduling
-    15. simplify-linalg: Decompose high-rank transposes, canonicalize trivial-broadcast generics
-    16. insert-spill-reload: Insert spill/reload for SBUF overflow
-    17. insert-memref-dealloc: Insert memref.dealloc at allocation scope end
-    18. cse: Common subexpression elimination
-    19. canonicalize: DCE for unused subviews and cleanup
+    12. simplify-linalg: Decompose high-rank transposes, canonicalize trivial-broadcast generics
+    13. insert-spill-reload: Insert spill/reload for SBUF overflow
+    14. insert-memref-dealloc: Insert deallocs + canonicalize
 
     Phase 6: Codegen
-    20. py:linalg-to-nisa: Lower to NISA instructions (Python backend)
+    15. py:linalg-to-nisa: Lower to NISA instructions (Python backend)
 
-    Note: nkipy.annotate ops are removed in annotate-memory-space (pass 10).
+    Note: nkipy.annotate ops are removed in annotate-memory-space (pass 9).
     Note: The prior NISA-lowering steps (linalg-to-nisa, resolve-custom-ops,
     prepare-for-nki) are currently stripped. They will be reimplemented in
     Python using the public nki wheel as part of open-sourcing.
@@ -266,14 +207,9 @@ def apply_complete_knob_pipeline(
         dump_dir: If provided, save intermediate MLIR files after each pass to this directory
         stop_after: Controls how many passes to run. Can be:
             - None: run all passes (default)
-            - int: stop after pass N (1-indexed)
-            - str: stop after the first occurrence of the named pass.
-              For passes that appear multiple times (e.g. "canonicalize"),
-              use "name:N" to stop at the Nth occurrence (1-indexed).
+            - str: stop after the named pass.
         stop_before: Stop just *before* the named pass (str), i.e. run every
-            pass up to but excluding it. Resolved by pass name so it is robust
-            to pipeline reordering. Accepts the same "py:" prefix / "name:N"
-            forms as stop_after. Mutually exclusive with stop_after. Useful to
+            pass up to but excluding it. Mutually exclusive with stop_after. Useful to
             obtain the IR a downstream consumer expects (e.g. the linalg-level
             IR just before "linalg-to-nisa" that the kernelbuilder backend
             walks).
@@ -285,9 +221,9 @@ def apply_complete_knob_pipeline(
     """
     passes = [
         # Phase 1: Canonicalization
-        # Linalg-level rewrites for NISA hardware constraints (pre-tiling).
-        # Expands to prepare-arithmetic + prepare-matmul. See PASS_GROUPS above.
-        'canonicalize-linalg-for-nisa',                                         # 1-2
+        # Rewrite linalg ops for NISA: div→recip*mul, decompose batch_matmul,
+        # remove fill(0) before matmul.
+        'canonicalize-compute',                                                  # 1
         # InferLayout infers tiling, placement (mem_space), and partition_dim for
         # elementwise ops that lack explicit annotations, by propagating from
         # annotated neighbors
@@ -310,74 +246,47 @@ def apply_complete_knob_pipeline(
 
         # Phase 3: Fusion
         # KnobDrivenFusion fuses sibling scf.for loops sharing a knob.fuse()
-        # annotation (after tiling has produced the per-op loops).  Must run
-        # before canonicalize-loop-step, which it matches on loop bounds.
+        # annotation (after tiling has produced the per-op loops).
+        # Internally runs canonicalize-loop-step + canonicalize as epilogue.
         'knob-driven-fusion',                                                   # 8
-        # CanonicalizeLoopStep normalizes loop steps to 1 (e.g., for %i = 0 to 512 step 128)
-        # This simplifies index expressions from %i*128/128 to just %i
-        'canonicalize-loop-step',                                               # 9
-        'canonicalize',                                                         # 9b
 
         # Phase 4: Layout Legalization
-        # The IR is already memref-native (no bufferization needed). Allocation
-        # and promotion are explicit, so the post-bufferize cleanup passes
-        # (eliminate-uninitialized-copies, eliminate-same-memspace-copy) are gone.
-        'annotate-memory-space',                                                 # 10
+        'annotate-memory-space',                                                 # 9
         # CanonicalizeReshape: classify expand/collapse_shape by mem_space and
-        # partition_dim. HBM reshapes and SBUF non-pdim reshapes stay as views.
-        # SBUF partition dim splits get alloc+copy (NISA has no modulo).
-        # Returned expand_shape views of func args and direct returns of func
-        # args get alloc+copy (NISA needs separate output allocations).
-        'canonicalize-reshape',                                                  # 11
-        'canonicalize',  # Clean up dead allocs and subviews                     # 12
+        # partition_dim. Internally canonicalizes dead allocs/subviews.
+        'canonicalize-reshape',                                                  # 10
         # LegalizeLayout attaches #nkipy.sbuf_map to multi-block SBUF allocs
-        # and tiles HBM↔SBUF copies/transposes into block loops
-        f'legalize-layout="target={target}"',                                    # 13
-        'canonicalize',                                                          # 14
+        # and tiles HBM↔SBUF copies/transposes into block loops.
+        # Internally canonicalizes after tiling.
+        f'legalize-layout="target={target}"',                                    # 11
 
         # Phase 5: Scheduling
-        # Simplify linalg ops before NISA lowering: decompose high-rank
-        # transposes to loops of 2D, collapse >2D SBUF transpose to 2D,
-        # canonicalize trivial-broadcast generics to named ops.
-        # Runs before insert-spill-reload so any SBUF temps it creates
-        # are accounted for in spill/reload memory budgeting.
-        'simplify-linalg',                                                       # 15
-        # Insert spill/reload for SBUF memory pressure.  Runs after legalize-layout
-        # so SBUF allocs are already in physical per-partition layout and their
-        # total byte size equals the per-partition SBUF consumption.
-        f'insert-spill-reload="target={target}"',                                # 16
-        'insert-memref-dealloc',  # Insert memref.dealloc ops at allocation scope end  # 17
-        'cse',  # Common subexpression elimination                               # 18
-        'canonicalize',  # DCE for unused subviews and cleanup                   # 19
+        'simplify-linalg',                                                       # 12
+        f'insert-spill-reload="target={target}"',                                # 13
+        # InsertMemRefDealloc inserts memref.dealloc at allocation scope end.
+        # Internally runs CSE + canonicalize as epilogue.
+        'insert-memref-dealloc',                                                 # 14
 
         # Phase 6: Codegen (Python) — reimplementation of the deleted C++
         # linalg-to-nisa / resolve-custom-ops / prepare-for-nki passes using
         # the `nki` wheel's Python bindings. Marked as Python-phase so the
         # driver below dispatches to `linalg_to_nisa_py` instead of nkipy-opt.
-        'py:linalg-to-nisa',                                                     # 20
+        'py:linalg-to-nisa',                                                     # 15
     ]
 
     # Expand pass groups first so stop_after / slicing operates on the
     # flat pass list that the driver actually runs.
-    passes = _expand_pass_groups(passes)
 
     if stop_after is not None and stop_before is not None:
         raise ValueError("stop_after and stop_before are mutually exclusive")
 
     # Slice passes if stop_after is provided
     if stop_after is not None:
-        if isinstance(stop_after, int):
-            passes = passes[:stop_after]
-        elif isinstance(stop_after, str):
-            idx = _resolve_pass_index(passes, stop_after)
-            passes = passes[:idx + 1]
-        else:
-            raise TypeError(f"stop_after must be int, str, or None, got {type(stop_after)}")
+        idx = _resolve_pass_index(passes, stop_after)
+        passes = passes[:idx + 1]
 
     # Slice passes if stop_before is provided (exclude the named pass).
     if stop_before is not None:
-        if not isinstance(stop_before, str):
-            raise TypeError(f"stop_before must be str or None, got {type(stop_before)}")
         idx = _resolve_pass_index(passes, stop_before)
         passes = passes[:idx]
 

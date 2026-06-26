@@ -77,7 +77,7 @@ def test_matmul_loop_canonicalization(M, N, K, tile_size, reduction_tile, reques
     """
     run_kernel_test(
         matmul_kernel,
-        stop_after='canonicalize-loop-step',
+        stop_after='knob-driven-fusion',
         check_patterns=check_patterns,
         modes=Mode.FILECHECK,
     )

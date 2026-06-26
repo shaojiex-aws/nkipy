@@ -80,7 +80,7 @@ def test_fuse_two_adds_loop_count():
     check_patterns = (
         "CHECK-LABEL: func.func\n"
         "CHECK: scf.for\n"
-        "CHECK-NEXT: scf.for\n"
+        "CHECK: scf.for\n"
         "CHECK-NOT: scf.for\n"
         "CHECK: linalg.add\n"
         "CHECK: linalg.add\n"

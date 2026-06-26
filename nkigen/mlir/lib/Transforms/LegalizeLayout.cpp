@@ -32,6 +32,7 @@
 #include "mlir/Dialect/Tensor/IR/Tensor.h"
 #include "mlir/IR/Builders.h"
 #include "mlir/IR/IRMapping.h"
+#include "mlir/Transforms/GreedyPatternRewriteDriver.h"
 #include "llvm/ADT/SmallSet.h"
 #include "llvm/Support/Debug.h"
 #include "llvm/Support/raw_ostream.h"
@@ -267,6 +268,13 @@ struct NkipyLegalizeLayoutPass
     // collapse_shape/expand_shape view chains.
 
     eraseAllLayoutOps(func);
+
+    // Epilogue: canonicalize to clean up dead subviews and simplify.
+    RewritePatternSet patterns(&getContext());
+    for (auto *dialect : getContext().getLoadedDialects())
+      dialect->getCanonicalizationPatterns(patterns);
+    (void)applyPatternsAndFoldGreedily(func, std::move(patterns));
+
     llvm::errs() << "[LegalizeLayout] Pass completed successfully\n";
   }
 

@@ -18,15 +18,11 @@ std::unique_ptr<OperationPass<func::FuncOp>> createInferLayoutPass();
 std::unique_ptr<OperationPass<ModuleOp>> createKnobDrivenTilingPass();
 std::unique_ptr<OperationPass<func::FuncOp>> createKnobDrivenFusionPass();
 std::unique_ptr<OperationPass<ModuleOp>> createApplyAndStripTransformsPass();
-std::unique_ptr<OperationPass<func::FuncOp>> createEliminateUninitializedCopiesPass();
-std::unique_ptr<OperationPass<func::FuncOp>> createEliminateSameMemSpaceCopyPass();
 std::unique_ptr<OperationPass<func::FuncOp>> createInsertSpillReloadPass();
 std::unique_ptr<OperationPass<func::FuncOp>> createInsertMemRefDeallocPass();
-std::unique_ptr<OperationPass<func::FuncOp>> createCanonicalizeLoopStepPass();
 std::unique_ptr<OperationPass<func::FuncOp>> createLegalizeLayoutPass();
 std::unique_ptr<OperationPass<func::FuncOp>> createSimplifyLinalgPass();
-std::unique_ptr<OperationPass<ModuleOp>> createPrepareArithmeticPass();
-std::unique_ptr<OperationPass<func::FuncOp>> createPrepareMatmulPass();
+std::unique_ptr<OperationPass<ModuleOp>> createCanonicalizeComputePass();
 std::unique_ptr<OperationPass<func::FuncOp>> createInlineNkipyReferencePass();
 
 

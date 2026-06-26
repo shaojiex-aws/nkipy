@@ -30,6 +30,7 @@
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/MemRef/IR/MemRef.h"
 #include "mlir/Pass/Pass.h"
+#include "mlir/Transforms/GreedyPatternRewriteDriver.h"
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/Support/raw_ostream.h"
 
@@ -350,6 +351,12 @@ struct CanonicalizeReshapePass
                      << "inserted alloc+copy\n";
       }
     });
+
+    // Epilogue: canonicalize to clean up dead allocs and subviews.
+    RewritePatternSet patterns(&getContext());
+    for (auto *dialect : getContext().getLoadedDialects())
+      dialect->getCanonicalizationPatterns(patterns);
+    (void)applyPatternsAndFoldGreedily(func, std::move(patterns));
   }
 };
 

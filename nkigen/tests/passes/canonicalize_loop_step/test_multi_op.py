@@ -62,7 +62,7 @@ def test_matmul_add_chain():
     """
     run_kernel_test(
         matmul_add_kernel,
-        stop_after='canonicalize-loop-step',
+        stop_after='knob-driven-fusion',
         check_patterns=check_patterns,
         modes=Mode.FILECHECK,
     )
@@ -114,7 +114,7 @@ def test_matmul_add_different_tile_sizes():
     """
     run_kernel_test(
         matmul_add_kernel,
-        stop_after='canonicalize-loop-step',
+        stop_after='knob-driven-fusion',
         check_patterns=check_patterns,
         modes=Mode.FILECHECK,
     )
@@ -163,7 +163,7 @@ def test_add_add_chain():
     """
     run_kernel_test(
         add_add_kernel,
-        stop_after='canonicalize-loop-step',
+        stop_after='knob-driven-fusion',
         check_patterns=check_patterns,
         modes=Mode.FILECHECK,
     )

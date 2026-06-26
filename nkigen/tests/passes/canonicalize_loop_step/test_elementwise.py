@@ -66,7 +66,7 @@ def test_add_loop_canonicalization(shape, tile_size):
     """
     run_kernel_test(
         add_kernel,
-        stop_after='canonicalize-loop-step',
+        stop_after='knob-driven-fusion',
         check_patterns=check_patterns,
         modes=Mode.FILECHECK,
     )
@@ -100,7 +100,7 @@ def test_mul_loop_canonicalization(shape, tile_size):
     """
     run_kernel_test(
         mul_kernel,
-        stop_after='canonicalize-loop-step',
+        stop_after='knob-driven-fusion',
         check_patterns=check_patterns,
         modes=Mode.FILECHECK,
     )
@@ -140,7 +140,7 @@ def test_add_3d_loop_canonicalization(shape, tile_size):
     """
     run_kernel_test(
         add_kernel,
-        stop_after='canonicalize-loop-step',
+        stop_after='knob-driven-fusion',
         check_patterns=check_patterns,
         modes=Mode.FILECHECK,
     )

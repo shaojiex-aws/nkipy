@@ -73,14 +73,15 @@ Defined in `nkigen/driver/pipeline.py` -> `apply_complete_knob_pipeline()`.
 ```
 ┌─────────────────────────────────────────────────────────────────────┐
 │                        TRACING (Python)                             │
-│  User NumPy code → linalg ops on tensors + nkipy.tile_op/layout     │
+│  User NumPy code → linalg ops on MEMREF + nkipy annotations         │
+│  (nkipy.layout, nkipy.tile_op, nkipy.cache, nkipy.fuse_op)          │
 └────────────────────────────────┬────────────────────────────────────┘
                                  │
                                  ▼
 ┌─────────────────────────────────────────────────────────────────────┐
-│  PHASE 0: CANONICALIZATION                         (C++ / nkipy-opt)│
-│  • canonicalize-linalg-for-nisa (zero-fill removal, arithmetic      │
-│    prep, batch-matmul decomposition)                                │
+│  PHASE 1: CANONICALIZATION                         (C++ / nkipy-opt)│
+│  • canonicalize-compute (div→recip*mul, batch-matmul decomp,        │
+│    zero-fill removal)                                               │
 │  • infer-layout (propagate mem_space + partition_dim + tile_size)   │
 │  • canonicalize-partition-dim (insert transposes for pdim=0)        │
 │  • assign-linalg-op-ids                                             │
@@ -88,41 +89,37 @@ Defined in `nkigen/driver/pipeline.py` -> `apply_complete_knob_pipeline()`.
                                  │
                                  ▼
 ┌─────────────────────────────────────────────────────────────────────┐
-│  PHASE 1: TILING + FUSION                                           │
+│  PHASE 2: TILING + PROMOTION                                        │
 │  • knob-driven-tiling → apply-and-strip-transforms                  │
-│    (realize tile_op via transform dialect → scf.for loops)          │
-│  • knob-driven-fusion (fuse sibling loops from knob.fuse)           │
-│  • canonicalize-loop-step (normalize loop steps to 1)               │
+│    (tile_op → scf.for loops, SBUF/PSUM promotion via cache knobs)   │
 └────────────────────────────────┬────────────────────────────────────┘
                                  │
                                  ▼
 ┌─────────────────────────────────────────────────────────────────────┐
-│  PHASE 2: BUFFERIZATION                                             │
-│  • one-shot-bufferize (tensor IR → memref IR)                       │
-│  • canonicalize                                                     │
+│  PHASE 3: FUSION                                                    │
+│  • knob-driven-fusion (fuse sibling loops, normalize loop steps,    │
+│    canonicalize)                                                    │
 └────────────────────────────────┬────────────────────────────────────┘
                                  │
                                  ▼
 ┌─────────────────────────────────────────────────────────────────────┐
-│  PHASE 3: MEMORY SPACE + RESHAPE LEGALIZATION                       │
-│  • eliminate-uninitialized-copies                                   │
+│  PHASE 4: LAYOUT LEGALIZATION                                       │
 │  • annotate-memory-space (assign HBM / SBUF / PSUM)                 │
-│  • canonicalize-reshape (classify by mem_space + partition_dim)     │
-│  • eliminate-same-memspace-copy                                     │
+│  • canonicalize-reshape (materialize SBUF partition-dim reshapes)   │
+│  • legalize-layout (attach #sbuf_map, tile HBM↔SBUF copies)         │
 └────────────────────────────────┬────────────────────────────────────┘
                                  │
                                  ▼
 ┌─────────────────────────────────────────────────────────────────────┐
-│  PHASE 4: LAYOUT + SCHEDULING                                       │
-│  • legalize-layout (2D → physical multi-D layout for SBUF)          │
+│  PHASE 5: SCHEDULING                                                │
 │  • simplify-linalg (decompose high-rank transposes, etc.)           │
 │  • insert-spill-reload (SBUF pressure management, Belady's MIN)     │
-│  • insert-memref-dealloc + CSE + canonicalize                       │
+│  • insert-memref-dealloc (lifetime endpoints + canonicalize)        │
 └────────────────────────────────┬────────────────────────────────────┘
                                  │
                                  ▼
 ┌─────────────────────────────────────────────────────────────────────┐
-│  PHASE 5: CODEGEN                                       (Python)    │
+│  PHASE 6: CODEGEN                                       (Python)    │
 │  • Backend A: py:linalg-to-nisa (→ NISA MLIR text)                  │
 │  • Backend B: linalg-to-kernelbuilder (→ nb.compiler.* Python)      │
 └─────────────────────────────────────────────────────────────────────┘
@@ -135,7 +132,6 @@ from nkigen.driver.pipeline import apply_complete_knob_pipeline
 
 apply_complete_knob_pipeline(mlir_str, dump_dir="debug_outputs/")
 apply_complete_knob_pipeline(mlir_str, stop_after="legalize-layout")
-apply_complete_knob_pipeline(mlir_str, stop_after="canonicalize:3")  # Nth occurrence
 ```
 
 From a test: `pytest tests/e2e/test_rope.py::test_rope --dump-ir -v -s`

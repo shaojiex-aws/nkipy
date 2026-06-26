@@ -36,8 +36,8 @@ problems:
                                  ▼
 ┌─────────────────────────────────────────────────────────────────────┐
 │  PHASE 1: CANONICALIZATION                                          │
-│  • canonicalize-linalg-for-nisa (matmul prep, arithmetic prep,      │
-│    batch-matmul decomposition)                                      │
+│  • canonicalize-compute (div→recip*mul, batch-matmul decomp,        │
+│    zero-fill removal)                                               │
 │  • infer-layout (propagate mem_space + partition_dim)               │
 │  • canonicalize-partition-dim (insert transposes for pdim=0)        │
 │  • assign-linalg-op-ids                                             │
@@ -60,8 +60,8 @@ problems:
 ┌─────────────────────────────────────────────────────────────────────┐
 │  PHASE 4: LAYOUT LEGALIZATION                                       │
 │  • annotate-memory-space (HBM / SBUF / PSUM assignment)             │
-│  • canonicalize-reshape (materialize SBUF partition-dim reshapes)    │
-│  • legalize-layout (attach #sbuf_map, tile HBM↔SBUF copies)        │
+│  • canonicalize-reshape (materialize SBUF partition-dim reshapes)   │
+│  • legalize-layout (attach #sbuf_map, tile HBM↔SBUF copies)         │
 └────────────────────────────────┬────────────────────────────────────┘
                                  │
                                  ▼

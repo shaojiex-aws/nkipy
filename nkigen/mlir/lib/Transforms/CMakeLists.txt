@@ -8,15 +8,11 @@ add_mlir_library(MLIRNkipyPasses
     InferLayout.cpp
     KnobDrivenTiling.cpp
     KnobDrivenFusion.cpp
-    EliminateUninitializedCopies.cpp
-    EliminateSameMemSpaceCopy.cpp
     InsertSpillReload.cpp
     InsertMemRefDealloc.cpp
-    CanonicalizeLoopStep.cpp
     LegalizeLayout.cpp
     SimplifyLinalg.cpp
-    CanonicalizeLinalgForNisa/Arithmetic.cpp
-    CanonicalizeLinalgForNisa/MatmulPrep.cpp
+    CanonicalizeCompute.cpp
     InlineNkipyReference.cpp
     OpClassification.cpp
     IRHelpers.cpp
