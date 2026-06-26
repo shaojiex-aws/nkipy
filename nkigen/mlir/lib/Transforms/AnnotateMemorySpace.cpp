@@ -59,8 +59,10 @@ struct NkipyAnnotateMemorySpacePass
         out.push_back(ty);
         continue;
       }
-      assert(!memrefType.getMemorySpace() &&
-             "memrefs should not have memory space before this pass");
+      if (memrefType.getMemorySpace()) {
+        out.push_back(ty);
+        continue;
+      }
       out.push_back(MemRefType::get(memrefType.getShape(),
                                     memrefType.getElementType(),
                                     memrefType.getLayout(), memSpaceAttr));

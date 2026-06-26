@@ -254,8 +254,8 @@ def test_3d_broadcast_generic_partition_dim_1():
         check_ir_contains=[
             "linalg.transpose",
             "permutation = [1, 0, 2]",
-            "memref<128x4x64xf32>",
-            "memref<128x1x64xf32>",
+            "memref<128x4x64xf32",
+            "memref<128x1x64xf32",
             "partition_dim = 0",
         ],
         modes=Mode.STRING_CHECK,

@@ -13,7 +13,7 @@ NumPy-like front end) and `spike` (NRT runtime bindings).
 ```bash
 source scripts/setup_nki.sh   # venv + LLVM/MLIR + Neuron deps
 pip install -e .              # builds nkipy-opt & _mlir bindings via CMake
-python setup.py build_ext    
+python setup.py build_ext    # compiles Cython/C extensions in-place
 ```
 
 Requirements: Python >= 3.10, a pre-built LLVM/MLIR, `clang-22`/`clang++-22`,

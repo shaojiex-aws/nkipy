@@ -31,12 +31,7 @@ from typing import Union, Any, Optional, List
 from mlir import ir
 from .traced_array import TracedArray
 from nkigen._mlir.dialects import nkipy as nkipy_d
-
-
-# Values MUST match mlir/include/nkipy/Dialect/NkipyAttrs.td.
-# Zero is intentionally reserved: MemRefType::get drops an IntegerAttr(0)
-# memorySpace, so zero-valued enum cases cannot be attached to a memref.
-_MEM_SPACE_MAP = {"Hbm": 1, "Psum": 2, "Sbuf": 3, "SharedHbm": 4}
+from nkigen.mlir_utils import MEM_SPACE_MAP, mem_space_attr
 
 
 class _KnobBuilder:
@@ -190,10 +185,10 @@ class _KnobBuilder:
     # ------------------------------------------------------------------
 
     def _validate_mem_space(self, mem_space: str) -> None:
-        if mem_space not in _MEM_SPACE_MAP:
+        if mem_space not in MEM_SPACE_MAP:
             raise ValueError(
                 f"Invalid mem_space '{mem_space}'. "
-                f"Must be one of: {set(_MEM_SPACE_MAP)}"
+                f"Must be one of: {set(MEM_SPACE_MAP)}"
             )
 
     def _validate_partition_dim(self, partition_dim: int) -> None:
@@ -278,9 +273,7 @@ def fuse(*tensors: Union[TracedArray, Any]) -> None:
 def _mem_space_attr(mem_space: Optional[str]) -> Optional[ir.Attribute]:
     if mem_space is None:
         return None
-    return ir.IntegerAttr.get(
-        ir.IntegerType.get_signless(32), _MEM_SPACE_MAP[mem_space]
-    )
+    return mem_space_attr(mem_space)
 
 
 def _partition_dim_attr(partition_dim: Optional[int]) -> Optional[ir.Attribute]:

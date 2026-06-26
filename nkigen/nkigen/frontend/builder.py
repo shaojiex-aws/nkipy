@@ -11,7 +11,7 @@ and :class:`IRBuilder`.
 from __future__ import annotations
 
 import math
-from typing import Callable, Optional, Union
+from typing import Callable, Union
 
 import numpy as np
 from mlir import ir
@@ -24,14 +24,12 @@ from nkigen.mlir_utils import (
     make_alloc,
     make_alloc_filled,
     make_alloc_zeros,
+    mem_space_attr,
     memref_of,
     to_mlir_type,
 )
 
 Scalar = Union[int, float]
-
-_MEM_SPACE_CONSTANT = 5
-
 
 
 def _make_output(loc: ir.Location, shape: tuple, elem_ty: ir.Type) -> ir.Value:
@@ -177,8 +175,9 @@ class IRBuilder:
         arg_shapes: list[tuple],
         arg_dtypes: list,
     ) -> list[TensorHandle]:
+        shared_hbm = mem_space_attr("SharedHbm")
         arg_types = [
-            memref_of(shape, _np_to_mlir(dtype))
+            memref_of(shape, _np_to_mlir(dtype), memory_space=shared_hbm)
             for shape, dtype in zip(arg_shapes, arg_dtypes)
         ]
         fn_type = ir.FunctionType.get(arg_types, [arg_types[0]])
@@ -214,14 +213,15 @@ class IRBuilder:
         """Emit func.func private declarations and stash NISA bodies for custom ops."""
         if not custom_ops:
             return
+        shared_hbm = mem_space_attr("SharedHbm")
         with ir.InsertionPoint(self._module.body):
             for custom in custom_ops:
                 input_types = [
-                    memref_of(s, _np_to_mlir(d))
+                    memref_of(s, _np_to_mlir(d), memory_space=shared_hbm)
                     for s, d in zip(custom.input_shapes, custom.input_dtypes)
                 ]
                 result_types = [
-                    memref_of(s, _np_to_mlir(d))
+                    memref_of(s, _np_to_mlir(d), memory_space=shared_hbm)
                     for s, d in zip(custom.output_shapes, custom.output_dtypes)
                 ]
                 fn_type = ir.FunctionType.get(input_types, result_types)
@@ -476,7 +476,8 @@ def _emit_reshape(loc, value, old_shape, new_shape, elem_ty):
     if tuple(old_shape) == tuple(new_shape):
         return value
 
-    dst_ty = memref_of(tuple(new_shape), elem_ty)
+    ms = ir.MemRefType(value.type).memory_space
+    dst_ty = memref_of(tuple(new_shape), elem_ty, memory_space=ms)
     strides = [1] * len(new_shape)
     for i in range(len(new_shape) - 2, -1, -1):
         strides[i] = strides[i + 1] * new_shape[i + 1]
@@ -1067,7 +1068,7 @@ def constant_tensor(val: Scalar, shape: tuple, elem_ty, loc=None) -> TensorHandl
     if not isinstance(elem_ty, ir.Type):
         elem_ty = _np_to_mlir(elem_ty)
     v = _make_output_filled(loc, tuple(shape), elem_ty, val)
-    ms_attr = ir.IntegerAttr.get(ir.IntegerType.get_signless(32), _MEM_SPACE_CONSTANT)
+    ms_attr = mem_space_attr("Constant")
     nkipy_d.LayoutOp(
         target=v,
         mem_space=ms_attr,
@@ -1106,7 +1107,8 @@ def concatenate(arrays: list[TensorHandle], axis: int = 0, loc=None) -> TensorHa
         strides_list = [1] * len(out_shape)
         sv_offset = sum(o * s for o, s in zip(offsets, src_strides))
         layout = ir.StridedLayoutAttr.get(sv_offset, src_strides)
-        sv_type = ir.MemRefType.get(sizes, elem, layout)
+        sv_type = ir.MemRefType.get(sizes, elem, layout,
+                                    memory_space=ir.MemRefType(output.type).memory_space)
         sv = memref.SubViewOp(
             sv_type, output, [], [], [],
             offsets, sizes, strides_list,
@@ -1246,8 +1248,8 @@ def take(a: TensorHandle, indices: TensorHandle, axis: int = 0, loc=None) -> Ten
         raise NotImplementedError("Only axis=0 gather is currently supported")
 
     out_shape = i_shape + a_shape[1:]
-    rt = memref_of(out_shape, a_elem)
     output = _make_output(loc, out_shape, a_elem)
+    rt = ir.MemRefType(output.type)
 
     gather = nkipy_d.GatherOp(rt, av, iv, output, loc=loc)
 
@@ -1373,7 +1375,8 @@ def static_slice(
                    for i in range(len(shape)) if not squeeze_dims or i not in squeeze_dims]
     offset = sum(s * st for s, st in zip(start_indices, src_strides))
     layout = ir.StridedLayoutAttr.get(offset, out_strides)
-    result_type = ir.MemRefType.get(list(out_shape), elem, layout)
+    result_type = ir.MemRefType.get(list(out_shape), elem, layout,
+                                    memory_space=ir.MemRefType(val.type).memory_space)
     sliced = memref.SubViewOp(
         result_type,
         val,
@@ -1472,7 +1475,8 @@ def dynamic_slice(x: TensorHandle, indices, loc=None) -> TensorHandle:
                       for i, idx in enumerate(full_indices)
                       if not (isinstance(idx, LoopIndexHandle) or isinstance(idx, int))]
     layout = ir.StridedLayoutAttr.get(sv_offset, result_strides)
-    result_type = ir.MemRefType.get(list(result_shape), elem, layout)
+    result_type = ir.MemRefType.get(list(result_shape), elem, layout,
+                                    memory_space=ir.MemRefType(val.type).memory_space)
     sv = memref.SubViewOp(
         result_type,
         val,

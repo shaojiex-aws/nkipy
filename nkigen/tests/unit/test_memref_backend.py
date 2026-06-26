@@ -29,7 +29,7 @@ FRONTEND_CASES = [
     pytest.param(
         [((128, 64), "f32"), ((128, 64), "f32")],
         lambda a, b: a + b,
-        ["memref<128x64xf32>", "linalg.add"],
+        ["#nkipy.mem<SharedHbm>", "linalg.add"],
         id="add",
     ),
     pytest.param(
@@ -53,7 +53,7 @@ FRONTEND_CASES = [
     pytest.param(
         [((128, 64), "f32")],
         lambda x, _: x.reshape(1, 128, 64),
-        ["memref.reinterpret_cast", "memref<1x128x64xf32>"],
+        ["memref.reinterpret_cast", "memref<1x128x64xf32, #nkipy.mem<SharedHbm>>"],
         id="reshape",
     ),
     pytest.param(
@@ -65,7 +65,7 @@ FRONTEND_CASES = [
     pytest.param(
         [((64, 32), "f32"), ((64, 32), "f32")],
         lambda a, b: a * b,
-        ["memref<64x32xf32>", "linalg.mul"],
+        ["#nkipy.mem<SharedHbm>", "linalg.mul"],
         id="mul",
     ),
 ]

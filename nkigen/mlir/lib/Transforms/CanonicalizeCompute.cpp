@@ -273,7 +273,8 @@ static LogicalResult decomposeOneBatchMatmul(linalg::BatchMatmulOp bmmOp) {
     auto resultType = MemRefType::get(
         {d1, d2}, srcType.getElementType(),
         StridedLayoutAttr::get(builder.getContext(),
-            ShapedType::kDynamic, {srcType.getShape()[2], 1}));
+            ShapedType::kDynamic, {srcType.getShape()[2], 1}),
+        srcType.getMemorySpace());
     SmallVector<OpFoldResult> offsets = {iv, builder.getIndexAttr(0),
                                          builder.getIndexAttr(0)};
     SmallVector<OpFoldResult> sizes = {builder.getIndexAttr(1),
