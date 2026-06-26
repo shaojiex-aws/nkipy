@@ -316,6 +316,10 @@ def _run_passes_with_python_dispatch(
     current = mlir_module
 
     if dump_dir:
+        if os.path.exists(dump_dir):
+            for f in os.listdir(dump_dir):
+                if f.endswith('.mlir'):
+                    os.remove(os.path.join(dump_dir, f))
         os.makedirs(dump_dir, exist_ok=True)
         with open(os.path.join(dump_dir, "00_input.mlir"), 'w') as f:
             f.write(str(current))

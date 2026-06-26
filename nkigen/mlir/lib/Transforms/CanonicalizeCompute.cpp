@@ -20,7 +20,6 @@
 #include "mlir/Dialect/Linalg/IR/Linalg.h"
 #include "mlir/Dialect/MemRef/IR/MemRef.h"
 #include "mlir/Dialect/SCF/IR/SCF.h"
-#include "mlir/Dialect/Tensor/IR/Tensor.h"
 #include "mlir/Dialect/Utils/StructuredOpsUtils.h"
 #include "mlir/IR/PatternMatch.h"
 #include "mlir/Pass/Pass.h"
@@ -116,19 +115,12 @@ private:
 
   static Value createReciprocal(PatternRewriter &rewriter, Location loc,
                                 Value input, Value outputBuf = nullptr) {
-    if (auto memrefType = dyn_cast<MemRefType>(input.getType())) {
-      Value out = outputBuf ? outputBuf
-                            : rewriter.create<memref::AllocOp>(loc, memrefType).getResult();
-      rewriter.create<linalg::ReciprocalOp>(
-          loc, TypeRange{}, ValueRange{input}, ValueRange{out});
-      return out;
-    }
-    auto tensorType = cast<RankedTensorType>(input.getType());
-    auto shape = tensorType.getShape();
-    auto recipOut = rewriter.create<tensor::EmptyOp>(loc, shape, tensorType.getElementType());
-    auto recipOp = rewriter.create<linalg::ReciprocalOp>(
-        loc, TypeRange{tensorType}, ValueRange{input}, ValueRange{recipOut.getResult()});
-    return recipOp.getResult(0);
+    auto memrefType = cast<MemRefType>(input.getType());
+    Value out = outputBuf ? outputBuf
+                          : rewriter.create<memref::AllocOp>(loc, memrefType).getResult();
+    rewriter.create<linalg::ReciprocalOp>(
+        loc, TypeRange{}, ValueRange{input}, ValueRange{out});
+    return out;
   }
 
   static bool isAllParallel(linalg::GenericOp op) {
@@ -141,18 +133,10 @@ private:
                                 PatternRewriter &rewriter) const {
     Location loc = origOp->getLoc();
     Value recipResult = createReciprocal(rewriter, loc, divisor);
-    if (isa<MemRefType>(output.getType())) {
-      cloneAnnotations(output, recipResult, rewriter);
-      rewriter.create<linalg::MulOp>(loc, TypeRange{},
-          ValueRange{numerator, recipResult}, ValueRange{output});
-      rewriter.eraseOp(origOp);
-    } else {
-      cloneAnnotations(origOp->getResult(0), recipResult, rewriter);
-      auto outType = cast<ShapedType>(output.getType());
-      auto mulOp = rewriter.create<linalg::MulOp>(loc, TypeRange{outType},
-          ValueRange{numerator, recipResult}, ValueRange{output});
-      rewriter.replaceOp(origOp, mulOp.getResults());
-    }
+    cloneAnnotations(output, recipResult, rewriter);
+    rewriter.create<linalg::MulOp>(loc, TypeRange{},
+        ValueRange{numerator, recipResult}, ValueRange{output});
+    rewriter.eraseOp(origOp);
   }
 
   LogicalResult handleNamedDiv(linalg::DivOp op, PatternRewriter &rewriter) const {
@@ -190,29 +174,17 @@ private:
     auto outputType = cast<ShapedType>(output.getType());
 
     if (scalarVal == 1.0) {
-      if (isa<MemRefType>(output.getType())) {
-        createReciprocal(rewriter, loc, input, output);
-        rewriter.eraseOp(op);
-      } else {
-        Value recipResult = createReciprocal(rewriter, loc, input);
-        cloneAnnotations(op.getResult(0), recipResult, rewriter);
-        rewriter.replaceOp(op, recipResult);
-      }
+      createReciprocal(rewriter, loc, input, output);
+      rewriter.eraseOp(op);
     } else {
-      Value fillOut;
-      if (auto memrefType = dyn_cast<MemRefType>(output.getType()))
-        fillOut = rewriter.create<memref::AllocOp>(loc, memrefType);
-      else
-        fillOut = rewriter.create<tensor::EmptyOp>(
-            loc, outputType.getShape(), outputType.getElementType());
+      auto memrefType = cast<MemRefType>(output.getType());
+      Value fillOut = rewriter.create<memref::AllocOp>(loc, memrefType);
       auto scalarCst = rewriter.create<arith::ConstantOp>(
           loc, rewriter.getFloatAttr(
               cast<FloatType>(outputType.getElementType()), scalarVal));
-      auto fillOp = rewriter.create<linalg::FillOp>(
-          loc, isa<MemRefType>(output.getType()) ? TypeRange{} : TypeRange{outputType},
-          ValueRange{scalarCst.getResult()}, ValueRange{fillOut});
-      Value fillResult = isa<MemRefType>(output.getType()) ? fillOut : fillOp.getResult(0);
-      replaceWithReciprocalMul(op, fillResult, input, output, rewriter);
+      rewriter.create<linalg::FillOp>(
+          loc, TypeRange{}, ValueRange{scalarCst.getResult()}, ValueRange{fillOut});
+      replaceWithReciprocalMul(op, fillOut, input, output, rewriter);
     }
     return success();
   }
@@ -242,10 +214,7 @@ private:
         break;
       }
     }
-    if (isa<MemRefType>(op.getDpsInits()[0].getType()))
-      rewriter.eraseOp(op);
-    else
-      rewriter.replaceOp(op, newGeneric.getResults());
+    rewriter.eraseOp(op);
     return success();
   }
 };
@@ -259,13 +228,15 @@ static LogicalResult decomposeOneBatchMatmul(linalg::BatchMatmulOp bmmOp) {
   Value rhs = bmmOp.getInputs()[1];
   Value init = bmmOp.getOutputs()[0];
 
-  auto initType = cast<RankedTensorType>(init.getType());
+  auto initType = cast<ShapedType>(init.getType());
   if (initType.getRank() != 3 || !initType.hasStaticShape())
     return bmmOp.emitError("unsupported batch_matmul shape");
 
+  // Collect annotations on the output buffer.
   SmallVector<nkipy::LayoutOp> layoutOps;
   SmallVector<nkipy::TileOp> tileOps;
-  for (Operation *user : bmmOp.getResult(0).getUsers()) {
+  for (Operation *user : init.getUsers()) {
+    if (user == bmmOp) continue;
     if (auto lay = dyn_cast<nkipy::LayoutOp>(user)) layoutOps.push_back(lay);
     else if (auto t = dyn_cast<nkipy::TileOp>(user)) tileOps.push_back(t);
   }
@@ -280,89 +251,63 @@ static LogicalResult decomposeOneBatchMatmul(linalg::BatchMatmulOp bmmOp) {
         return t.emitError("tile_op tile_size[0] on batch_matmul must be 1");
 
   Location loc = bmmOp.getLoc();
-  int64_t B = initType.getShape()[0], M = initType.getShape()[1],
-          N = initType.getShape()[2];
+  auto shape = initType.getShape();
+  int64_t B = shape[0], M = shape[1], N = shape[2];
+  int64_t K = cast<ShapedType>(lhs.getType()).getShape()[2];
   Type elemTy = initType.getElementType();
   OpBuilder builder(bmmOp);
 
   Value c0 = builder.create<arith::ConstantIndexOp>(loc, 0);
   Value cB = builder.create<arith::ConstantIndexOp>(loc, B);
   Value c1 = builder.create<arith::ConstantIndexOp>(loc, 1);
-  auto forOp = builder.create<scf::ForOp>(loc, c0, cB, c1, ValueRange{init});
 
-  builder.setInsertionPointToStart(forOp.getBody());
+  // scf.for over batch dim, writing matmul results into init[b,:,:] in-place.
+  // ForOp with no iter_args auto-creates a yield terminator.
+  auto forOp = builder.create<scf::ForOp>(loc, c0, cB, c1);
+  builder.setInsertionPoint(forOp.getBody()->getTerminator());
   Value iv = forOp.getInductionVar();
-  Value acc = forOp.getRegionIterArg(0);
 
-  auto extract2D = [&](Value src) -> Value {
-    auto srcType = cast<RankedTensorType>(src.getType());
-    auto shape = srcType.getShape();
-    auto sliceType = RankedTensorType::get({shape[1], shape[2]}, srcType.getElementType());
-    SmallVector<OpFoldResult> offsets = {iv, builder.getIndexAttr(0), builder.getIndexAttr(0)};
+  // Rank-reducing subview: [B,d1,d2][iv,0,0][1,d1,d2] → memref<d1xd2>
+  auto subview2D = [&](Value src, int64_t d1, int64_t d2) -> Value {
+    auto srcType = cast<MemRefType>(src.getType());
+    auto resultType = MemRefType::get(
+        {d1, d2}, srcType.getElementType(),
+        StridedLayoutAttr::get(builder.getContext(),
+            ShapedType::kDynamic, {srcType.getShape()[2], 1}));
+    SmallVector<OpFoldResult> offsets = {iv, builder.getIndexAttr(0),
+                                         builder.getIndexAttr(0)};
     SmallVector<OpFoldResult> sizes = {builder.getIndexAttr(1),
-        builder.getIndexAttr(shape[1]), builder.getIndexAttr(shape[2])};
+                                       builder.getIndexAttr(d1),
+                                       builder.getIndexAttr(d2)};
     SmallVector<OpFoldResult> strides(3, builder.getIndexAttr(1));
-    return builder.create<tensor::ExtractSliceOp>(loc, sliceType, src, offsets, sizes, strides);
+    return builder.create<memref::SubViewOp>(
+        loc, resultType, src, offsets, sizes, strides);
   };
 
-  Value lhsSlice = extract2D(lhs), rhsSlice = extract2D(rhs);
-  auto mmType = RankedTensorType::get({M, N}, elemTy);
-  SmallVector<OpFoldResult> sliceOffsets = {iv, builder.getIndexAttr(0), builder.getIndexAttr(0)};
-  SmallVector<OpFoldResult> sliceSizes = {builder.getIndexAttr(1),
-      builder.getIndexAttr(M), builder.getIndexAttr(N)};
-  SmallVector<OpFoldResult> sliceStrides(3, builder.getIndexAttr(1));
+  Value lhsSlice = subview2D(lhs, M, K);
+  Value rhsSlice = subview2D(rhs, K, N);
+  Value initSlice = subview2D(init, M, N);
 
-  Value initSlice = builder.create<tensor::ExtractSliceOp>(
-      loc, mmType, acc, sliceOffsets, sliceSizes, sliceStrides);
   auto matmulOp = builder.create<linalg::MatmulOp>(
-      loc, TypeRange{mmType}, ValueRange{lhsSlice, rhsSlice}, ValueRange{initSlice});
-  Value inserted = builder.create<tensor::InsertSliceOp>(
-      loc, matmulOp.getResult(0), acc, sliceOffsets, sliceSizes, sliceStrides);
+      loc, TypeRange{}, ValueRange{lhsSlice, rhsSlice}, ValueRange{initSlice});
 
   if (auto opIdAttr = bmmOp->getAttrOfType<IntegerAttr>("nkipy.op_id"))
     matmulOp->setAttr("nkipy.op_id", opIdAttr);
-  builder.create<scf::YieldOp>(loc, ValueRange{inserted});
 
-  Value forResult = forOp.getResult(0);
-  DenseI64ArrayAttr derivedLayoutTile;
-  if (!tileOps.empty())
-    if (auto ts = tileOps.front().getLoopTileSizeAttr()) {
-      auto arr = ts.asArrayRef();
-      if (arr.size() >= 2) {
-        SmallVector<int64_t> dropK(arr.begin(), arr.end() - 1);
-        derivedLayoutTile = DenseI64ArrayAttr::get(bmmOp.getContext(), dropK);
-      }
-    }
-
-  OpBuilder::InsertionGuard guard(builder);
-  builder.setInsertionPointAfter(forOp);
-  for (auto lay : layoutOps) {
-    DenseI64ArrayAttr layoutTile = lay.getTileSizeAttr();
-    if (!layoutTile) layoutTile = derivedLayoutTile;
-    builder.create<nkipy::LayoutOp>(lay.getLoc(), forResult,
-        lay.getMemSpaceAttr(), lay.getPartitionDimAttr(), layoutTile);
-  }
+  // Transfer annotations: tile_size drops the batch dim (first entry).
   for (auto t : tileOps)
     if (auto ts = t.getLoopTileSizeAttr()) {
       auto arr = ts.asArrayRef();
       if (arr.size() >= 2) {
         SmallVector<int64_t> inner(arr.begin() + 1, arr.end());
         auto innerTileSize = DenseI64ArrayAttr::get(bmmOp.getContext(), inner);
-        OpBuilder ib(matmulOp); ib.setInsertionPointAfter(matmulOp);
-        ib.create<nkipy::TileOp>(t.getLoc(), matmulOp.getResult(0), innerTileSize);
+        builder.create<nkipy::TileOp>(t.getLoc(), initSlice, innerTileSize);
       }
     }
 
-  SmallVector<OpOperand *> usesToReplace;
-  for (OpOperand &use : bmmOp.getResult(0).getUses()) {
-    Operation *owner = use.getOwner();
-    if (!isa<nkipy::LayoutOp>(owner) && !isa<nkipy::TileOp>(owner))
-      usesToReplace.push_back(&use);
-  }
-  for (OpOperand *use : usesToReplace) use->set(forResult);
-  for (Operation *user : llvm::make_early_inc_range(bmmOp.getResult(0).getUsers()))
-    if (isa<nkipy::LayoutOp>(user) || isa<nkipy::TileOp>(user))
-      user->erase();
+  // Erase old annotations and the batch_matmul op.
+  for (auto lay : layoutOps) lay.erase();
+  for (auto t : tileOps) t.erase();
   bmmOp.erase();
   return success();
 }
@@ -419,7 +364,6 @@ struct CanonicalizeComputePass
     registry.insert<linalg::LinalgDialect>();
     registry.insert<memref::MemRefDialect>();
     registry.insert<scf::SCFDialect>();
-    registry.insert<tensor::TensorDialect>();
     registry.insert<nkipy::NkipyDialect>();
   }
 

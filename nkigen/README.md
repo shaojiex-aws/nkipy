@@ -13,6 +13,7 @@ NumPy-like front end) and `spike` (NRT runtime bindings).
 ```bash
 source scripts/setup_nki.sh   # venv + LLVM/MLIR + Neuron deps
 pip install -e .              # builds nkipy-opt & _mlir bindings via CMake
+python setup.py build_ext    
 ```
 
 Requirements: Python >= 3.10, a pre-built LLVM/MLIR, `clang-22`/`clang++-22`,
@@ -79,7 +80,7 @@ Defined in `nkigen/driver/pipeline.py` -> `apply_complete_knob_pipeline()`.
                                  │
                                  ▼
 ┌─────────────────────────────────────────────────────────────────────┐
-│  PHASE 1: CANONICALIZATION                         (C++ / nkipy-opt)│
+│  PHASE 1: CANONICALIZATION                        (C++ / nkipy-opt) │
 │  • canonicalize-compute (div→recip*mul, batch-matmul decomp,        │
 │    zero-fill removal)                                               │
 │  • infer-layout (propagate mem_space + partition_dim + tile_size)   │
