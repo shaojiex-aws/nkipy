@@ -17,7 +17,7 @@ from mlir.ir import (
     FunctionType,
     TypeAttr,
 )
-from mlir.dialects import tensor, arith, linalg
+from mlir.dialects import arith, linalg
 
 from mlir.passmanager import PassManager
 from mlir.execution_engine import ExecutionEngine
@@ -102,13 +102,29 @@ def extract_and_clean_func_from_module(mlir_module_str: str):
         ops_to_erase = []
 
         def strip_mem_space(ty):
-            """Remove memory space from a memref type (LLVM lowering requires address space 0)."""
+            """Normalize a memref type for LLVM lowering / CPU simulation.
+
+            LLVM lowering requires address space 0, so drop the memory space.
+            Also drop nkipy's custom SBUF physical layout (#nkipy.sbuf_map):
+            it is a logical->physical mapping the CPU backend can't lower, and
+            compute indexes the buffer logically, so a plain row-major buffer of
+            the same shape gives identical results. Standard strided/affine
+            layouts (from subviews) are preserved.
+            """
             if not MemRefType.isinstance(ty):
                 return ty
             mt = MemRefType(ty)
-            if mt.memory_space is None:
+            layout = mt.layout
+            # A custom (non-strided, non-affine) layout like #nkipy.sbuf_map
+            # has no LLVM lowering — replace it with the default row-major one.
+            if layout is not None and "nkipy" in str(layout):
+                layout = None
+            if mt.memory_space is None and layout is mt.layout:
                 return ty
-            return MemRefType.get(mt.shape, mt.element_type, layout=mt.layout, memory_space=None)
+            if layout is None:
+                return MemRefType.get(mt.shape, mt.element_type, memory_space=None)
+            return MemRefType.get(mt.shape, mt.element_type, layout=layout,
+                                  memory_space=None)
 
         def walk_and_clean(op):
             if op.name in ("nkipy.layout", "nkipy.tile_op", "nkipy.fuse_op", "nkipy.cache"):
@@ -151,8 +167,9 @@ def extract_and_clean_func_from_module(mlir_module_str: str):
         for op in ops_to_erase:
             op.erase()
 
-        # For CPU simulation: Zero-fill all tensor.empty and memref.alloc operations
-        _zero_fill_empty_tensors_ir(new_module)
+        # For CPU simulation: zero-fill all memref.alloc operations.
+        # memref.alloc gives uninitialized memory on CPU (possibly NaN); the
+        # device treats fresh buffers as zero, so zero-init to match.
         _zero_fill_alloc_memrefs_ir(new_module)
 
         clean_mlir = str(new_module.operation)
@@ -160,86 +177,14 @@ def extract_and_clean_func_from_module(mlir_module_str: str):
     return clean_mlir, actual_func_name
 
 
-def _zero_fill_empty_tensors_ir(module: Module):
-    """
-    Walk the IR and replace tensor.empty operations with zero-filled tensors.
-    
-    For each tensor.empty:
-    1. Create a zero constant of the appropriate element type
-    2. Create a linalg.fill operation to fill the tensor with zero
-    3. Replace all uses of tensor.empty with the filled tensor
-    
-    This ensures CPU simulation matches target ASIC behavior (empty tensors are zero).
-    """
-    # Collect all tensor.empty operations to process
-    empty_ops = []
-    
-    def collect_empty_ops(op):
-        if op.name == "tensor.empty":
-            empty_ops.append(op)
-        for region in op.regions:
-            for block in region:
-                for nested_op in block:
-                    collect_empty_ops(nested_op)
-    
-    # Walk the module to collect all tensor.empty ops
-    for op in module.body.operations:
-        collect_empty_ops(op.operation)
-    
-    # Process each tensor.empty operation
-    for empty_op in empty_ops:
-        # Get the result type (should be a tensor type)
-        result = empty_op.results[0]
-        tensor_type = result.type
-        
-        # Extract element type from the tensor type
-        try:
-            elem_type = tensor_type.element_type
-        except:
-            # If we can't get element type, skip this operation
-            continue
-        
-        # Get location from the empty op
-        loc = empty_op.location
-        
-        # Create zero constant based on element type
-        with loc, InsertionPoint.at_block_begin(empty_op.operation.block):
-            # Determine zero value based on type
-            if str(elem_type).startswith('f'):
-                # Float type - create 0.0
-                zero_const = arith.ConstantOp(elem_type, FloatAttr.get(elem_type, 0.0))
-            elif str(elem_type).startswith('i'):
-                # Integer type - create 0
-                zero_const = arith.ConstantOp(elem_type, IntegerAttr.get(elem_type, 0))
-            else:
-                # Unknown type, skip
-                continue
-        
-        # Move the insertion point right after tensor.empty  
-        with loc, InsertionPoint(empty_op):
-            new_empty = tensor.EmptyOp(list(tensor_type.shape), tensor_type.element_type, loc=loc)
-
-            fill_op = linalg.FillOp([tensor_type], [zero_const.result], [new_empty.result], loc=loc)
-
-            region = fill_op.regions[0]
-            if len(region.blocks) == 0:
-                block = region.blocks.append(elem_type, elem_type)
-                with InsertionPoint(block):
-                    linalg.YieldOp([block.arguments[0]], loc=loc)
-            
-            # Replace all uses of the original tensor.empty with linalg.fill result
-            result.replace_all_uses_with(fill_op.results[0])
-
-
 def _zero_fill_alloc_memrefs_ir(module: Module):
     """
     Walk the IR and zero-fill all memref.alloc operations.
 
-    After bufferization (e.g., --stop=5+), tensor.empty becomes memref.alloc.
-    Unlike tensor.empty (semantically undefined), memref.alloc produces truly
-    uninitialized memory on CPU which may contain garbage/NaN. This function
-    inserts linalg.fill operations right after each memref.alloc to
-    zero-initialize the buffer for correct CPU simulation.
+    memref.alloc produces uninitialized memory on CPU which may contain
+    garbage/NaN, whereas the device treats a fresh buffer as zero. This inserts
+    a linalg.fill right after each memref.alloc to zero-initialize the buffer
+    so CPU simulation matches device behavior.
     """
     # Collect all memref.alloc operations
     alloc_ops = []
@@ -322,20 +267,13 @@ class LLVMModule:
             # Get input/output types
             self.in_types, self.out_types = get_func_inputs_outputs(func)
 
-            # Run through lowering passes
+            # Run through lowering passes. The IR is memref-native (linalg on
+            # memref + memref.subview/reinterpret_cast), so no bufferization is
+            # needed; expand-strided-metadata lowers the view ops to plain
+            # base+offset+stride form before linalg is converted to loops.
             pm = PassManager.parse(
-                # "builtin.module("
-                # # used for lowering tensor.empty
-                # "empty-tensor-to-alloc-tensor,"
-                # # translate tensor dialect (virtual) to memref dialect (physical)
-                # "one-shot-bufferize{bufferize-function-boundaries},"
-                # # used for lowering memref.subview
-                # "expand-strided-metadata,"
-                # # common lowering passes
-                # "func.func(convert-linalg-to-affine-loops),lower-affine"
-                # ")"
                 "builtin.module("
-                "one-shot-bufferize{bufferize-function-boundaries=1},"
+                "expand-strided-metadata,"
                 "func.func(convert-linalg-to-loops),"
                 "func.func(lower-affine)"
                 ")"

@@ -15,7 +15,7 @@ from typing import Callable, Optional, Union
 
 import numpy as np
 from mlir import ir
-from mlir.dialects import arith, func, linalg, memref, scf, tensor
+from mlir.dialects import arith, func, linalg, memref, scf
 from mlir.dialects import math as mlir_math
 
 from nkigen._mlir.dialects import nkipy as nkipy_d
@@ -24,11 +24,7 @@ from nkigen.mlir_utils import (
     make_alloc,
     make_alloc_filled,
     make_alloc_zeros,
-    make_empty,
-    make_filled,
-    make_zeros,
     memref_of,
-    ranked_tensor_of,
     to_mlir_type,
 )
 
@@ -36,55 +32,23 @@ Scalar = Union[int, float]
 
 _MEM_SPACE_CONSTANT = 5
 
-# Backend mode: "tensor" (default, existing behavior) or "memref" (WI-1)
-_backend_mode: str = "tensor"
-
-
-def _use_memref() -> bool:
-    return _backend_mode == "memref"
-
-
-def _shaped_type(shape: tuple, elem_ty: ir.Type):
-    """Return RankedTensorType or MemRefType depending on backend mode."""
-    if _use_memref():
-        return memref_of(shape, elem_ty)
-    return ranked_tensor_of(shape, elem_ty)
 
 
 def _make_output(loc: ir.Location, shape: tuple, elem_ty: ir.Type) -> ir.Value:
-    """Allocate an uninitialized output buffer (tensor.empty or memref.alloc)."""
-    if _use_memref():
-        return make_alloc(loc, shape, elem_ty)
-    return make_empty(loc, shape, elem_ty)
+    """Allocate an uninitialized output buffer (memref.alloc)."""
+    return make_alloc(loc, shape, elem_ty)
 
 
 def _make_output_filled(loc: ir.Location, shape: tuple, elem_ty: ir.Type,
                         fill_value: Union[int, float]) -> ir.Value:
     """Allocate a filled output buffer."""
-    if _use_memref():
-        return make_alloc_filled(loc, shape, elem_ty, fill_value)
-    return make_filled(loc, shape, elem_ty, fill_value)
+    return make_alloc_filled(loc, shape, elem_ty, fill_value)
 
 
 def _make_output_zeros(loc: ir.Location, shape: tuple, elem_ty: ir.Type) -> ir.Value:
     """Allocate a zero-initialized output buffer."""
-    if _use_memref():
-        return make_alloc_zeros(loc, shape, elem_ty)
-    return make_zeros(loc, shape, elem_ty)
+    return make_alloc_zeros(loc, shape, elem_ty)
 
-
-def _linalg_result(op, outs_val: ir.Value):
-    """Return the result of a linalg op: op.results[0] for tensor, outs for memref."""
-    if _use_memref():
-        return outs_val
-    return op.results[0]
-
-
-def _linalg_result_types(shape: tuple, elem_ty: ir.Type) -> list:
-    """Return [result_type] for tensor mode, [] for memref mode."""
-    if _use_memref():
-        return []
-    return [ranked_tensor_of(shape, elem_ty)]
 
 # ---------------------------------------------------------------------------
 # Type helpers
@@ -136,7 +100,7 @@ def _is_int(elem_ty: ir.Type) -> bool:
 
 
 class TensorHandle:
-    """Opaque handle to a traced tensor value.
+    """Opaque handle to a traced buffer value.
 
     Users see ``.shape`` and ``.dtype`` only.  The internal ``_value``
     (an ``ir.Value``) is never accessed from nkipy.
@@ -185,10 +149,7 @@ class LoopIndexHandle:
 class IRBuilder:
     """Manages MLIR context, module, and function lifecycle."""
 
-    def __init__(self, source_file: str = "nkipy_kernel", backend: str = "tensor"):
-        global _backend_mode
-        _backend_mode = backend
-
+    def __init__(self, source_file: str = "nkipy_kernel"):
         self._ctx = ir.Context()
         nkipy_d.register_dialect(self._ctx)
         self._ctx.__enter__()
@@ -201,7 +162,6 @@ class IRBuilder:
         self._func_op = None
         self._entry_block = None
         self._ip = None
-        self._backend = backend
 
     @property
     def context(self):
@@ -218,7 +178,7 @@ class IRBuilder:
         arg_dtypes: list,
     ) -> list[TensorHandle]:
         arg_types = [
-            _shaped_type(shape, _np_to_mlir(dtype))
+            memref_of(shape, _np_to_mlir(dtype))
             for shape, dtype in zip(arg_shapes, arg_dtypes)
         ]
         fn_type = ir.FunctionType.get(arg_types, [arg_types[0]])
@@ -257,11 +217,11 @@ class IRBuilder:
         with ir.InsertionPoint(self._module.body):
             for custom in custom_ops:
                 input_types = [
-                    _shaped_type(s, _np_to_mlir(d))
+                    memref_of(s, _np_to_mlir(d))
                     for s, d in zip(custom.input_shapes, custom.input_dtypes)
                 ]
                 result_types = [
-                    _shaped_type(s, _np_to_mlir(d))
+                    memref_of(s, _np_to_mlir(d))
                     for s, d in zip(custom.output_shapes, custom.output_dtypes)
                 ]
                 fn_type = ir.FunctionType.get(input_types, result_types)
@@ -286,13 +246,11 @@ class IRBuilder:
         return str(self._module)
 
     def cleanup(self):
-        global _backend_mode
         if self._ip is not None:
             self._ip.__exit__(None, None, None)
             self._ip = None
         self._file_loc.__exit__(None, None, None)
         self._ctx.__exit__(None, None, None)
-        _backend_mode = "tensor"
 
 
 # ---------------------------------------------------------------------------
@@ -342,7 +300,7 @@ def _cast_to_float(val, shape, elem_ty, loc):
     nd = len(shape)
     imap = ir.AffineMap.get_identity(nd)
     g = linalg.GenericOp(
-        _linalg_result_types(shape, out_elem),
+        [],
         [val],
         [out],
         ir.ArrayAttr.get([ir.AffineMapAttr.get(imap)] * 2),
@@ -353,7 +311,7 @@ def _cast_to_float(val, shape, elem_ty, loc):
     with ir.InsertionPoint(blk):
         r = arith.SIToFPOp(out_elem, blk.arguments[0], loc=loc).result
         linalg.YieldOp([r], loc=loc)
-    return _linalg_result(g, out), shape, out_elem
+    return out, shape, out_elem
 
 
 # ---------------------------------------------------------------------------
@@ -362,34 +320,34 @@ def _cast_to_float(val, shape, elem_ty, loc):
 
 
 def _scalar_binary(
-    tensor_val,
-    tensor_shape,
-    tensor_elem,
+    buf_val,
+    buf_shape,
+    buf_elem,
     scalar_val,
     arith_fn,
     loc,
     scalar_is_lhs=False,
 ):
-    out = _make_output(loc, tensor_shape, tensor_elem)
-    nd = len(tensor_shape)
+    out = _make_output(loc, buf_shape, buf_elem)
+    nd = len(buf_shape)
     imap = ir.AffineMap.get_identity(nd)
     g = linalg.GenericOp(
-        _linalg_result_types(tensor_shape, tensor_elem),
-        [tensor_val],
+        [],
+        [buf_val],
         [out],
         ir.ArrayAttr.get([ir.AffineMapAttr.get(imap)] * 2),
         ir.ArrayAttr.get([ir.Attribute.parse("#linalg.iterator_type<parallel>")] * nd),
         loc=loc,
     )
-    blk = g.regions[0].blocks.append(tensor_elem, tensor_elem)
+    blk = g.regions[0].blocks.append(buf_elem, buf_elem)
     with ir.InsertionPoint(blk):
-        cst = const_scalar(scalar_val, tensor_elem, loc)
+        cst = const_scalar(scalar_val, buf_elem, loc)
         if scalar_is_lhs:
             r = arith_fn(cst, blk.arguments[0])
         else:
             r = arith_fn(blk.arguments[0], cst)
         linalg.YieldOp([r], loc=loc)
-    return _linalg_result(g, out), tensor_shape, tensor_elem
+    return out, buf_shape, buf_elem
 
 
 def _broadcast_binary(a_val, a_shape, a_elem, b_val, b_shape, b_elem, body_fn, loc):
@@ -402,7 +360,7 @@ def _broadcast_binary(a_val, a_shape, a_elem, b_val, b_shape, b_elem, body_fn, l
     mb = _broadcast_indexing_map(b_shape, out_shape)
     mo = ir.AffineMap.get_identity(len(out_shape))
     g = linalg.GenericOp(
-        _linalg_result_types(out_shape, elem),
+        [],
         [a_val, b_val],
         [out],
         ir.ArrayAttr.get(
@@ -421,7 +379,7 @@ def _broadcast_binary(a_val, a_shape, a_elem, b_val, b_shape, b_elem, body_fn, l
     with ir.InsertionPoint(blk):
         r = body_fn(blk.arguments[0], blk.arguments[1])
         linalg.YieldOp([r], loc=loc)
-    return _linalg_result(g, out), out_shape, elem
+    return out, out_shape, elem
 
 
 # ---------------------------------------------------------------------------
@@ -432,12 +390,12 @@ def _broadcast_binary(a_val, a_shape, a_elem, b_val, b_shape, b_elem, body_fn, l
 def _unary_named(x: TensorHandle, named_cls, body_fn, loc) -> TensorHandle:
     val, shape, elem = x._value, x.shape, x._elem_ty
     out = _make_output(loc, shape, elem)
-    op = named_cls(_linalg_result_types(shape, elem), [val], [out], loc=loc)
+    op = named_cls([], [val], [out], loc=loc)
     blk = op.regions[0].blocks.append(elem, elem)
     with ir.InsertionPoint(blk):
         r = body_fn(blk.arguments[0], elem, loc)
         linalg.YieldOp([r], loc=loc)
-    return _make_handle(_linalg_result(op, out), shape, elem)
+    return _make_handle(out, shape, elem)
 
 
 def _unary_generic(x: TensorHandle, body_fn, loc) -> TensorHandle:
@@ -446,7 +404,7 @@ def _unary_generic(x: TensorHandle, body_fn, loc) -> TensorHandle:
     nd = len(shape)
     imap = ir.AffineMap.get_identity(nd)
     g = linalg.GenericOp(
-        _linalg_result_types(shape, elem),
+        [],
         [val],
         [out],
         ir.ArrayAttr.get([ir.AffineMapAttr.get(imap)] * 2),
@@ -457,7 +415,7 @@ def _unary_generic(x: TensorHandle, body_fn, loc) -> TensorHandle:
     with ir.InsertionPoint(blk):
         r = body_fn(blk.arguments[0], elem, loc)
         linalg.YieldOp([r], loc=loc)
-    return _make_handle(_linalg_result(g, out), shape, elem)
+    return _make_handle(out, shape, elem)
 
 
 # ---------------------------------------------------------------------------
@@ -500,13 +458,13 @@ def _binary_dispatch(x, y, float_cls, int_cls, named_cls, loc):
 
     elem = xe
     out = _make_output(loc, xs, elem)
-    nop = named_cls(_linalg_result_types(xs, elem), [xv, yv], [out], loc=loc)
+    nop = named_cls([], [xv, yv], [out], loc=loc)
     blk = nop.regions[0].blocks.append(elem, elem, elem)
     with ir.InsertionPoint(blk):
         fn = float_op if _is_float(elem) else int_op
         r = fn(blk.arguments[0], blk.arguments[1])
         linalg.YieldOp([r], loc=loc)
-    return _make_handle(_linalg_result(nop, out), xs, elem)
+    return _make_handle(out, xs, elem)
 
 
 # ---------------------------------------------------------------------------
@@ -518,71 +476,17 @@ def _emit_reshape(loc, value, old_shape, new_shape, elem_ty):
     if tuple(old_shape) == tuple(new_shape):
         return value
 
-    if _use_memref():
-        dst_ty = memref_of(tuple(new_shape), elem_ty)
-        strides = [1] * len(new_shape)
-        for i in range(len(new_shape) - 2, -1, -1):
-            strides[i] = strides[i + 1] * new_shape[i + 1]
-        return memref.ReinterpretCastOp(
-            dst_ty, value, [], [], [],
-            static_offsets=[0],
-            static_sizes=list(new_shape),
-            static_strides=strides,
-            loc=loc,
-        ).result
-
-    dst_ty = ranked_tensor_of(tuple(new_shape), elem_ty)
-
-    def _reassoc(from_shape, to_shape):
-        reassoc = []
-        to_idx = 0
-        to_rank = len(to_shape)
-        for from_dim in from_shape:
-            group = []
-            product = 1
-            while to_idx < to_rank and product < from_dim:
-                product *= to_shape[to_idx]
-                group.append(to_idx)
-                to_idx += 1
-            if from_dim == 1 and not group:
-                if to_idx < to_rank and to_shape[to_idx] == 1:
-                    group.append(to_idx)
-                    to_idx += 1
-                    product = 1
-                else:
-                    return None
-            if product != from_dim or not group:
-                return None
-            reassoc.append(group)
-        while to_idx < to_rank and to_shape[to_idx] == 1:
-            reassoc[-1].append(to_idx)
-            to_idx += 1
-        return reassoc if to_idx == to_rank else None
-
-    if len(old_shape) >= len(new_shape):
-        r = _reassoc(new_shape, old_shape)
-        if r is not None:
-            return tensor.CollapseShapeOp(dst_ty, value, r, loc=loc).result
-    if len(old_shape) <= len(new_shape):
-        r = _reassoc(old_shape, new_shape)
-        if r is not None:
-            return tensor.ExpandShapeOp(
-                dst_ty,
-                value,
-                r,
-                output_shape=[],
-                static_output_shape=list(new_shape),
-                loc=loc,
-            ).result
-
-    idx_ty = ir.IndexType.get()
-    shape_ty = ir.RankedTensorType.get([len(new_shape)], idx_ty)
-    shape_vals = [
-        arith.ConstantOp(idx_ty, ir.IntegerAttr.get(idx_ty, d), loc=loc).result
-        for d in new_shape
-    ]
-    fe = tensor.FromElementsOp(shape_ty, shape_vals, loc=loc)
-    return tensor.ReshapeOp(dst_ty, value, fe.result, loc=loc).result
+    dst_ty = memref_of(tuple(new_shape), elem_ty)
+    strides = [1] * len(new_shape)
+    for i in range(len(new_shape) - 2, -1, -1):
+        strides[i] = strides[i + 1] * new_shape[i + 1]
+    return memref.ReinterpretCastOp(
+        dst_ty, value, [], [], [],
+        static_offsets=[0],
+        static_sizes=list(new_shape),
+        static_strides=strides,
+        loc=loc,
+    ).result
 
 
 # ---------------------------------------------------------------------------
@@ -907,9 +811,9 @@ def matmul(x: TensorHandle, y: TensorHandle, loc=None) -> TensorHandle:
     if len(xs) == 2 and len(ys) == 2:
         out_shape = (m, n)
         out_val = _make_output_zeros(loc, out_shape, xe)
-        mm = linalg.MatmulOp(_linalg_result_types(out_shape, xe), [xv, yv], [out_val], loc=loc)
+        mm = linalg.MatmulOp([], [xv, yv], [out_val], loc=loc)
         _matmul_body(mm, xe, loc)
-        return _make_handle(_linalg_result(mm, out_val), out_shape, xe)
+        return _make_handle(out_val, out_shape, xe)
 
     ba = xs[:-2]
     bb = ys[:-2]
@@ -930,11 +834,11 @@ def matmul(x: TensorHandle, y: TensorHandle, loc=None) -> TensorHandle:
     bv = yv if ys == b3 else _emit_reshape(loc, yv, ys, b3, ye)
 
     out_val = _make_output_zeros(loc, o3, xe)
-    mm = linalg.BatchMatmulOp(_linalg_result_types(o3, xe), [av, bv], [out_val], loc=loc)
+    mm = linalg.BatchMatmulOp([], [av, bv], [out_val], loc=loc)
     _matmul_body(mm, xe, loc)
 
     final = bs + (m, n)
-    rv = _linalg_result(mm, out_val)
+    rv = out_val
     if final != o3:
         rv = _emit_reshape(loc, rv, o3, final, xe)
     return _make_handle(rv, final, xe)
@@ -955,11 +859,11 @@ def transpose(x: TensorHandle, axes=None, loc=None) -> TensorHandle:
         perm = [ax if ax >= 0 else ax + rank for ax in axes]
     new_shape = tuple(shape[p] for p in perm)
     out = _make_output(loc, new_shape, elem)
-    top = linalg.TransposeOp(_linalg_result_types(new_shape, elem), val, out, perm, loc=loc)
+    top = linalg.TransposeOp([], val, out, perm, loc=loc)
     blk = top.regions[0].blocks.append(elem, elem)
     with ir.InsertionPoint(blk):
         linalg.YieldOp([blk.arguments[0]], loc=loc)
-    return _make_handle(_linalg_result(top, out), new_shape, elem)
+    return _make_handle(out, new_shape, elem)
 
 
 # ---------------------------------------------------------------------------
@@ -1037,7 +941,7 @@ def _reduce(x: TensorHandle, axis, keepdims, init_fn, body_fn, loc=None) -> Tens
     omap = ir.AffineMap.get(rank, 0, out_exprs)
 
     g = linalg.GenericOp(
-        _linalg_result_types(out_shape, elem),
+        [],
         [val],
         [init],
         ir.ArrayAttr.get([ir.AffineMapAttr.get(imap), ir.AffineMapAttr.get(omap)]),
@@ -1055,7 +959,7 @@ def _reduce(x: TensorHandle, axis, keepdims, init_fn, body_fn, loc=None) -> Tens
     with ir.InsertionPoint(blk):
         r = body_fn(blk.arguments[0], blk.arguments[1], elem, loc)
         linalg.YieldOp([r], loc=loc)
-    return _make_handle(_linalg_result(g, init), out_shape, elem)
+    return _make_handle(init, out_shape, elem)
 
 
 def reduce_sum(x: TensorHandle, axis=None, keepdims=False, loc=None) -> TensorHandle:
@@ -1158,7 +1062,7 @@ def empty(shape: tuple, dtype, loc=None) -> TensorHandle:
 
 
 def constant_tensor(val: Scalar, shape: tuple, elem_ty, loc=None) -> TensorHandle:
-    """Create a filled tensor/memref annotated with CONSTANT memory space."""
+    """Create a filled memref annotated with CONSTANT memory space."""
     loc = loc or _loc()
     if not isinstance(elem_ty, ir.Type):
         elem_ty = _np_to_mlir(elem_ty)
@@ -1194,41 +1098,22 @@ def concatenate(arrays: list[TensorHandle], axis: int = 0, loc=None) -> TensorHa
 
     output = _make_output(loc, out_shape, elem)
     offset = 0
-    if _use_memref():
-        src_strides = _get_memref_strides(ir.MemRefType(output.type))
-        for a in arrays:
-            offsets = [0] * len(out_shape)
-            offsets[axis] = offset
-            sizes = list(a.shape)
-            strides_list = [1] * len(out_shape)
-            sv_offset = sum(o * s for o, s in zip(offsets, src_strides))
-            layout = ir.StridedLayoutAttr.get(sv_offset, src_strides)
-            sv_type = ir.MemRefType.get(sizes, elem, layout)
-            sv = memref.SubViewOp(
-                sv_type, output, [], [], [],
-                offsets, sizes, strides_list,
-                loc=loc,
-            ).result
-            memref.CopyOp(a._value, sv, loc=loc)
-            offset += a.shape[axis]
-    else:
-        for a in arrays:
-            offsets = [0] * len(out_shape)
-            offsets[axis] = offset
-            sizes = list(a.shape)
-            strides = [1] * len(out_shape)
-            output = tensor.InsertSliceOp(
-                a._value,
-                output,
-                [],
-                [],
-                [],
-                offsets,
-                sizes,
-                strides,
-                loc=loc,
-            ).result
-            offset += a.shape[axis]
+    src_strides = _get_memref_strides(ir.MemRefType(output.type))
+    for a in arrays:
+        offsets = [0] * len(out_shape)
+        offsets[axis] = offset
+        sizes = list(a.shape)
+        strides_list = [1] * len(out_shape)
+        sv_offset = sum(o * s for o, s in zip(offsets, src_strides))
+        layout = ir.StridedLayoutAttr.get(sv_offset, src_strides)
+        sv_type = ir.MemRefType.get(sizes, elem, layout)
+        sv = memref.SubViewOp(
+            sv_type, output, [], [], [],
+            offsets, sizes, strides_list,
+            loc=loc,
+        ).result
+        memref.CopyOp(a._value, sv, loc=loc)
+        offset += a.shape[axis]
 
     return _make_handle(output, out_shape, elem)
 
@@ -1248,7 +1133,7 @@ def broadcast_to(x: TensorHandle, shape: tuple, loc=None) -> TensorHandle:
     im = _broadcast_indexing_map(xs, ts)
     om = ir.AffineMap.get_identity(len(ts))
     g = linalg.GenericOp(
-        _linalg_result_types(ts, elem),
+        [],
         [val],
         [out],
         ir.ArrayAttr.get([ir.AffineMapAttr.get(im), ir.AffineMapAttr.get(om)]),
@@ -1260,7 +1145,7 @@ def broadcast_to(x: TensorHandle, shape: tuple, loc=None) -> TensorHandle:
     blk = g.regions[0].blocks.append(elem, elem)
     with ir.InsertionPoint(blk):
         linalg.YieldOp([blk.arguments[0]], loc=loc)
-    return _make_handle(_linalg_result(g, out), ts, elem)
+    return _make_handle(out, ts, elem)
 
 
 # ---------------------------------------------------------------------------
@@ -1319,7 +1204,7 @@ def where(condition, x, y, loc=None) -> TensorHandle:
     all_maps.append(ir.AffineMapAttr.get(om))
 
     g = linalg.GenericOp(
-        _linalg_result_types(out_shape, out_elem),
+        [],
         inputs,
         [out],
         ir.ArrayAttr.get(all_maps),
@@ -1344,7 +1229,7 @@ def where(condition, x, y, loc=None) -> TensorHandle:
         r = arith.AddFOp(t1, t2, loc=loc).result
         linalg.YieldOp([r], loc=loc)
 
-    return _make_handle(_linalg_result(g, out), tuple(out_shape), out_elem)
+    return _make_handle(out, tuple(out_shape), out_elem)
 
 
 # ---------------------------------------------------------------------------
@@ -1361,7 +1246,7 @@ def take(a: TensorHandle, indices: TensorHandle, axis: int = 0, loc=None) -> Ten
         raise NotImplementedError("Only axis=0 gather is currently supported")
 
     out_shape = i_shape + a_shape[1:]
-    rt = _shaped_type(out_shape, a_elem)
+    rt = memref_of(out_shape, a_elem)
     output = _make_output(loc, out_shape, a_elem)
 
     gather = nkipy_d.GatherOp(rt, av, iv, output, loc=loc)
@@ -1382,7 +1267,7 @@ def take(a: TensorHandle, indices: TensorHandle, axis: int = 0, loc=None) -> Ten
         om = ir.AffineMap.get_identity(rank)
 
         g = linalg.GenericOp(
-            _linalg_result_types(out_shape, a_elem),
+            [],
             [idx_arg],
             [out2],
             ir.ArrayAttr.get([ir.AffineMapAttr.get(im), ir.AffineMapAttr.get(om)]),
@@ -1400,13 +1285,10 @@ def take(a: TensorHandle, indices: TensorHandle, axis: int = 0, loc=None) -> Ten
             ext_idx = [index_val]
             for di in range(1, len(a_shape)):
                 ext_idx.append(linalg.IndexOp(irank + di - 1, loc=loc).result)
-            if _use_memref():
-                extracted = memref.LoadOp(src_arg, ext_idx, loc=loc).result
-            else:
-                extracted = tensor.ExtractOp(src_arg, ext_idx, loc=loc).result
+            extracted = memref.LoadOp(src_arg, ext_idx, loc=loc).result
             linalg.YieldOp([extracted], loc=loc)
 
-        nkipy_d.YieldOp(values=[_linalg_result(g, out2)], loc=loc)
+        nkipy_d.YieldOp(values=[out2], loc=loc)
 
     return _make_handle(gather.result, tuple(out_shape), a_elem)
 
@@ -1428,7 +1310,7 @@ def astype(x: TensorHandle, dtype, loc=None) -> TensorHandle:
     nd = len(shape)
     imap = ir.AffineMap.get_identity(nd)
     g = linalg.GenericOp(
-        _linalg_result_types(shape, dst_elem),
+        [],
         [val],
         [out],
         ir.ArrayAttr.get([ir.AffineMapAttr.get(imap)] * 2),
@@ -1459,7 +1341,7 @@ def astype(x: TensorHandle, dtype, loc=None) -> TensorHandle:
             else:
                 oe = in_e
         linalg.YieldOp([oe], loc=loc)
-    return _make_handle(_linalg_result(g, out), shape, dst_elem)
+    return _make_handle(out, shape, dst_elem)
 
 
 # ---------------------------------------------------------------------------
@@ -1482,33 +1364,18 @@ def static_slice(
     for s, l, st in zip(start_indices, limit_indices, strides):
         slice_shape.append((l - s + st - 1) // st)
 
-    if _use_memref():
-        if squeeze_dims:
-            out_shape = tuple(s for i, s in enumerate(slice_shape) if i not in squeeze_dims)
-        else:
-            out_shape = tuple(slice_shape)
-        src_strides = _get_memref_strides(val.type)
-        out_strides = [src_strides[i] * strides[i]
-                       for i in range(len(shape)) if not squeeze_dims or i not in squeeze_dims]
-        offset = sum(s * st for s, st in zip(start_indices, src_strides))
-        layout = ir.StridedLayoutAttr.get(offset, out_strides)
-        result_type = ir.MemRefType.get(list(out_shape), elem, layout)
-        sliced = memref.SubViewOp(
-            result_type,
-            val,
-            [],
-            [],
-            [],
-            start_indices,
-            slice_shape,
-            strides,
-            loc=loc,
-        ).result
-        return _make_handle(sliced, out_shape, elem)
-
-    rt = ranked_tensor_of(tuple(slice_shape), elem)
-    sliced = tensor.ExtractSliceOp(
-        rt,
+    if squeeze_dims:
+        out_shape = tuple(s for i, s in enumerate(slice_shape) if i not in squeeze_dims)
+    else:
+        out_shape = tuple(slice_shape)
+    src_strides = _get_memref_strides(val.type)
+    out_strides = [src_strides[i] * strides[i]
+                   for i in range(len(shape)) if not squeeze_dims or i not in squeeze_dims]
+    offset = sum(s * st for s, st in zip(start_indices, src_strides))
+    layout = ir.StridedLayoutAttr.get(offset, out_strides)
+    result_type = ir.MemRefType.get(list(out_shape), elem, layout)
+    sliced = memref.SubViewOp(
+        result_type,
         val,
         [],
         [],
@@ -1518,14 +1385,7 @@ def static_slice(
         strides,
         loc=loc,
     ).result
-
-    if squeeze_dims:
-        out_shape = tuple(s for i, s in enumerate(slice_shape) if i not in squeeze_dims)
-        if out_shape != tuple(slice_shape):
-            sliced = _emit_reshape(loc, sliced, tuple(slice_shape), out_shape, elem)
-            slice_shape = list(out_shape)
-
-    return _make_handle(sliced, tuple(slice_shape), elem)
+    return _make_handle(sliced, out_shape, elem)
 
 
 def _parse_dynamic_indices(indices, shape, loc):
@@ -1602,34 +1462,19 @@ def dynamic_slice(x: TensorHandle, indices, loc=None) -> TensorHandle:
         if size != DYNAMIC:
             result_shape.append(size // stride if stride > 1 else size)
 
-    if _use_memref():
-        src_strides = _get_memref_strides(ir.MemRefType(val.type))
-        has_dynamic_offset = any(
-            o == ir.ShapedType.get_dynamic_size() for o in static_offsets
-        )
-        sv_offset = (ir.ShapedType.get_dynamic_size() if has_dynamic_offset
-                     else sum(o * s for o, s in zip(static_offsets, src_strides)))
-        result_strides = [src_strides[i] * static_strides[i]
-                          for i, idx in enumerate(full_indices)
-                          if not (isinstance(idx, LoopIndexHandle) or isinstance(idx, int))]
-        layout = ir.StridedLayoutAttr.get(sv_offset, result_strides)
-        result_type = ir.MemRefType.get(list(result_shape), elem, layout)
-        sv = memref.SubViewOp(
-            result_type,
-            val,
-            dynamic_offsets,
-            [],
-            [],
-            static_offsets,
-            static_sizes,
-            static_strides,
-            loc=loc,
-        )
-        return _make_handle(sv.result, tuple(result_shape), elem)
-
-    rt = ranked_tensor_of(tuple(result_shape), elem)
-    extract = tensor.ExtractSliceOp(
-        rt,
+    src_strides = _get_memref_strides(ir.MemRefType(val.type))
+    has_dynamic_offset = any(
+        o == ir.ShapedType.get_dynamic_size() for o in static_offsets
+    )
+    sv_offset = (ir.ShapedType.get_dynamic_size() if has_dynamic_offset
+                 else sum(o * s for o, s in zip(static_offsets, src_strides)))
+    result_strides = [src_strides[i] * static_strides[i]
+                      for i, idx in enumerate(full_indices)
+                      if not (isinstance(idx, LoopIndexHandle) or isinstance(idx, int))]
+    layout = ir.StridedLayoutAttr.get(sv_offset, result_strides)
+    result_type = ir.MemRefType.get(list(result_shape), elem, layout)
+    sv = memref.SubViewOp(
+        result_type,
         val,
         dynamic_offsets,
         [],
@@ -1639,7 +1484,7 @@ def dynamic_slice(x: TensorHandle, indices, loc=None) -> TensorHandle:
         static_strides,
         loc=loc,
     )
-    return _make_handle(extract.result, tuple(result_shape), elem)
+    return _make_handle(sv.result, tuple(result_shape), elem)
 
 
 # ---------------------------------------------------------------------------
@@ -1656,25 +1501,11 @@ def static_insert_slice(
     loc=None,
 ) -> TensorHandle:
     loc = loc or _loc()
-    if _use_memref():
-        sv = memref.SubViewOp(
-            dest._value, offsets, sizes, strides, loc=loc,
-        ).result
-        memref.CopyOp(src._value, sv, loc=loc)
-        return dest
-
-    new_tensor = tensor.InsertSliceOp(
-        src._value,
-        dest._value,
-        [],
-        [],
-        [],
-        offsets,
-        sizes,
-        strides,
-        loc=loc,
+    sv = memref.SubViewOp(
+        dest._value, offsets, sizes, strides, loc=loc,
     ).result
-    return _make_handle(new_tensor, dest.shape, dest._elem_ty)
+    memref.CopyOp(src._value, sv, loc=loc)
+    return dest
 
 
 def dynamic_insert_slice(
@@ -1688,27 +1519,13 @@ def dynamic_insert_slice(
     static_offsets, static_sizes, static_strides, dynamic_offsets, _ = \
         _parse_dynamic_indices(indices, dest.shape, loc)
 
-    if _use_memref():
-        sv = memref.SubViewOp(
-            dest._value, dynamic_offsets, [], [],
-            static_offsets, static_sizes, static_strides,
-            loc=loc,
-        ).result
-        memref.CopyOp(src._value, sv, loc=loc)
-        return dest
-
-    new_tensor = tensor.InsertSliceOp(
-        src._value,
-        dest._value,
-        dynamic_offsets,
-        [],
-        [],
-        static_offsets,
-        static_sizes,
-        static_strides,
+    sv = memref.SubViewOp(
+        dest._value, dynamic_offsets, [], [],
+        static_offsets, static_sizes, static_strides,
         loc=loc,
     ).result
-    return _make_handle(new_tensor, dest.shape, dest._elem_ty)
+    memref.CopyOp(src._value, sv, loc=loc)
+    return dest
 
 
 # ---------------------------------------------------------------------------
@@ -1746,11 +1563,10 @@ def fori_loop(
     body_fn: Callable,
     init_handles: list[TensorHandle],
 ) -> list[TensorHandle]:
-    """Build an ``scf.for`` loop with loop-carried accumulators.
+    """Build an ``scf.for`` loop that mutates memref accumulators in place.
 
-    In tensor mode: uses scf.for iter_args (functional loop-carry).
-    In memref mode: no iter_args needed since memrefs are mutable. The loop
-    body mutates buffers in-place; init_handles are returned as-is.
+    Memrefs are mutable, so the loop needs no iter_args: the body writes into
+    the ``init_handles`` buffers directly and they are returned as-is.
 
     Args:
         lower: inclusive lower bound
@@ -1767,88 +1583,26 @@ def fori_loop(
     ub = arith.ConstantOp(i32, upper, loc=loc)
     step = arith.ConstantOp(i32, 1, loc=loc)
 
-    if _use_memref():
-        # Memref mode: no iter_args, loop body mutates in-place.
-        loop_op = scf.ForOp(lb.result, ub.result, step.result, [], loc=loc)
-        loop_block = loop_op.body
-        loop_idx_value = loop_block.arguments[0]
-        loop_idx = LoopIndexHandle(loop_idx_value)
-
-        with ir.InsertionPoint(loop_block):
-            results = body_fn(loop_idx, init_handles)
-            if results is not None:
-                if not isinstance(results, list):
-                    results = [results]
-                for res, acc in zip(results, init_handles):
-                    if res._value != acc._value:
-                        memref.CopyOp(res._value, acc._value, loc=loc)
-            scf.YieldOp([], loc=loc)
-
-        return init_handles
-
-    # Tensor mode: loop-carried iter_args.
-    loop_op = scf.ForOp(
-        lb.result,
-        ub.result,
-        step.result,
-        [h._value for h in init_handles],
-        loc=loc,
-    )
-
+    loop_op = scf.ForOp(lb.result, ub.result, step.result, [], loc=loc)
     loop_block = loop_op.body
     loop_idx_value = loop_block.arguments[0]
-    loop_acc_values = loop_block.arguments[1:]
-
     loop_idx = LoopIndexHandle(loop_idx_value)
 
-    acc_handles = [
-        TensorHandle(av, ih.shape, ih.dtype, ih._elem_ty)
-        for av, ih in zip(loop_acc_values, init_handles)
-    ]
-
     with ir.InsertionPoint(loop_block):
-        results = body_fn(loop_idx, acc_handles)
-        result_values = [r._value for r in results]
+        results = body_fn(loop_idx, init_handles)
+        if results is not None:
+            if not isinstance(results, list):
+                results = [results]
+            for res, acc in zip(results, init_handles):
+                if res._value != acc._value:
+                    memref.CopyOp(res._value, acc._value, loc=loc)
+        scf.YieldOp([], loc=loc)
 
-        # Rewire linalg ops to use loop accumulators as their output operand.
-        # Without this, bufferization can't see the loop-carried dependence
-        # and may allocate a fresh buffer instead of updating in place.
-        for rv, ia in zip(result_values, loop_acc_values):
-            producer = rv.owner
-            if not producer.name.startswith("linalg."):
-                continue
-            if len(list(producer.results)) != 1:
-                continue
-            operands = list(producer.operands)
-            if not operands or operands[-1] == ia:
-                continue
-            if len(producer.regions) == 1 and len(producer.regions[0].blocks) == 1:
-                bb = producer.regions[0].blocks[0]
-                ba = list(bb.arguments)
-                if ba:
-                    oe = ba[-1]
-                    used = any(
-                        op_arg == oe for op in bb.operations for op_arg in op.operands
-                    )
-                    if used:
-                        continue
-            producer.operands[-1] = ia
-
-        scf.YieldOp(result_values, loc=loc)
-
-    return [
-        TensorHandle(
-            loop_op.results[i],
-            init_handles[i].shape,
-            init_handles[i].dtype,
-            init_handles[i]._elem_ty,
-        )
-        for i in range(len(init_handles))
-    ]
+    return init_handles
 
 
 def lift_scalar_to_tensor(val, dtype_hint: str = "float") -> TensorHandle:
-    """Lift a Python scalar to a 0-d tensor/memref handle."""
+    """Lift a Python scalar to a 0-d memref handle."""
     loc = _loc()
     if dtype_hint == "float" or isinstance(val, float):
         elem = ir.F32Type.get()

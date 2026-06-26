@@ -1,7 +1,7 @@
 """
 Tests for the memref-native backend (WI-1 through WI-6).
 
-Verifies @trace(backend="memref") produces correct linalg-on-memref IR,
+Verifies @trace produces correct linalg-on-memref IR,
 tiling + promotion + fusion work, and full codegen pipeline succeeds.
 """
 
@@ -13,7 +13,7 @@ from harness import run_kernel_test, Mode
 
 
 def _make_kernel(specs, fn):
-    @trace(backend="memref", input_specs=specs)
+    @trace(input_specs=specs)
     def kernel(*args):
         a = args[0]
         b = args[1] if len(args) > 1 else None
@@ -113,7 +113,7 @@ TILING_CASES = [
 
 @pytest.mark.parametrize("specs,fn,tile_size,expected_ir", TILING_CASES)
 def test_memref_tiling(specs, fn, tile_size, expected_ir):
-    @trace(backend="memref", input_specs=specs)
+    @trace(input_specs=specs)
     def kernel(*args):
         a = args[0]
         b = args[1] if len(args) > 1 else None
@@ -135,7 +135,7 @@ def test_memref_tiling(specs, fn, tile_size, expected_ir):
 
 
 def test_memref_fusion():
-    @trace(backend="memref", input_specs=[
+    @trace(input_specs=[
         ((256, 256), "f32"), ((256, 256), "f32"),
         ((256, 256), "f32"), ((256, 256), "f32"),
     ])
@@ -177,7 +177,7 @@ E2E_CASES = [
 
 @pytest.mark.parametrize("specs,fn,tile_size", E2E_CASES)
 def test_memref_e2e(specs, fn, tile_size):
-    @trace(backend="memref", input_specs=specs)
+    @trace(input_specs=specs)
     def kernel(*args):
         a = args[0]
         b = args[1] if len(args) > 1 else None

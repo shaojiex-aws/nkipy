@@ -31,7 +31,7 @@
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/Linalg/IR/Linalg.h"
-#include "mlir/Dialect/Tensor/IR/Tensor.h"
+#include "mlir/Dialect/MemRef/IR/MemRef.h"
 #include "mlir/IR/Builders.h"
 #include "mlir/IR/IRMapping.h"
 #include "llvm/ADT/DenseSet.h"
@@ -45,6 +45,32 @@ namespace mlir {
 namespace nkipy {
 
 namespace {
+
+//===----------------------------------------------------------------------===//
+// Memref helpers
+//===----------------------------------------------------------------------===//
+
+/// Linalg ops on memref write in place (zero results). The value that carries
+/// the op's "output" is its DPS init operand (the buffer it writes).
+static Value getLinalgOutputValue(linalg::LinalgOp op) {
+  SmallVector<Value> inits(op.getDpsInits());
+  return inits.empty() ? Value() : inits[0];
+}
+
+/// Find the linalg op that writes `val`: the user that has `val` as a DPS init
+/// operand. (For memref IR the defining op of `val` is a memref.alloc, not the
+/// linalg op that produces the data.)
+static linalg::LinalgOp findProducerLinalgOp(Value val) {
+  for (Operation *user : val.getUsers()) {
+    auto linalgOp = dyn_cast<linalg::LinalgOp>(user);
+    if (!linalgOp)
+      continue;
+    for (Value init : linalgOp.getDpsInits())
+      if (init == val)
+        return linalgOp;
+  }
+  return nullptr;
+}
 
 //===----------------------------------------------------------------------===//
 // Helpers
@@ -205,7 +231,7 @@ struct NkipyCanonicalizePartitionDimPass
   void getDependentDialects(DialectRegistry &registry) const override {
     registry.insert<arith::ArithDialect>();
     registry.insert<linalg::LinalgDialect>();
-    registry.insert<tensor::TensorDialect>();
+    registry.insert<memref::MemRefDialect>();
     registry.insert<nkipy::NkipyDialect>();
   }
 
@@ -256,66 +282,95 @@ struct NkipyCanonicalizePartitionDimPass
     while (!bfsQueue.empty()) {
       Operation *op = bfsQueue.pop_back_val();
 
-      // Backward through DPS inputs.
+      // Backward through DPS inputs: the producer of a memref input is the
+      // linalg op that writes it (its DPS init), not its defining op.
       if (auto linalgOp = dyn_cast<linalg::LinalgOp>(op)) {
         for (Value input : linalgOp.getDpsInputs()) {
-          Operation *producer = input.getDefiningOp();
+          linalg::LinalgOp producer = findProducerLinalgOp(input);
           if (producer && canInclude(producer) &&
               !componentOps.count(producer)) {
             componentOps.insert(producer);
             bfsQueue.push_back(producer);
           }
         }
-      }
 
-      // Forward through uses.
-      for (Value result : op->getResults()) {
-        for (Operation *user : result.getUsers()) {
-          if (isa<nkipy::LayoutOp>(user) || isa<nkipy::TileOp>(user))
-            continue;
-          if (canInclude(user) && !componentOps.count(user)) {
-            componentOps.insert(user);
-            bfsQueue.push_back(user);
+        // Forward through users of this op's output buffer.
+        Value outVal = getLinalgOutputValue(linalgOp);
+        if (outVal) {
+          for (Operation *user : outVal.getUsers()) {
+            if (isa<nkipy::LayoutOp>(user) || isa<nkipy::TileOp>(user))
+              continue;
+            // A user that reads outVal as an input is a forward consumer.
+            if (canInclude(user) && !componentOps.count(user)) {
+              componentOps.insert(user);
+              bfsQueue.push_back(user);
+            }
           }
         }
       }
     }
 
+    // Pull in any linalg.fill that initializes a component op's accumulator
+    // buffer (e.g. a reduction's zero-fill). On memref the fill writes the same
+    // buffer the reduction reads as its DPS init, so it must be permuted and
+    // kept inside the component rather than treated as an external consumer.
+    SmallVector<Operation *> fills;
+    for (Operation *op : componentOps) {
+      auto linalgOp = dyn_cast<linalg::LinalgOp>(op);
+      if (!linalgOp)
+        continue;
+      for (Value init : linalgOp.getDpsInits()) {
+        for (Operation *user : init.getUsers()) {
+          auto fillOp = dyn_cast<linalg::FillOp>(user);
+          if (fillOp && !componentOps.count(user))
+            fills.push_back(user);
+        }
+      }
+    }
+    for (Operation *fill : fills)
+      componentOps.insert(fill);
+
     return componentOps;
   }
 
-  /// Find boundary inputs: values used by component ops but defined outside.
-  /// Skips tensor.empty and linalg.fill (recreated with permuted shapes).
+  /// Find boundary inputs: DPS input buffers read by component ops but written
+  /// outside the component (e.g. func args, or non-component producers). The
+  /// op's own DPS init (its output alloc) is never a boundary input.
   llvm::SetVector<Value> findBoundaryInputs(
       const llvm::SetVector<Operation *> &componentOps) {
     llvm::SetVector<Value> boundaryInputs;
     for (Operation *op : componentOps) {
-      for (Value operand : op->getOperands()) {
-        Operation *defOp = operand.getDefiningOp();
-        if (!defOp || !componentOps.count(defOp)) {
-          if (defOp && (isa<tensor::EmptyOp>(defOp) ||
-                        isa<linalg::FillOp>(defOp)))
-            continue;
-          boundaryInputs.insert(operand);
-        }
+      auto linalgOp = dyn_cast<linalg::LinalgOp>(op);
+      if (!linalgOp)
+        continue;
+      for (Value input : linalgOp.getDpsInputs()) {
+        linalg::LinalgOp producer = findProducerLinalgOp(input);
+        if (!producer || !componentOps.count(producer.getOperation()))
+          boundaryInputs.insert(input);
       }
     }
     return boundaryInputs;
   }
 
-  /// Find boundary outputs: results of component ops used outside.
+  /// Find boundary outputs: output buffers (DPS inits) of component ops that are
+  /// read outside the component (returned, copied, or read by a non-component
+  /// op).
   llvm::SetVector<Value> findBoundaryOutputs(
       const llvm::SetVector<Operation *> &componentOps) {
     llvm::SetVector<Value> boundaryOutputs;
     for (Operation *op : componentOps) {
-      for (Value result : op->getResults()) {
-        for (Operation *user : result.getUsers()) {
-          if (isa<nkipy::LayoutOp>(user) || isa<nkipy::TileOp>(user))
-            continue;
-          if (!componentOps.count(user)) {
-            boundaryOutputs.insert(result);
-            break;
-          }
+      auto linalgOp = dyn_cast<linalg::LinalgOp>(op);
+      if (!linalgOp)
+        continue;
+      Value outVal = getLinalgOutputValue(linalgOp);
+      if (!outVal)
+        continue;
+      for (Operation *user : outVal.getUsers()) {
+        if (isa<nkipy::LayoutOp>(user) || isa<nkipy::TileOp>(user))
+          continue;
+        if (!componentOps.count(user)) {
+          boundaryOutputs.insert(outVal);
+          break;
         }
       }
     }
@@ -329,24 +384,27 @@ struct NkipyCanonicalizePartitionDimPass
       DenseI64ArrayAttr seedTileSizeAttr,
       IRMapping &valueMapping) {
     for (Value input : boundaryInputs) {
-      auto inputType = dyn_cast<RankedTensorType>(input.getType());
+      auto inputType = dyn_cast<MemRefType>(input.getType());
       if (!inputType || inputType.getRank() != rank)
         continue;
 
       SmallVector<int64_t> newShape =
           permuteVector<int64_t>(inputType.getShape(), perm);
 
-      if (input.getDefiningOp())
+      // Insert the transpose just before the first component op that reads
+      // `input`, so the source buffer is already populated.
+      if (linalg::LinalgOp producer = findProducerLinalgOp(input))
+        builder.setInsertionPointAfter(producer.getOperation());
+      else if (input.getDefiningOp())
         builder.setInsertionPointAfter(input.getDefiningOp());
       else
         builder.setInsertionPointToStart(input.getParentBlock());
 
       Location loc = input.getLoc();
-      Value init = builder.create<tensor::EmptyOp>(
-          loc, newShape, inputType.getElementType());
-      auto transposeOp =
-          builder.create<linalg::TransposeOp>(loc, input, init, perm);
-      Value transposed = transposeOp.getResult()[0];
+      Value init = builder.create<memref::AllocOp>(
+          loc, MemRefType::get(newShape, inputType.getElementType()));
+      builder.create<linalg::TransposeOp>(loc, input, init, perm);
+      Value transposed = init;
       valueMapping.map(input, transposed);
 
       DenseI64ArrayAttr transposeTileSize;
@@ -376,6 +434,29 @@ struct NkipyCanonicalizePartitionDimPass
         topoOrder.push_back(op);
     });
 
+    // Retype each distinct DPS init buffer in place to the permuted shape,
+    // exactly once. On memref the init is the op's output value, so retyping
+    // the alloc carries the permuted shape to every user (annotations,
+    // consumers). A buffer shared as init by two component ops (e.g. a
+    // reduction accumulator and its zero-fill) must only be permuted once.
+    llvm::SetVector<Value> initBuffers;
+    for (Operation *op : topoOrder) {
+      if (auto linalgOp = dyn_cast<linalg::LinalgOp>(op))
+        for (Value init : linalgOp.getDpsInits())
+          initBuffers.insert(init);
+    }
+    for (Value initOperand : initBuffers) {
+      auto memrefType = dyn_cast<MemRefType>(initOperand.getType());
+      if (!memrefType || memrefType.getRank() != rank)
+        continue;
+      SmallVector<int64_t> newShape =
+          permuteVector<int64_t>(memrefType.getShape(), perm);
+      auto newType = MemRefType::get(
+          newShape, memrefType.getElementType(),
+          memrefType.getLayout(), memrefType.getMemorySpace());
+      initOperand.setType(newType);
+    }
+
     for (Operation *op : topoOrder) {
       auto linalgOp = dyn_cast<linalg::LinalgOp>(op);
       if (!linalgOp)
@@ -385,57 +466,6 @@ struct NkipyCanonicalizePartitionDimPass
       for (unsigned i = 0; i < op->getNumOperands(); ++i) {
         if (Value mapped = valueMapping.lookupOrNull(op->getOperand(i)))
           op->setOperand(i, mapped);
-      }
-
-      // Recreate init operands with permuted shape.
-      for (auto [idx, initOperand] :
-           llvm::enumerate(linalgOp.getDpsInits())) {
-        if (auto emptyOp = initOperand.getDefiningOp<tensor::EmptyOp>()) {
-          auto emptyType =
-              dyn_cast<RankedTensorType>(emptyOp.getResult().getType());
-          if (!emptyType || emptyType.getRank() != rank)
-            continue;
-          SmallVector<int64_t> newShape =
-              permuteVector<int64_t>(emptyType.getShape(), perm);
-          builder.setInsertionPoint(emptyOp);
-          auto newEmpty = builder.create<tensor::EmptyOp>(
-              emptyOp.getLoc(), newShape, emptyType.getElementType());
-          emptyOp.getResult().replaceAllUsesWith(newEmpty.getResult());
-          emptyOp->erase();
-          continue;
-        }
-
-        if (auto fillOp = dyn_cast<linalg::FillOp>(
-                initOperand.getDefiningOp())) {
-          auto fillEmptyOp =
-              fillOp.getDpsInits()[0].getDefiningOp<tensor::EmptyOp>();
-          if (!fillEmptyOp)
-            continue;
-          auto emptyType = dyn_cast<RankedTensorType>(
-              fillEmptyOp.getResult().getType());
-          if (!emptyType || emptyType.getRank() != rank)
-            continue;
-          SmallVector<int64_t> newShape =
-              permuteVector<int64_t>(emptyType.getShape(), perm);
-          builder.setInsertionPoint(fillEmptyOp);
-          auto newEmpty = builder.create<tensor::EmptyOp>(
-              fillEmptyOp.getLoc(), newShape, emptyType.getElementType());
-          fillEmptyOp.getResult().replaceAllUsesWith(newEmpty.getResult());
-          fillEmptyOp->erase();
-          fillOp->getResult(0).setType(
-              RankedTensorType::get(newShape, emptyType.getElementType()));
-        }
-      }
-
-      // Update result types.
-      for (Value result : op->getResults()) {
-        auto resultType = dyn_cast<RankedTensorType>(result.getType());
-        if (!resultType || resultType.getRank() != rank)
-          continue;
-        SmallVector<int64_t> newShape =
-            permuteVector<int64_t>(resultType.getShape(), perm);
-        result.setType(
-            RankedTensorType::get(newShape, resultType.getElementType()));
       }
 
       // Permute indexing maps of linalg.generic ops.
@@ -493,20 +523,25 @@ struct NkipyCanonicalizePartitionDimPass
       DenseMap<Value, nkipy::LayoutOp> &valueAnnotateMap,
       nkipy::LayoutOp annotateOp, int64_t partDim) {
     for (Value output : boundaryOutputs) {
-      auto outputType = dyn_cast<RankedTensorType>(output.getType());
+      auto outputType = dyn_cast<MemRefType>(output.getType());
       if (!outputType)
         continue;
 
       SmallVector<int64_t> origShape =
           permuteVector<int64_t>(outputType.getShape(), invPerm);
 
-      builder.setInsertionPointAfterValue(output);
+      // Insert the inverse transpose right after the component op that writes
+      // `output`, so the permuted buffer is populated before we read it.
+      if (linalg::LinalgOp producer = findProducerLinalgOp(output))
+        builder.setInsertionPointAfter(producer.getOperation());
+      else
+        builder.setInsertionPointAfterValue(output);
       Location loc = output.getLoc();
-      Value init = builder.create<tensor::EmptyOp>(
-          loc, origShape, outputType.getElementType());
+      Value init = builder.create<memref::AllocOp>(
+          loc, MemRefType::get(origShape, outputType.getElementType()));
       auto transposeOp =
           builder.create<linalg::TransposeOp>(loc, output, init, invPerm);
-      Value transposedBack = transposeOp.getResult()[0];
+      Value transposedBack = init;
 
       // Derive tile_size and mem_space for the output annotation.
       DenseI64ArrayAttr outputTileSize;
@@ -581,7 +616,7 @@ struct NkipyCanonicalizePartitionDimPass
             permuteVector<int64_t>(oldTileSize, perm);
         return DenseI64ArrayAttr::get(builder.getContext(), newTileSize);
       }
-      auto annTargetType = dyn_cast<RankedTensorType>(target.getType());
+      auto annTargetType = dyn_cast<ShapedType>(target.getType());
       if (!annTargetType)
         return {};
       return permuteReducedTileSize(oldTileSize, perm, invPerm,
@@ -589,25 +624,29 @@ struct NkipyCanonicalizePartitionDimPass
                                     builder.getContext());
     };
 
+    // An annotation belongs to the component if the linalg op that writes its
+    // target buffer is in the component.
+    auto inComponent = [&](Value target) {
+      linalg::LinalgOp producer = findProducerLinalgOp(target);
+      return producer && componentOps.count(producer.getOperation());
+    };
+
     func.walk([&](nkipy::LayoutOp annOp) {
-      Value annTarget = annOp.getTarget();
-      Operation *defOp = annTarget.getDefiningOp();
-      if (!defOp || !componentOps.count(defOp))
+      if (!inComponent(annOp.getTarget()))
         return;
 
       annOp.setPartitionDimAttr(builder.getIntegerAttr(
           builder.getIntegerType(32, /*isSigned=*/false), 0));
 
       if (auto tileSizeAttr = annOp.getTileSizeAttr()) {
-        if (auto newTs = permuteTileAttr(tileSizeAttr, annTarget))
+        if (auto newTs = permuteTileAttr(tileSizeAttr, annOp.getTarget()))
           annOp.setTileSizeAttr(newTs);
       }
     });
 
     func.walk([&](nkipy::TileOp tileOp) {
       Value tgt = tileOp.getTarget();
-      Operation *defOp = tgt.getDefiningOp();
-      if (!defOp || !componentOps.count(defOp))
+      if (!inComponent(tgt))
         return;
       if (auto tileSizeAttr = tileOp.getLoopTileSizeAttr()) {
         if (auto newTs = permuteTileAttr(tileSizeAttr, tgt))
@@ -641,22 +680,25 @@ struct NkipyCanonicalizePartitionDimPass
 
     for (nkipy::LayoutOp annotateOp : nonZeroAnnotations) {
       Value target = annotateOp.getTarget();
-      Operation *seedOp = target.getDefiningOp();
+      // On memref IR the linalg op that writes the target buffer is the seed,
+      // not the buffer's defining op (a memref.alloc).
+      linalg::LinalgOp producer = findProducerLinalgOp(target);
+      Operation *seedOp = producer ? producer.getOperation() : nullptr;
 
       if (seedOp && processedOps.count(seedOp))
         continue;
 
-      auto tensorType = dyn_cast<RankedTensorType>(target.getType());
-      if (!tensorType) {
-        annotateOp.emitError("partition_dim != 0 on non-tensor type");
+      auto shapedType = dyn_cast<ShapedType>(target.getType());
+      if (!shapedType) {
+        annotateOp.emitError("partition_dim != 0 on non-shaped type");
         return signalPassFailure();
       }
 
       int64_t partDim = partDimMap[target];
-      int64_t rank = tensorType.getRank();
+      int64_t rank = shapedType.getRank();
       if (partDim >= rank) {
         annotateOp.emitError("partition_dim ")
-            << partDim << " >= tensor rank " << rank;
+            << partDim << " >= rank " << rank;
         return signalPassFailure();
       }
 
@@ -676,11 +718,10 @@ struct NkipyCanonicalizePartitionDimPass
         }
       }
 
-      // Skip non-linalg ops (partition_dim is informational only).
-      if (seedOp && !isa<linalg::LinalgOp>(seedOp)) {
-        processedOps.insert(seedOp);
+      // No linalg op writes this buffer (e.g. a directly-annotated func arg):
+      // partition_dim is informational only, nothing to transpose.
+      if (!seedOp)
         continue;
-      }
 
       // Error on matmul with partition_dim != 0.
       if (seedOp && isMatmulOp(seedOp)) {

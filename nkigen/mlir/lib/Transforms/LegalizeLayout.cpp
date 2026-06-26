@@ -608,7 +608,49 @@ struct NkipyLegalizeLayoutPass
     builder.setInsertionPoint(op);
     Location loc = op.getLoc();
 
-    auto nest = createBlockLoopNest(builder, loc, info->numBlocks);
+    // Compute effective numBlocks from the SBUF operand's actual shape
+    // (not the parent alloc). The operand may be a subview that's already
+    // tile-sized, in which case no block loop is needed.
+    Value sbufOperand = outputIsSbuf ? output : inputBase;
+    auto sbufOperandType = cast<MemRefType>(sbufOperand.getType());
+    SmallVector<int64_t> effectiveNumBlocks;
+    for (int64_t i = 0; i < R; i++)
+      effectiveNumBlocks.push_back(sbufOperandType.getShape()[i] / info->tileSize[i]);
+
+    // If all numBlocks are 1, the operand is already tile-sized — no loop needed.
+    bool allOne = llvm::all_of(effectiveNumBlocks, [](int64_t n) { return n == 1; });
+
+    if (allOne) {
+      // Just collapse to 2D and do the copy/transpose directly.
+      SmallVector<int64_t> invPerm(R);
+      for (int64_t i = 0; i < R; i++)
+        invPerm[permutation[i]] = i;
+      SmallVector<int64_t> perm2D = (invPerm[0] < invPerm[R - 1])
+          ? SmallVector<int64_t>{0, 1}
+          : SmallVector<int64_t>{1, 0};
+
+      Value inVal = inputBase;
+      Value outVal = output;
+      if (R > 2) {
+        SmallVector<ReassociationIndices> reassoc;
+        ReassociationIndices g0;
+        for (int64_t i = 0; i < R - 1; i++) g0.push_back(i);
+        reassoc.push_back(g0);
+        reassoc.push_back({R - 1});
+        inVal = builder.create<memref::CollapseShapeOp>(loc, inputBase, reassoc);
+        outVal = builder.create<memref::CollapseShapeOp>(loc, output, reassoc);
+      }
+
+      if (perm2D[0] == 0 && perm2D[1] == 1)
+        builder.create<memref::CopyOp>(loc, inVal, outVal);
+      else
+        builder.create<linalg::TransposeOp>(loc, inVal, outVal, perm2D);
+
+      op.erase();
+      return;
+    }
+
+    auto nest = createBlockLoopNest(builder, loc, effectiveNumBlocks);
 
     // Compute tile sizes for output dims
     SmallVector<int64_t> outTileSize(R);

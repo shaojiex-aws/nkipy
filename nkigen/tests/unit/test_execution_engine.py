@@ -15,18 +15,16 @@ from nkigen.execution.llvm import LLVMModule
 class TestExecutionEngine:
     """Test LLVM execution engine with MLIR modules."""
     
-    def test_tensor_subtract(self):
-        """Test element-wise tensor subtraction using linalg.elementwise."""
+    def test_memref_subtract(self):
+        """Test element-wise subtraction using linalg.elementwise on memrefs."""
         with Context():
             module = Module.parse(
                 """
         module {
-          func.func @main(%arg0: tensor<8x32xf32>, %arg1: tensor<8x32xf32>) -> tensor<8x32xf32> attributes { llvm.emit_c_interface } {
-            %cst = arith.constant 0.000000e+00 : f32
-            %0 = tensor.empty() : tensor<8x32xf32>
-            %1 = linalg.fill ins(%cst : f32) outs(%0 : tensor<8x32xf32>) -> tensor<8x32xf32>
-            %4 = linalg.elementwise kind=#linalg.elementwise_kind<sub> ins(%arg0, %arg1 : tensor<8x32xf32>, tensor<8x32xf32>) outs(%1 : tensor<8x32xf32>) -> tensor<8x32xf32>
-            return %4 : tensor<8x32xf32>
+          func.func @main(%arg0: memref<8x32xf32>, %arg1: memref<8x32xf32>) -> memref<8x32xf32> attributes { llvm.emit_c_interface } {
+            %0 = memref.alloc() : memref<8x32xf32>
+            linalg.elementwise kind=#linalg.elementwise_kind<sub> ins(%arg0, %arg1 : memref<8x32xf32>, memref<8x32xf32>) outs(%0 : memref<8x32xf32>)
+            return %0 : memref<8x32xf32>
           }
         } """
             )
@@ -42,20 +40,20 @@ class TestExecutionEngine:
         out = runner(A.copy(), B.copy())
         
         assert np.allclose(out, ref, rtol=1e-5, atol=1e-6), \
-            f"MLIR result does not match NumPy result for tensor subtraction"
+            f"MLIR result does not match NumPy result for memref subtraction"
     
-    def test_tensor_reduce_all(self):
-        """Test tensor reduction over all dimensions."""
+    def test_memref_reduce_all(self):
+        """Test reduction over all dimensions on memrefs."""
         with Context():
             module = Module.parse(
                 r"""
 module {
-  func.func @main(%arg0: tensor<3x4xf32>) -> f32 {
+  func.func @main(%arg0: memref<3x4xf32>) -> f32 {
     %cst = arith.constant 0.000000e+00 : f32
-    %0 = tensor.empty() : tensor<f32>
-    %1 = linalg.fill ins(%cst : f32) outs(%0 : tensor<f32>) -> tensor<f32>
-    %t = linalg.reduce { arith.addf } ins(%arg0 : tensor<3x4xf32>) outs(%1 : tensor<f32>) dimensions = [0, 1]
-    %s = tensor.extract %t[] : tensor<f32>
+    %0 = memref.alloc() : memref<f32>
+    linalg.fill ins(%cst : f32) outs(%0 : memref<f32>)
+    linalg.reduce { arith.addf } ins(%arg0 : memref<3x4xf32>) outs(%0 : memref<f32>) dimensions = [0, 1]
+    %s = memref.load %0[] : memref<f32>
     return %s : f32
   }
 }
@@ -72,7 +70,7 @@ module {
         out = runner(A.copy())
         
         assert np.allclose(out, ref, rtol=1e-5, atol=1e-6), \
-            f"MLIR result does not match NumPy result for tensor reduction"
+            f"MLIR result does not match NumPy result for memref reduction"
 
 
 if __name__ == "__main__":

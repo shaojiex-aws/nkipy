@@ -9,7 +9,6 @@ from mlir.runtime import to_numpy
 from mlir.dialects import func as func_d
 from mlir.ir import (
     MemRefType,
-    RankedTensorType,
     IntegerType,
     IndexType,
     F16Type,
@@ -151,11 +150,6 @@ def get_dtype_and_shape_from_type(dtype):
         shape = dtype.shape
         ele_type, _, _ = get_dtype_and_shape_from_type(dtype.element_type)
         return ele_type, shape, True  # is_memref=True
-    if RankedTensorType.isinstance(dtype):
-        dtype = RankedTensorType(dtype)
-        shape = dtype.shape
-        ele_type, _, _ = get_dtype_and_shape_from_type(dtype.element_type)
-        return ele_type, shape, True  # is_memref=True (will become memref after bufferization)
     if IndexType.isinstance(dtype):
         return "index", tuple(), False
     if IntegerType.isinstance(dtype):

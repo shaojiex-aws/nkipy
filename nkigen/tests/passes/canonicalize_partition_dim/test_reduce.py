@@ -47,7 +47,7 @@ def test_3d_reduction_max_partition_dim_1():
         check_ir_contains=[
             "linalg.transpose",
             "permutation = [1, 0, 2]",
-            "tensor<128x8x1xf32>",
+            "memref<128x8x1xf32>",
             "partition_dim = 0",
         ],
         modes=Mode.STRING_CHECK,
@@ -92,8 +92,8 @@ def test_3d_reduction_sum_partition_dim_1():
         check_ir_contains=[
             "linalg.transpose",
             "permutation = [1, 0, 2]",
-            "tensor<128x8x64xf32>",
-            "tensor<128x8x1xf32>",
+            "memref<128x8x64xf32>",
+            "memref<128x8x1xf32>",
             "partition_dim = 0",
         ],
         modes=Mode.STRING_CHECK,

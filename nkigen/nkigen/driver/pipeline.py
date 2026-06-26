@@ -214,42 +214,47 @@ def apply_complete_knob_pipeline(
     This avoids switching between Python bindings and nkipy-opt, running all
     passes through nkipy-opt in sequence:
 
-    Phase 0: Linalg Canonicalization for NISA
+    The pipeline is memref-native end to end (tracing emits linalg-on-memref),
+    so there is no tensor->memref bufferization step and no post-bufferize copy
+    cleanup. The phase structure follows
+    docs/2026-06-22-memref-native-pipeline-refactor.md.
+
+    Phase 1: Canonicalization
      1. prepare-arithmetic: Convert div to mul+reciprocal (NISA has no divide)
      2. prepare-matmul: Decompose batch_matmul, transpose LHS, remove fill(0)
-
-    Phase 1: Layout Inference, Partition Dim Canonicalization, and Tiling (on tensor IR)
      3. infer-layout: Infer tiling, placement, and partition_dim for unannotated ops
      4. canonicalize-partition-dim: Insert transposes to ensure partition_dim=0 everywhere
      5. assign-linalg-op-ids: Assign unique IDs to linalg ops (incl. new transposes)
+
+    Phase 2: Loop Tiling
      6. knob-driven-tiling: Rewrite linalg ops to tiled loops using transform dialect
      7. apply-and-strip-transforms: Apply the generated transforms, then erase
         the transform module (so downstream passes — including the Python
         linalg->NISA phase — see no transform-dialect ops).
-     8. canonicalize-loop-step: Normalize loop steps to 1
 
-    Phase 2: Bufferization
-     9. one-shot-bufferize: Convert tensors to memrefs
-    10. canonicalize: Clean up memref operations
+    Phase 3: Fusion
+     8. knob-driven-fusion: Fuse sibling scf.for loops sharing a knob.fuse()
+     9. canonicalize-loop-step: Normalize loop steps to 1 (then canonicalize
+        cleans up memref operations)
 
-    Phase 3: Memory Space Annotation + Reshape Canonicalization
-    11. eliminate-uninitialized-copies: Remove copies from uninitialized buffers
-    12. canonicalize: Clean up dead subview chains
-    13. annotate-memory-space: Apply memory space attributes
-    14. canonicalize-reshape: Classify expand/collapse_shape by mem_space and partition_dim
-    15. eliminate-same-memspace-copy: Remove redundant SBUF->SBUF copies
-    16. canonicalize: Clean up dead allocs
+    Phase 4: Layout Legalization
+    10. annotate-memory-space: Apply HBM / SBUF / PSUM memory space attributes
+    11. canonicalize-reshape: Classify expand/collapse_shape by mem_space and partition_dim
+    12. canonicalize: Clean up dead allocs
+    13. legalize-layout: Transform SBUF tensors to physical 4D layout
+    14. canonicalize: Clean up after layout legalization
 
-    Phase 4: Memref Finalization
-    17. legalize-layout: Transform SBUF tensors to physical 4D layout
-    18. canonicalize: Clean up after layout legalization
-    19. simplify-linalg: Decompose high-rank transposes, canonicalize trivial-broadcast generics
-    20. insert-spill-reload: Insert spill/reload for SBUF overflow
-    21. insert-memref-dealloc: Insert memref.dealloc at allocation scope end
-    22. cse: Common subexpression elimination
-    23. canonicalize: DCE for unused subviews and cleanup
+    Phase 5: Scheduling
+    15. simplify-linalg: Decompose high-rank transposes, canonicalize trivial-broadcast generics
+    16. insert-spill-reload: Insert spill/reload for SBUF overflow
+    17. insert-memref-dealloc: Insert memref.dealloc at allocation scope end
+    18. cse: Common subexpression elimination
+    19. canonicalize: DCE for unused subviews and cleanup
 
-    Note: nkipy.annotate ops are removed in annotate-memory-space (pass 13).
+    Phase 6: Codegen
+    20. py:linalg-to-nisa: Lower to NISA instructions (Python backend)
+
+    Note: nkipy.annotate ops are removed in annotate-memory-space (pass 10).
     Note: The prior NISA-lowering steps (linalg-to-nisa, resolve-custom-ops,
     prepare-for-nki) are currently stripped. They will be reimplemented in
     Python using the public nki wheel as part of open-sourcing.
@@ -279,83 +284,76 @@ def apply_complete_knob_pipeline(
         Fully transformed MLIR module with NISA operations
     """
     passes = [
-        # Phase 0: Linalg-level rewrites for NISA hardware constraints
-        # (pre-tiling).  Expands to prepare-arithmetic +
-        # prepare-matmul.  See PASS_GROUPS
-        # above for members.
-        'canonicalize-linalg-for-nisa',
-
-        # Phase 1: Layout inference and partition_dim canonicalization
+        # Phase 1: Canonicalization
+        # Linalg-level rewrites for NISA hardware constraints (pre-tiling).
+        # Expands to prepare-arithmetic + prepare-matmul. See PASS_GROUPS above.
+        'canonicalize-linalg-for-nisa',                                         # 1-2
         # InferLayout infers tiling, placement (mem_space), and partition_dim for
         # elementwise ops that lack explicit annotations, by propagating from
         # annotated neighbors
-        f'infer-layout="target={target}"',
+        f'infer-layout="target={target}"',                                      # 3
         # CanonicalizePartitionDim inserts transposes to ensure partition_dim=0
         # everywhere. Must run after infer-layout (so partition_dim is propagated)
         # and before assign-linalg-op-ids (so new transposes get op IDs)
-        f'canonicalize-partition-dim="target={target}"',
+        f'canonicalize-partition-dim="target={target}"',                        # 4
         # AssignLinalgOpIds assigns unique nkipy.op_id to each linalg op
         # (including transposes inserted above)
-        'assign-linalg-op-ids',
+        'assign-linalg-op-ids',                                                 # 5
+
+        # Phase 2: Loop Tiling
         # KnobDrivenTiling generates Transform dialect IR; the fused pass
         # applies it and then erases the transform module so downstream
         # (including the Python linalg->NISA phase) sees no transform-dialect
         # ops in the IR.
         'knob-driven-tiling',                                                   # 6
         'apply-and-strip-transforms',                                           # 7
+
+        # Phase 3: Fusion
         # KnobDrivenFusion fuses sibling scf.for loops sharing a knob.fuse()
-        # annotation (after tiling has produced the per-op loops).
-        'knob-driven-fusion',                                                   # 7b
+        # annotation (after tiling has produced the per-op loops).  Must run
+        # before canonicalize-loop-step, which it matches on loop bounds.
+        'knob-driven-fusion',                                                   # 8
         # CanonicalizeLoopStep normalizes loop steps to 1 (e.g., for %i = 0 to 512 step 128)
         # This simplifies index expressions from %i*128/128 to just %i
-        'canonicalize-loop-step',                                               # 8
+        'canonicalize-loop-step',                                               # 9
+        'canonicalize',                                                         # 9b
 
-        # Phase 2: Bufferization
-        'one-shot-bufferize="bufferize-function-boundaries allow-unknown-ops"', # 9
-        'canonicalize',                                                         # 10
-
-        # Phase 3: Memory Space Annotation + Reshape Canonicalization
-        # Eliminate copies from uninitialized allocations (e.g., PSUM accumulator init)
-        # Must run after bufferization, before annotate-memory-space
-        'eliminate-uninitialized-copies',                                        # 11
-        'canonicalize',  # Clean up dead subview chains from eliminated copies   # 12
-        'annotate-memory-space',                                                 # 13
+        # Phase 4: Layout Legalization
+        # The IR is already memref-native (no bufferization needed). Allocation
+        # and promotion are explicit, so the post-bufferize cleanup passes
+        # (eliminate-uninitialized-copies, eliminate-same-memspace-copy) are gone.
+        'annotate-memory-space',                                                 # 10
         # CanonicalizeReshape: classify expand/collapse_shape by mem_space and
         # partition_dim. HBM reshapes and SBUF non-pdim reshapes stay as views.
         # SBUF partition dim splits get alloc+copy (NISA has no modulo).
         # Returned expand_shape views of func args and direct returns of func
         # args get alloc+copy (NISA needs separate output allocations).
-        'canonicalize-reshape',                                                  # 14
-        # Eliminate redundant SBUF->SBUF copies (when data is already in SBUF)
-        # This is needed after SBUF promotion of elementwise ops — if an input
-        # is already in SBUF (e.g., from a previous matmul), we don't need to copy it again
-        'eliminate-same-memspace-copy',                                          # 15
-        'canonicalize',  # Clean up dead allocs and subviews from eliminated copies  # 16
-
-        # Phase 4: NISA Lowering
+        'canonicalize-reshape',                                                  # 11
+        'canonicalize',  # Clean up dead allocs and subviews                     # 12
         # LegalizeLayout transforms SBUF tensors from 2D to 4D physical layout
-        # Runs here to inspect IR after bufferization
-        f'legalize-layout="target={target}"',                                    # 17
-        'canonicalize',                                                          # 18
+        f'legalize-layout="target={target}"',                                    # 13
+        'canonicalize',                                                          # 14
+
+        # Phase 5: Scheduling
         # Simplify linalg ops before NISA lowering: decompose high-rank
         # transposes to loops of 2D, collapse >2D SBUF transpose to 2D,
         # canonicalize trivial-broadcast generics to named ops.
         # Runs before insert-spill-reload so any SBUF temps it creates
         # are accounted for in spill/reload memory budgeting.
-        'simplify-linalg',                                                       # 19
+        'simplify-linalg',                                                       # 15
         # Insert spill/reload for SBUF memory pressure.  Runs after legalize-layout
         # so SBUF allocs are already in physical per-partition layout and their
         # total byte size equals the per-partition SBUF consumption.
-        f'insert-spill-reload="target={target}"',                                # 20
-        'insert-memref-dealloc',  # Insert memref.dealloc ops at allocation scope end  # 21
-        'cse',  # Common subexpression elimination                               # 22
-        'canonicalize',  # DCE for unused subviews and cleanup                   # 23
+        f'insert-spill-reload="target={target}"',                                # 16
+        'insert-memref-dealloc',  # Insert memref.dealloc ops at allocation scope end  # 17
+        'cse',  # Common subexpression elimination                               # 18
+        'canonicalize',  # DCE for unused subviews and cleanup                   # 19
 
-        # Phase 5: NISA lowering (Python) — reimplementation of the deleted C++
+        # Phase 6: Codegen (Python) — reimplementation of the deleted C++
         # linalg-to-nisa / resolve-custom-ops / prepare-for-nki passes using
         # the `nki` wheel's Python bindings. Marked as Python-phase so the
         # driver below dispatches to `linalg_to_nisa_py` instead of nkipy-opt.
-        'py:linalg-to-nisa',                                                     # 24
+        'py:linalg-to-nisa',                                                     # 20
     ]
 
     # Expand pass groups first so stop_after / slicing operates on the

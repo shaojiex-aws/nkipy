@@ -198,7 +198,8 @@ class NisaEmitter:
         elif name == "memref.dealloc":
             self._emit_dealloc(op)
         elif name in ("memref.subview", "memref.collapse_shape",
-                      "memref.expand_shape", "memref.reinterpret_cast"):
+                      "memref.expand_shape", "memref.reinterpret_cast",
+                      "memref.cast"):
             for r in op.results:
                 if r not in self._names:
                     self._names[r] = None
@@ -310,7 +311,7 @@ class NisaEmitter:
             op = owner.opview if hasattr(owner, "opview") else owner
             op_name = getattr(op, "name", None)
 
-            if op_name == "memref.reinterpret_cast":
+            if op_name in ("memref.reinterpret_cast", "memref.cast"):
                 base = op.operation.operands[0]
                 continue
 

@@ -333,6 +333,10 @@ struct NkipyAnnotateMemorySpacePass
             changed |= propagateMemSpace(op.getSource(), op.getResult());
             changed |= propagateMemSpace(op.getResult(), op.getSource());
           })
+          .Case<memref::ReinterpretCastOp>([&](auto op) {
+            changed |= propagateMemSpace(op.getSource(), op.getResult());
+            changed |= propagateMemSpace(op.getResult(), op.getSource());
+          })
           .Case<memref::CastOp>([&](auto op) {
             changed |= propagateMemSpace(op.getSource(), op.getResult());
           });

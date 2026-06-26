@@ -4,7 +4,7 @@ MLIR utility functions for building IR constructs.
 
 from typing import Callable, Dict, Tuple, Union
 from mlir import ir
-from mlir.dialects import arith, memref, tensor, linalg
+from mlir.dialects import arith, memref, linalg
 import ml_dtypes
 import numpy as np
 
@@ -77,43 +77,15 @@ def to_mlir_type(dtype: Union[str, np.dtype, type]) -> ir.Type:
     raise TypeError(f"Unsupported dtype input type: {type(dtype)}")
 
 
-def ranked_tensor_of(shape: Tuple[int, ...], elem_ty: ir.Type) -> ir.RankedTensorType:
-    """Create a ranked tensor type."""
-    return ir.RankedTensorType.get(shape, elem_ty)
-
-
 def memref_of(shape: Tuple[int, ...], elem_ty: ir.Type) -> ir.MemRefType:
     """Create a memref type."""
     return ir.MemRefType.get(shape, elem_ty)
-
-
-def make_empty(loc: ir.Location, shape: Tuple[int, ...], elem_ty: ir.Type) -> ir.Value:
-    """Create an empty tensor with given shape and element type (uninitialized)."""
-    return tensor.EmptyOp(list(shape), elem_ty, loc=loc).result
 
 
 def make_alloc(loc: ir.Location, shape: Tuple[int, ...], elem_ty: ir.Type) -> ir.Value:
     """Create a memref.alloc with given shape and element type (uninitialized)."""
     memref_type = memref_of(shape, elem_ty)
     return memref.AllocOp(memref_type, [], [], loc=loc).result
-
-
-def make_filled(loc: ir.Location, shape: Tuple[int, ...], elem_ty: ir.Type,
-                fill_value: Union[int, float]) -> ir.Value:
-    """Create a tensor with given shape and element type, filled with a scalar."""
-    result_type = ranked_tensor_of(shape, elem_ty)
-    empty_tensor = make_empty(loc, shape, elem_ty)
-    cst = const_scalar(fill_value, elem_ty, loc)
-
-    filled = linalg.FillOp([result_type], [cst], [empty_tensor], loc=loc)
-
-    region = filled.regions[0]
-    if len(region.blocks) == 0:
-        block = region.blocks.append(elem_ty, elem_ty)
-        with ir.InsertionPoint(block):
-            linalg.YieldOp([block.arguments[0]], loc=loc)
-
-    return filled.results[0]
 
 
 def make_alloc_filled(loc: ir.Location, shape: Tuple[int, ...], elem_ty: ir.Type,
@@ -128,11 +100,6 @@ def make_alloc_filled(loc: ir.Location, shape: Tuple[int, ...], elem_ty: ir.Type
         with ir.InsertionPoint(block):
             linalg.YieldOp([block.arguments[0]], loc=loc)
     return buf
-
-
-def make_zeros(loc: ir.Location, shape: Tuple[int, ...], elem_ty: ir.Type) -> ir.Value:
-    """Create a tensor with given shape and element type, initialized to zero."""
-    return make_filled(loc, shape, elem_ty, 0.0)
 
 
 def make_alloc_zeros(loc: ir.Location, shape: Tuple[int, ...], elem_ty: ir.Type) -> ir.Value:

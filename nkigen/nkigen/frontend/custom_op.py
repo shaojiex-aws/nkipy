@@ -11,8 +11,7 @@ from mlir import ir
 from mlir.dialects import func
 
 from .traced_array import TracedArray
-from .builder import _use_memref
-from ..mlir_utils import to_mlir_type, ranked_tensor_of, memref_of
+from ..mlir_utils import to_mlir_type, memref_of
 
 # Module-level registry for custom ops used during tracing.
 # No thread safety needed -- tracing is always single-threaded.
@@ -178,13 +177,12 @@ class CustomOp:
         loc = args[0]._get_caller_location()
         input_values = [a.value for a in args]
 
-        type_fn = memref_of if _use_memref() else ranked_tensor_of
         result_types = [
-            type_fn(shape, to_mlir_type(dtype))
+            memref_of(shape, to_mlir_type(dtype))
             for shape, dtype in zip(self.output_shapes, self.output_dtypes)
         ]
 
-        # Emit: %result = func.call @name(%in0, %in1) -> tensor<...>
+        # Emit: %result = func.call @name(%in0, %in1) -> memref<...>
         call_op = func.CallOp(result_types, self.func_name, input_values, loc=loc)
 
         # Return output TracedArray(s)
@@ -208,19 +206,18 @@ class CustomOp:
 
 
 def emit_custom_op_declaration(custom: CustomOp):
-    """Emit func.func private @name(tensor<...>) -> tensor<...>
+    """Emit func.func private @name(memref<...>) -> memref<...>
     attributes {nkipy.custom_op}
 
     Return-value style: inputs only as arguments, outputs as return values.
     resolve-custom-ops will later convert to output-as-argument.
     """
-    type_fn = memref_of if _use_memref() else ranked_tensor_of
     input_types = [
-        type_fn(s, to_mlir_type(d))
+        memref_of(s, to_mlir_type(d))
         for s, d in zip(custom.input_shapes, custom.input_dtypes)
     ]
     result_types = [
-        type_fn(s, to_mlir_type(d))
+        memref_of(s, to_mlir_type(d))
         for s, d in zip(custom.output_shapes, custom.output_dtypes)
     ]
     fn_type = ir.FunctionType.get(input_types, result_types)

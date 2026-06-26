@@ -201,7 +201,7 @@ NISA emit) not yet adapted.
 
 **Files changed:** `mlir/lib/Transforms/KnobDrivenFusion.cpp`
 
-### WI-4: Clean up layout legalization (partial ✅)
+### WI-4: Clean up layout legalization ✅
 
 **Scope:** Adapt post-bufferize passes for memref-native IR.
 
@@ -212,15 +212,20 @@ NISA emit) not yet adapted.
    producing linalg op (not after the alloc) ✅
 2. `insert-spill-reload` — works with memref IR (test patterns updated from
    old `3 : i32` format to `#nkipy.mem<Sbuf>`) ✅
-3. `CanonicalizePartitionDim` — still uses `RankedTensorType` for the
-   transpose logic; fails with non-zero partition_dim on memref. Pre-existing
-   failure (same with tensor backend). Needs refactor to use `ShapedType`.
-4. `AnnotateMemorySpace` — memref.expand_shape/collapse_shape memspace
-   propagation bug (mismatched memspaces on reshape). Needs fix.
-5. Delete `eliminate-uninitialized-copies` pass (deferred to WI-5)
-6. Delete `eliminate-same-memspace-copy` pass (deferred to WI-5)
+3. `CanonicalizePartitionDim` — refactored from `RankedTensorType` to
+   `ShapedType`/memref: uses `findProducerLinalgOp` for DPS-based BFS,
+   `memref::AllocOp` for boundary transposes, retyping DPS init buffers
+   in-place instead of recreating `tensor.empty` ✅
+4. `AnnotateMemorySpace` — added `memref::ReinterpretCastOp` memspace
+   propagation ✅
+5. `LegalizeLayout` — fixed `tileTranspose` segfault when the SBUF operand
+   is already tile-sized (subview of a multi-block parent alloc) ✅
+6. Delete `eliminate-uninitialized-copies` pass — removed from pipeline
+   (no longer needed: memref-native IR has explicit allocation, no
+   bufferization-artifact copies) ✅
+7. Delete `eliminate-same-memspace-copy` pass — removed from pipeline ✅
 
-### WI-5: Delete bufferization infrastructure
+### WI-5: Delete bufferization infrastructure (partial ✅)
 
 **Scope:** Remove all tensor/bufferization dialect usage.
 
@@ -228,9 +233,13 @@ NISA emit) not yet adapted.
 1. Remove `BufferizableOpInterface` from `NkipyOps.cpp` (LayoutOp, TileOp, GatherOp)
 2. Remove `bufferization.alloc_tensor` / `materialize_in_destination` from
    `NkipyTransformOps.cpp`
-3. Remove `one-shot-bufferize` from pipeline
+3. Remove `one-shot-bufferize` from pipeline ✅
 4. Remove `bufferization` dialect registration from `nkipy-opt.cpp`
-5. Remove `_zero_fill_empty_tensors_ir()` from `execution/llvm.py`
+5. Remove `_zero_fill_empty_tensors_ir()` from `execution/llvm.py` ✅
+6. Remove `tensor` dialect import from frontend (`builder.py`, `mlir_utils.py`) ✅
+7. Remove `ranked_tensor_of`, `make_empty`, `make_filled`, `make_zeros`
+   utilities from `mlir_utils.py` ✅
+8. Remove `RankedTensorType` handling from `utils.py` ✅
 
 ### WI-6: Update codegen backends ✅
 
