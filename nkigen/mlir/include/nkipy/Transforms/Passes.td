@@ -6,22 +6,15 @@ include "mlir/Pass/PassBase.td"
 
 
 def CanonicalizeReshape : Pass<"canonicalize-reshape", "func::FuncOp"> {
-  let summary = "Classify and canonicalize memref reshape ops by mem_space and partition_dim";
+  let summary = "Apply mem_space annotations and materialize output allocations";
   let description = [{
-    Post-bufferization pass that classifies expand_shape / collapse_shape ops
-    based on memory space and partition dim involvement:
+    Two responsibilities:
 
-    - HBM reshapes: always views (no partition concept)
-    - SBUF collapse (merge): always views (contiguous in memory)
-    - SBUF expand (split) of non-partition dims: views
-    - SBUF expand (split) of partition dim (dim 0): needs alloc+copy
-      (NISA has no modulo op), except trivial splits N->(N,1)/(1,N)
-    - Returned expand_shape views of func args: alloc+copy (NISA requires
-      separate output allocations)
+    1. Apply nkipy.layout mem_space to memref types, stamp SharedHbm on
+       func args/returns that lack mem_space, and propagate through view ops.
 
-    Applies nkipy.layout mem_space to memref types as a prologue, then
-    classifies reshapes. partition_dim is guaranteed to be 0 from
-    canonicalize-partition-dim.
+    2. Ensure function outputs are separate HBM allocations (NISA requires
+       it). When a return value is a view of a func arg, insert alloc+copy.
   }];
   let constructor = "mlir::nkipy::createCanonicalizeReshapePass()";
 }

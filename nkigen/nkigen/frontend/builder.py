@@ -1533,10 +1533,10 @@ def dynamic_insert_slice(
     static_offsets, static_sizes, static_strides, dynamic_offsets, _ = \
         _parse_dynamic_indices(indices, dest.shape, loc)
 
+    result_type = ir.MemRefType(src._value.type)
     sv = memref.SubViewOp(
-        dest._value, dynamic_offsets, [], [],
-        static_offsets, static_sizes, static_strides,
-        loc=loc,
+        result_type, dest._value, dynamic_offsets, [], [],
+        static_offsets, static_sizes, static_strides, loc=loc,
     ).result
     memref.CopyOp(src._value, sv, loc=loc)
     return dest
