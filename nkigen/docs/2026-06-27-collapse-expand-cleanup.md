@@ -1,6 +1,7 @@
-# Proposal: Eliminate collapse_shape/expand_shape from the pipeline
+# Proposal: Eliminate collapse_shape/expand_shape from the pipeline ✅
 
 **Date:** 2026-06-27
+**Status:** Done (item 4 deferred)
 **Status:** Proposed
 
 ## 1. Design Principle
@@ -96,13 +97,14 @@ that complicates the IR for no benefit (we always know shapes statically).
    pass from 440→170 lines. Only keeps: apply mem_space annotations +
    materialize output allocs for returned views of func args.
 
-2. [ ] **SimplifyLinalg**: try removing the collapse/expand around
-   transpose. If NISA emitter handles >2D SBUF tiles correctly for
-   transpose, the collapse is unnecessary.
+2. ✅ **SimplifyLinalg**: deleted `decomposeHighRankTranspose` and
+   `rewriteSbufTransposeTo2D` (~450 lines). Any >2D transpose is
+   already tiled into a series of 2D transposes by legalize-layout's
+   block loop, so these functions were dead code.
 
-3. [ ] **LegalizeLayout**: same — try removing collapse before tiled copy.
-   The emitter should handle >2D copy operands.
+3. ✅ **LegalizeLayout**: removed collapse-to-2D before transpose/copy
+   in `tileTranspose`. The emitter projects >2D SBUF operands to 2D
+   at emission time.
 
 4. [ ] **Long term**: add a verifier/lint that rejects `collapse_shape` /
-   `expand_shape` in the IR after legalize-layout, to prevent future
-   regressions.
+   `expand_shape` in the IR after legalize-layout.

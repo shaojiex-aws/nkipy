@@ -638,22 +638,10 @@ struct NkipyLegalizeLayoutPass
           ? SmallVector<int64_t>{0, 1}
           : SmallVector<int64_t>{1, 0};
 
-      Value inVal = inputBase;
-      Value outVal = output;
-      if (R > 2) {
-        SmallVector<ReassociationIndices> reassoc;
-        ReassociationIndices g0;
-        for (int64_t i = 0; i < R - 1; i++) g0.push_back(i);
-        reassoc.push_back(g0);
-        reassoc.push_back({R - 1});
-        inVal = builder.create<memref::CollapseShapeOp>(loc, inputBase, reassoc);
-        outVal = builder.create<memref::CollapseShapeOp>(loc, output, reassoc);
-      }
-
       if (perm2D[0] == 0 && perm2D[1] == 1)
-        builder.create<memref::CopyOp>(loc, inVal, outVal);
+        builder.create<memref::CopyOp>(loc, inputBase, output);
       else
-        builder.create<linalg::TransposeOp>(loc, inVal, outVal, perm2D);
+        builder.create<linalg::TransposeOp>(loc, inputBase, output, perm2D);
 
       op.erase();
       return;
@@ -712,23 +700,10 @@ struct NkipyLegalizeLayoutPass
         ? SmallVector<int64_t>{0, 1}
         : SmallVector<int64_t>{1, 0};
 
-    // Collapse to 2D for NISA if R > 2
-    Value inTile2D = inTile;
-    Value outTile2D = outTile;
-    if (R > 2) {
-      SmallVector<ReassociationIndices> reassoc;
-      ReassociationIndices g0;
-      for (int64_t i = 0; i < R - 1; i++) g0.push_back(i);
-      reassoc.push_back(g0);
-      reassoc.push_back({R - 1});
-      inTile2D = builder.create<memref::CollapseShapeOp>(loc, inTile, reassoc);
-      outTile2D = builder.create<memref::CollapseShapeOp>(loc, outTile, reassoc);
-    }
-
     if (perm2D[0] == 0 && perm2D[1] == 1)
-      builder.create<memref::CopyOp>(loc, inTile2D, outTile2D);
+      builder.create<memref::CopyOp>(loc, inTile, outTile);
     else
-      builder.create<linalg::TransposeOp>(loc, inTile2D, outTile2D, perm2D);
+      builder.create<linalg::TransposeOp>(loc, inTile, outTile, perm2D);
 
     LLVM_DEBUG(llvm::dbgs() << " Tiled transpose: " << inputBaseType
                  << " -> " << outputType << "\n");
