@@ -1,7 +1,7 @@
-# Bug: SBUF-to-HBM view conflict after annotate-memory-space deletion
+# Bug: SBUF-to-HBM view conflict after annotate-memory-space deletion ✅
 
 **Date:** 2026-06-27
-**Status:** Open
+**Status:** Done
 **Affects:** head_deconcat, qwen3_layer, and any kernel that returns a
 reshaped view of an SBUF intermediate
 
