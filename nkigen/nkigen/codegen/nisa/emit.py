@@ -584,7 +584,8 @@ class NisaEmitter:
         free_offsets = offsets[1:]
         free_offset = self._linearize_offsets(free_offsets, free_dims)
 
-        if num_par_blocks == 1:
+        logical_par = tile_par * num_par_blocks
+        if logical_par <= 128:
             return offsets[0], free_offset
 
         # Fold partition block index into free.
@@ -779,7 +780,14 @@ class NisaEmitter:
         stat_str = self._operand_str(mat_a, "stationary")
         mov_str = self._operand_str(mat_b, "moving")
 
-        row_pos = self._emit_const_index(0)
+        _, stat_offsets, _, stat_base_type = self._trace_access(mat_a)
+        ms = irutils.memref_memspace(stat_base_type)
+        if ms in (irutils.MEMSPACE_SBUF, irutils.MEMSPACE_PSUM) and \
+                self._has_sbuf_map(stat_base_type):
+            sbuf_map = self._get_sbuf_map(stat_base_type)
+            row_pos, _ = self._remap_sbuf_offsets(stat_offsets, sbuf_map)
+        else:
+            row_pos = stat_offsets[0] if stat_offsets else self._emit_const_index(0)
         col_pos = self._emit_const_index(0)
 
         self._line(

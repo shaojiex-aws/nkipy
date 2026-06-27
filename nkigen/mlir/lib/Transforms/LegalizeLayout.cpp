@@ -649,41 +649,43 @@ struct NkipyLegalizeLayoutPass
 
     auto nest = createBlockLoopNest(builder, loc, effectiveNumBlocks);
 
-    // Compute tile sizes for output dims
-    SmallVector<int64_t> outTileSize(R);
-    for (int64_t i = 0; i < R; i++)
-      outTileSize[i] = info->tileSize[permutation[i]];
-
-    // Output subview (iterate over output blocks)
-    SmallVector<OpFoldResult> offsetsOut, sizesOut, stridesOut;
-    for (int64_t i = 0; i < R; i++) {
-      if (outTileSize[i] == 1) {
-        offsetsOut.push_back(OpFoldResult(nest.ivs[i]));
-      } else {
-        Value ts = builder.create<arith::ConstantIndexOp>(loc, outTileSize[i]);
-        Value offset = builder.create<arith::MulIOp>(loc, nest.ivs[i], ts);
-        offsetsOut.push_back(OpFoldResult(offset));
-      }
-      sizesOut.push_back(builder.getIndexAttr(outTileSize[i]));
-      stridesOut.push_back(builder.getIndexAttr(1));
-    }
-
-    // Input subview (apply inverse permutation to block indices)
+    // Inverse permutation: invPerm[out_dim] = in_dim
     SmallVector<int64_t> invPerm(R);
     for (int64_t i = 0; i < R; i++)
       invPerm[permutation[i]] = i;
 
-    SmallVector<OpFoldResult> offsetsIn, sizesIn, stridesIn;
+    // Output (SBUF) subview: iterate over SBUF blocks using the SBUF tile size
+    // directly. The SBUF is the reference buffer whose layout we're tiling.
+    SmallVector<OpFoldResult> offsetsOut, sizesOut, stridesOut;
     for (int64_t i = 0; i < R; i++) {
-      int64_t srcBlock = invPerm[i];
       if (info->tileSize[i] == 1) {
-        offsetsIn.push_back(OpFoldResult(nest.ivs[srcBlock]));
+        offsetsOut.push_back(OpFoldResult(nest.ivs[i]));
       } else {
         Value ts = builder.create<arith::ConstantIndexOp>(loc, info->tileSize[i]);
-        Value offset = builder.create<arith::MulIOp>(loc, nest.ivs[srcBlock], ts);
+        Value offset = builder.create<arith::MulIOp>(loc, nest.ivs[i], ts);
+        offsetsOut.push_back(OpFoldResult(offset));
+      }
+      sizesOut.push_back(builder.getIndexAttr(info->tileSize[i]));
+      stridesOut.push_back(builder.getIndexAttr(1));
+    }
+
+    // Input (HBM) subview: apply inverse permutation to map output block
+    // indices back to input dimensions. Input tile size at dim i is the
+    // output tile size at the corresponding output dim (permutation[i]).
+    SmallVector<OpFoldResult> offsetsIn, sizesIn, stridesIn;
+    for (int64_t i = 0; i < R; i++) {
+      // Input dim i corresponds to output dim permutation[i].
+      // The block index for that output dim is nest.ivs[permutation[i]].
+      int64_t outDim = permutation[i];
+      int64_t inTile = info->tileSize[outDim];
+      if (inTile == 1) {
+        offsetsIn.push_back(OpFoldResult(nest.ivs[outDim]));
+      } else {
+        Value ts = builder.create<arith::ConstantIndexOp>(loc, inTile);
+        Value offset = builder.create<arith::MulIOp>(loc, nest.ivs[outDim], ts);
         offsetsIn.push_back(OpFoldResult(offset));
       }
-      sizesIn.push_back(builder.getIndexAttr(info->tileSize[i]));
+      sizesIn.push_back(builder.getIndexAttr(inTile));
       stridesIn.push_back(builder.getIndexAttr(1));
     }
 

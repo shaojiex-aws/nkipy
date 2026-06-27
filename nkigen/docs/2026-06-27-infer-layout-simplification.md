@@ -129,18 +129,17 @@ Each function is a single walk, no fixpoint, no multi-pass.
 6. Fix tests that relied on old BFS behavior — add explicit knobs
    where needed.
 
-### Current failures (16) and expected outcome
+### Current failures (15) and expected outcome
 
-Fixable by this rewrite (missing annotations):
+Fixable by this rewrite (missing annotations / transpose decomp):
 - test_head_deconcat, test_qwen3_layer (transpose output unannotated)
 - test_rope, test_rope_3d_compound (similar pattern)
 
 Not fixable (separate issues):
-- test_attention (4): loop/bmm patterns needing SubViewOp fix
+- test_attention (4): loop/bmm patterns, SubViewOp, neuronx-cc
 - test_custom_op (2): custom op resolution
 - test_multi_output (2): BIR emission
 - test_matmul_add, test_rmsnorm, test_softmax: neuronx-cc issues
 - test_sigmoid: codegen assertion
-- test_memref_e2e[matmul]: neuronx-cc compilation
 
-Target after rewrite: ~12 failed (fix 4 from annotation issues).
+Target after rewrite: ~11 failed (fix 4 from annotation issues).
