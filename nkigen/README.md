@@ -105,8 +105,7 @@ Defined in `nkigen/driver/pipeline.py` -> `apply_complete_knob_pipeline()`.
                                  ▼
 ┌─────────────────────────────────────────────────────────────────────┐
 │  PHASE 4: LAYOUT LEGALIZATION                                       │
-│  • annotate-memory-space (assign HBM / SBUF / PSUM)                 │
-│  • canonicalize-reshape (materialize SBUF partition-dim reshapes)   │
+│  • canonicalize-reshape (apply mem_space, materialize SBUF reshapes)│
 │  • legalize-layout (attach #sbuf_map, tile HBM↔SBUF copies)         │
 └────────────────────────────────┬────────────────────────────────────┘
                                  │
@@ -170,9 +169,11 @@ from nkigen.driver.pipeline import apply_complete_knob_pipeline
 ```bash
 source scripts/setup_nki.sh
 
-pytest tests/passes/    # per-pass FileCheck tests
-pytest tests/e2e/       # end-to-end (auto-skips without Trainium)
-pytest tests/unit/      # Python-level unit tests
+pytest tests/ -n auto           # all tests in parallel (uses all cores)
+pytest tests/passes/            # per-pass FileCheck tests
+pytest tests/e2e/               # end-to-end (auto-skips without Trainium)
+pytest tests/unit/              # Python-level unit tests
+pytest tests/ -n auto -q --tb=short  # parallel, quiet, short tracebacks
 ```
 
 Test modes: `Mode.LLVM` (JIT vs NumPy), `Mode.HW` (on-device), `Mode.STRING_CHECK`,

@@ -241,3 +241,54 @@ This way `infer-layout` sees that `%subview_1` already has
 After that, tiling promotes the matmul output to PSUM (separate alloc
 inside the tiled loop), computes there, and copies back to the
 SharedHbm subview — which is exactly what the hardware needs.
+
+### Second bug: linalg-to-nisa `view()` access pattern for >2D HBM
+
+After the layout fix above, the pipeline compiles to NISA successfully
+but neuronx-cc rejects it with an access-pattern-out-of-bounds assertion.
+
+**Background:** `linalg.matmul` requires 2D operands, so the batch_matmul
+decomposition MUST use rank-reducing subviews (`memref<2x256x256> →
+memref<256x256, strided>`). The NISA codegen then flattens the >2D HBM
+base buffer into a 2D `view()` for DMA ops.
+
+For `memref<2x256x256xf32>` accessed through a rank-reducing subview,
+the codegen produces:
+
+```
+view(memref<2x256x256xf32, ...>, f32, [2, 65536])[%iv + d0, col + d1]
+```
+
+The problem: `[2, 65536]` means dim0 has size 2 (the batch dim). But
+`%iv + d0` adds the batch index (0 or 1) to the partition coordinate
+`d0` (range 0..127). Result: index goes up to 128, exceeding size 2.
+
+**Root cause:** `_emit_access_pattern` uses a `first_accessed` heuristic
+to determine which base dim becomes the "row" of the 2D view. It scans
+`tile_shape` for the first dim > 1. But `tile_shape` is `[128, 128]`
+(already rank-reduced to 2D by the subview) — so `first_accessed = 0`
+maps to base dim 0 (batch, size 2) instead of base dim 1 (M, size 256).
+
+**The issue:** `_trace_access` returns `offsets` with one entry per base
+dim (3 entries), but `tile_shape` is the val's type (2D after rank
+reduction). There's no tracking of which base dims the tile dims
+correspond to.
+
+**Fix:** Two cases based on whether `_trace_access` collected more
+offsets than tile dims (indicating a rank-reducing subview):
+
+```python
+if len(offsets) > len(tile_shape):
+    # Rank-reducing subview dropped leading base dims.
+    first_accessed = len(offsets) - len(tile_shape)
+else:
+    # Same rank — find first tile dim > 1 (skip unit dims).
+    first_accessed = next(i for i, t in enumerate(tile_shape) if t > 1)
+```
+
+For bmm: `offsets=[%iv, row, col]` (3), `tile_shape=[128,128]` (2) →
+`first_accessed = 3-2 = 1`, view becomes `[512, 256]`. ✓
+
+For 3D SBUF temp: `offsets=[b, r, c]` (3), `tile_shape=[1,128,64]` (3)
+→ else branch, first dim > 1 at index 1 → `first_accessed=1`,
+view `[4, 8192]`. ✓

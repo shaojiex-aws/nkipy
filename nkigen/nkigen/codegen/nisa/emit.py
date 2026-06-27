@@ -413,19 +413,26 @@ class NisaEmitter:
         needs_view = not is_onchip and base_rank > 2
 
         if needs_view:
-            # Find the first accessed dim (tile size > 1) — this splits
-            # the base into [batch... | accessed_row | accessed_col...]
-            first_accessed = 0
-            for i, t in enumerate(tile_shape):
-                if t > 1:
-                    first_accessed = i
-                    break
+            # Determine which base dim the DMA tile row starts at.
+            if len(offsets) > len(tile_shape):
+                # Rank-reducing subview dropped leading base dims.
+                first_accessed = len(offsets) - len(tile_shape)
+            else:
+                # Same rank — find first tile dim > 1 (skip unit dims).
+                first_accessed = 0
+                for i, t in enumerate(tile_shape):
+                    if t > 1:
+                        first_accessed = i
+                        break
 
-            par = tile_shape[first_accessed]
-            free = 1
-            for d in tile_shape[first_accessed + 1:]:
-                free *= d
-            tile_str = f"{par}| {free}"
+            # Tile row/col dims: when rank-reduced, tile[0] is the row.
+            # When same rank, first_accessed skips leading unit dims.
+            tile_start = 0 if len(offsets) > len(tile_shape) else first_accessed
+            row_size = tile_shape[tile_start]
+            col_size = 1
+            for d in tile_shape[tile_start + 1:]:
+                col_size *= d
+            tile_str = f"{row_size}| {col_size}"
 
             view_c = 1
             for d in base_shape[first_accessed + 1:]:
