@@ -35,24 +35,38 @@ from nkigen.mlir_utils import MEM_SPACE_MAP, mem_space_attr
 
 
 class _KnobBuilder:
-    """Builder returned by `knob(tensor)`.  Methods are side-effecting and
-    emit nkipy.layout / nkipy.tile_op ops; they return ``self`` for
-    chaining."""
+    """Builder returned by `knob(t1, ...)`.
 
-    __slots__ = ("_tensor", "_value", "_loc", "_tile_op_tile_size")
+    Methods are side-effecting (emit nkipy ops) and return ``self``
+    for chaining. In eager mode (no TracedArrays), `knob()` returns
+    a _NoOpKnobBuilder instead.
+    """
 
-    def __init__(self, tensor: Union[TracedArray, Any]):
-        self._tensor = tensor
-        self._value = None
-        self._loc = None
+    __slots__ = ("_values", "_locs", "_tile_op_tile_size")
+
+    def __init__(self, *tensors: Union[TracedArray, Any]):
+        self._values: List = []
+        self._locs: List = []
         self._tile_op_tile_size: Optional[ir.DenseI64ArrayAttr] = None
-        if not isinstance(tensor, TracedArray):
-            return
-        value = tensor.value
-        if value.owner is None:
-            return  # block argument; cannot annotate
-        self._value = value
-        self._loc = value.owner.location
+
+        has_traced = False
+        for i, t in enumerate(tensors):
+            if not isinstance(t, TracedArray):
+                continue
+            has_traced = True
+            v = t.value
+            if v.owner is None:
+                continue
+            self._values.append(v)
+            self._locs.append(v.owner.location)
+
+        if has_traced:
+            for i, t in enumerate(tensors):
+                if not isinstance(t, TracedArray):
+                    raise TypeError(
+                        f"knob() argument {i} is {type(t).__name__}, "
+                        f"expected TracedArray."
+                    )
 
     # ------------------------------------------------------------------
     # Builder methods
@@ -64,18 +78,13 @@ class _KnobBuilder:
         partition_dim: Optional[int] = None,
         mem_space: Optional[str] = None,
     ) -> "_KnobBuilder":
-        """Declare the tensor's memory placement.
-
-        Physical factorization tile for SBUF is auto-derived from the
-        consuming tile_op via indexing maps (InferLayout pass).
-        """
-        if self._value is None:
+        """Declare the tensor's memory placement."""
+        if not self._values:
             return self
 
         if mem_space is not None:
             self._validate_mem_space(mem_space)
         if partition_dim is not None:
-            self._validate_partition_dim(partition_dim)
             if mem_space is not None and mem_space != "Sbuf":
                 raise ValueError(
                     f"partition_dim is only valid with mem_space='Sbuf', "
@@ -83,19 +92,18 @@ class _KnobBuilder:
                     f"HBM has no partition/free dimension concept."
                 )
 
-        mem_space_attr = _mem_space_attr(mem_space)
-        partition_dim_attr = _partition_dim_attr(partition_dim)
-
-        if mem_space_attr is None and partition_dim_attr is None:
+        ms_attr = _mem_space_attr(mem_space)
+        pdim_attr = _partition_dim_attr(partition_dim)
+        if ms_attr is None and pdim_attr is None:
             return self
 
-        nkipy_d.LayoutOp(
-            target=self._value,
-            mem_space=mem_space_attr,
-            partition_dim=partition_dim_attr,
-            tile_size=None,
-            loc=self._loc,
-        )
+        for value, loc in zip(self._values, self._locs):
+            if partition_dim is not None:
+                self._validate_partition_dim(value, partition_dim)
+            nkipy_d.LayoutOp(
+                target=value, mem_space=ms_attr,
+                partition_dim=pdim_attr, tile_size=None, loc=loc,
+            )
         return self
 
     def tile_op(
@@ -106,31 +114,20 @@ class _KnobBuilder:
         """Declare the loop tile for the op producing this tensor.
 
         ``tile_size`` has one entry per iterator of the producing op,
-        in the linalg iterator order — ``tile_size[i]`` applies to
-        iterator ``i`` (no reordering).
-
-        - Elementwise: matches output rank.
-        - Reduction (e.g. ``np.sum(x[M,N], axis=-1)``): matches input
-          rank ([M_t, N_t]); the compiler knows which axis reduces.
-        - Matmul (``A[M,K] @ B[K,N] -> C[M,N]``): three iter dims
-          ([M_t, N_t, K_t]).
+        in the linalg iterator order.
         """
-        if self._value is None:
+        if not self._values:
             return self
 
         if tile_size is not None:
             self._validate_tile_size(tile_size)
 
         tile_size_attr = _dense_i64_attr(tile_size)
-
         if tile_size_attr is None:
             return self
 
-        nkipy_d.TileOp(
-            target=self._value,
-            loop_tile_size=tile_size_attr,
-            loc=self._loc,
-        )
+        for value, loc in zip(self._values, self._locs):
+            nkipy_d.TileOp(target=value, loop_tile_size=tile_size_attr, loc=loc)
         self._tile_op_tile_size = tile_size_attr
         return self
 
@@ -145,16 +142,16 @@ class _KnobBuilder:
 
         ``axis`` lists post-tiling loop levels where a cache buffer for
         ``input_tensor`` will exist.  axis=[-1] means innermost (minimal
-        staging, no reuse).  The buffer shape at each level is auto-derived
-        from loop bounds and indexing maps.
+        staging, no reuse).
         """
-        if self._value is None:
+        if not self._values:
             return self
         if not isinstance(input_tensor, TracedArray):
-            return self
+            raise TypeError(
+                f".cache() input_tensor must be TracedArray, "
+                f"got {type(input_tensor).__name__}"
+            )
         input_value = input_tensor.value
-        if input_value is None:
-            return self
 
         if self._tile_op_tile_size is None:
             raise ValueError(
@@ -177,13 +174,11 @@ class _KnobBuilder:
         axes_attr = ir.DenseI64ArrayAttr.get(axis)
         prefetch_attr = ir.BoolAttr.get(True) if prefetch else None
 
-        nkipy_d.CacheOp(
-            target=self._value,
-            input=input_value,
-            axes=axes_attr,
-            prefetch=prefetch_attr,
-            loc=self._loc,
-        )
+        for value, loc in zip(self._values, self._locs):
+            nkipy_d.CacheOp(
+                target=value, input=input_value,
+                axes=axes_attr, prefetch=prefetch_attr, loc=loc,
+            )
         return self
 
     # ------------------------------------------------------------------
@@ -197,12 +192,12 @@ class _KnobBuilder:
                 f"Must be one of: {set(MEM_SPACE_MAP)}"
             )
 
-    def _validate_partition_dim(self, partition_dim: int) -> None:
+    def _validate_partition_dim(self, value, partition_dim: int) -> None:
         if partition_dim < 0:
             raise ValueError(
                 f"partition_dim must be non-negative, got {partition_dim}"
             )
-        tensor_type = self._value.type
+        tensor_type = value.type
         if hasattr(tensor_type, "shape"):
             rank = len(tensor_type.shape)
             if partition_dim >= rank:
@@ -210,6 +205,20 @@ class _KnobBuilder:
                     f"partition_dim {partition_dim} must be less than "
                     f"tensor rank {rank}"
                 )
+
+    def fuse(self) -> "_KnobBuilder":
+        """Fuse the scf.for loops producing these tensors into one loop.
+
+        Requires 2+ tensors, each with a matching .tile_op() annotation.
+        """
+        if not self._values:
+            return self
+        if len(self._values) < 2:
+            raise ValueError(
+                f"fuse() requires at least 2 tensors, got {len(self._values)}"
+            )
+        nkipy_d.FuseOp(targets=self._values, loc=self._locs[0])
+        return self
 
     def _validate_tile_size(self, tile_size: List[int]) -> None:
         if any(t <= 0 for t in tile_size):
@@ -226,49 +235,13 @@ class _KnobBuilder:
 # ----------------------------------------------------------------------
 
 
-def knob(tensor: Union[TracedArray, Any]) -> _KnobBuilder:
-    """Return a builder for annotating ``tensor``.  Usage:
+def knob(*tensors: Union[TracedArray, Any]) -> _KnobBuilder:
+    """Return a builder for annotating tensors. Usage:
 
-        knob(x).layout(mem_space="Sbuf")
         knob(x).tile_op(tile_size=[64, 64]).layout(mem_space="Sbuf")
-
-    If ``tensor`` is not a TracedArray (e.g. a plain numpy array during
-    eager execution), the returned builder is a no-op.
+        knob(a, b).fuse()
     """
-    return _KnobBuilder(tensor)
-
-
-def fuse(*tensors: Union[TracedArray, Any]) -> None:
-    """Hint the compiler to fuse the scf.for loops producing the given
-    tensors into a single loop.  Each tensor must already carry a
-    matching ``.tile_op(tile_size=...)`` annotation; fusion runs after
-    tiling and only succeeds when the resulting loops have identical
-    bounds.
-
-    Usage:
-        c = a + b
-        d = c * 2
-        knob.knob(c).tile_op(tile_size=[128, 128])
-        knob.knob(d).tile_op(tile_size=[128, 128])
-        knob.fuse(c, d)   # one loop instead of two
-
-    Non-TracedArray inputs (eager mode) are skipped, matching the
-    no-op behaviour of ``knob()``.
-    """
-    if len(tensors) < 2:
-        raise ValueError(f"fuse() requires at least 2 tensors, got {len(tensors)}")
-    values = []
-    loc = None
-    for t in tensors:
-        if not isinstance(t, TracedArray):
-            return
-        v = t.value
-        if v.owner is None:
-            return  # block argument; cannot fuse
-        values.append(v)
-        if loc is None:
-            loc = v.owner.location
-    nkipy_d.FuseOp(targets=values, loc=loc)
+    return _KnobBuilder(*tensors)
 
 
 # ----------------------------------------------------------------------

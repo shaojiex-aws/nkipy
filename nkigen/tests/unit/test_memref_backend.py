@@ -144,7 +144,7 @@ def test_memref_fusion():
         knob.knob(x).tile_op(tile_size=[128, 128])
         y = c + d
         knob.knob(y).tile_op(tile_size=[128, 128])
-        knob.fuse(x, y)
+        knob.knob(x, y).fuse()
         return x, y
 
     run_kernel_test(
