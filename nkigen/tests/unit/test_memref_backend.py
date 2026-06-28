@@ -118,7 +118,7 @@ def test_memref_tiling(specs, fn, tile_size, expected_ir):
         a = args[0]
         b = args[1] if len(args) > 1 else None
         result = fn(a, b)
-        knob.knob(result).tile_op(tile_size=tile_size)
+        knob(result).tile_op(tile_size=tile_size)
         return result
 
     run_kernel_test(
@@ -141,10 +141,10 @@ def test_memref_fusion():
     ])
     def kernel(a, b, c, d):
         x = a + b
-        knob.knob(x).tile_op(tile_size=[128, 128])
+        knob(x).tile_op(tile_size=[128, 128])
         y = c + d
-        knob.knob(y).tile_op(tile_size=[128, 128])
-        knob.knob(x, y).fuse()
+        knob(y).tile_op(tile_size=[128, 128])
+        knob(x, y).fuse()
         return x, y
 
     run_kernel_test(
@@ -182,7 +182,7 @@ def test_memref_e2e(specs, fn, tile_size):
         a = args[0]
         b = args[1] if len(args) > 1 else None
         result = fn(a, b)
-        knob.knob(result).tile_op(tile_size=tile_size)
+        knob(result).tile_op(tile_size=tile_size)
         return result
 
     run_kernel_test(

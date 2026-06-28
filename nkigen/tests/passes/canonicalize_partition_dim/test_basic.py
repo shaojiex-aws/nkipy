@@ -30,7 +30,7 @@ def test_partition_dim_zero_is_noop():
     @trace(input_specs=[(shape, "f32")])
     def kernel(x):
         y = np.exp(x)
-        knob.knob(y).tile_op(tile_size=[128, 128]).layout(mem_space="Sbuf", partition_dim=0)
+        knob(y).tile_op(tile_size=[128, 128]).layout(mem_space="Sbuf", partition_dim=0)
         return y
 
     run_kernel_test(
@@ -58,7 +58,7 @@ def test_single_op_partition_dim_1():
     @trace(input_specs=[((M, N), "f32")])
     def kernel(x):
         y = np.exp(x)
-        knob.knob(y).tile_op(tile_size=[M, N]).layout(mem_space="Sbuf", partition_dim=1)
+        knob(y).tile_op(tile_size=[M, N]).layout(mem_space="Sbuf", partition_dim=1)
         return y
 
     # After the pass, we expect:
@@ -100,7 +100,7 @@ def test_elementwise_chain_partition_dim_1():
     def kernel(x):
         y = np.exp(x)
         z = y + 1.0
-        knob.knob(z).tile_op(tile_size=[M, N]).layout(mem_space="Sbuf", partition_dim=1)
+        knob(z).tile_op(tile_size=[M, N]).layout(mem_space="Sbuf", partition_dim=1)
         return z
 
     # After the pass:
@@ -141,7 +141,7 @@ def test_partition_dim_1_tiling_executes():
     def kernel(x):
         y = np.exp(x)
         z = y + 1.0
-        knob.knob(z).tile_op(tile_size=[M, N]).layout(mem_space="Sbuf", partition_dim=1)
+        knob(z).tile_op(tile_size=[M, N]).layout(mem_space="Sbuf", partition_dim=1)
         return z
 
     run_kernel_test(
@@ -171,7 +171,7 @@ def test_3d_partition_dim_2():
     @trace(input_specs=[((B, M, N), "f32")])
     def kernel(x):
         y = x + 1.0
-        knob.knob(y).tile_op(tile_size=[1, M, N]).layout(mem_space="Sbuf", partition_dim=2)
+        knob(y).tile_op(tile_size=[1, M, N]).layout(mem_space="Sbuf", partition_dim=2)
         return y
 
     run_kernel_test(
@@ -203,7 +203,7 @@ def test_3d_partition_dim_2_executes():
     @trace(input_specs=[((B, M, N), "f32")])
     def kernel(x):
         y = x + 1.0
-        knob.knob(y).tile_op(tile_size=[1, M, N]).layout(mem_space="Sbuf", partition_dim=2)
+        knob(y).tile_op(tile_size=[1, M, N]).layout(mem_space="Sbuf", partition_dim=2)
         return y
 
     run_kernel_test(
@@ -243,7 +243,7 @@ def test_3d_broadcast_generic_partition_dim_1():
     ])
     def kernel(a, b):
         result = a * b
-        knob.knob(result).tile_op(tile_size=tile_size).layout(mem_space="Sbuf", partition_dim=1)
+        knob(result).tile_op(tile_size=tile_size).layout(mem_space="Sbuf", partition_dim=1)
         return result
 
     # After the pass, shapes should be permuted and the broadcast generic
@@ -276,7 +276,7 @@ def test_3d_broadcast_generic_executes():
     ])
     def kernel(a, b):
         result = a * b
-        knob.knob(result).tile_op(tile_size=tile_size).layout(mem_space="Sbuf", partition_dim=1)
+        knob(result).tile_op(tile_size=tile_size).layout(mem_space="Sbuf", partition_dim=1)
         return result
 
     run_kernel_test(
@@ -302,7 +302,7 @@ def test_matmul_partition_dim_errors():
     @trace(input_specs=[((M, K), "f32"), ((K, N), "f32")])
     def kernel(a, b):
         c = np.matmul(a, b)
-        knob.knob(c).tile_op(tile_size=[M, N, K]).layout(mem_space="Sbuf", partition_dim=1)
+        knob(c).tile_op(tile_size=[M, N, K]).layout(mem_space="Sbuf", partition_dim=1)
         return c
 
     with pytest.raises(RuntimeError, match="matmul"):

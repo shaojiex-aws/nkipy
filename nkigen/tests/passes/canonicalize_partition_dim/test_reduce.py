@@ -34,10 +34,10 @@ def test_3d_reduction_max_partition_dim_1():
     @trace(input_specs=[((B, M, N), "f32")])
     def kernel(x):
         sq = x * x
-        knob.knob(sq).tile_op(tile_size=[1, M, N]).layout(mem_space="Sbuf", partition_dim=1)
+        knob(sq).tile_op(tile_size=[1, M, N]).layout(mem_space="Sbuf", partition_dim=1)
 
         sm = np.max(sq, axis=-1, keepdims=True)
-        knob.knob(sm).tile_op(tile_size=[1, M, N]).layout(mem_space="Sbuf", partition_dim=1)
+        knob(sm).tile_op(tile_size=[1, M, N]).layout(mem_space="Sbuf", partition_dim=1)
         return sm
 
     # String check: verify transposes and permuted shapes
@@ -79,10 +79,10 @@ def test_3d_reduction_sum_partition_dim_1():
     @trace(input_specs=[((B, M, N), "f32")])
     def kernel(x):
         y = x + 1.0
-        knob.knob(y).tile_op(tile_size=[1, M, N]).layout(mem_space="Sbuf", partition_dim=1)
+        knob(y).tile_op(tile_size=[1, M, N]).layout(mem_space="Sbuf", partition_dim=1)
 
         sm = np.sum(y, axis=-1, keepdims=True)
-        knob.knob(sm).tile_op(tile_size=[1, M, N]).layout(mem_space="Sbuf", partition_dim=1)
+        knob(sm).tile_op(tile_size=[1, M, N]).layout(mem_space="Sbuf", partition_dim=1)
         return sm
 
     # String check: verify transposes and permuted shapes

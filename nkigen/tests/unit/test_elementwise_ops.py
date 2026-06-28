@@ -33,7 +33,7 @@ def test_binary_op(op, ir_op, shape, dtype, tile_size):
     @trace(input_specs=[(shape, dtype), (shape, dtype)])
     def kernel(a, b):
         result = op(a, b)
-        knob.knob(result).tile_op(tile_size=tile_size)
+        knob(result).tile_op(tile_size=tile_size)
         return result
 
     run_kernel_test(
@@ -73,7 +73,7 @@ def test_divide(shape, dtype, tile_size):
     @trace(input_specs=[(shape, dtype), (shape, dtype)])
     def kernel(a, b):
         result = np.divide(a, b)
-        knob.knob(result).tile_op(tile_size=tile_size)
+        knob(result).tile_op(tile_size=tile_size)
         return result
 
     np.random.seed(42)
@@ -108,7 +108,7 @@ def test_scalar_op(op, scalar, tile_size):
     @trace(input_specs=[((128, 256), "f32")])
     def kernel(a):
         result = op(a, scalar)
-        knob.knob(result).tile_op(tile_size=tile_size)
+        knob(result).tile_op(tile_size=tile_size)
         return result
 
     run_kernel_test(kernel, stop_after="trace", modes=Mode.LLVM)
@@ -143,7 +143,7 @@ def test_unary_op(op, ir_op, nisa_op, shape, dtype, tile_size):
     @trace(input_specs=[(shape, dtype)])
     def kernel(a):
         result = op(a)
-        knob.knob(result).tile_op(tile_size=tile_size)
+        knob(result).tile_op(tile_size=tile_size)
         return result
 
     run_kernel_test(
@@ -197,7 +197,7 @@ def test_sqrt(shape, dtype, tile_size):
     @trace(input_specs=[(shape, dtype)])
     def kernel(a):
         result = np.sqrt(a)
-        knob.knob(result).tile_op(tile_size=tile_size)
+        knob(result).tile_op(tile_size=tile_size)
         return result
 
     np.random.seed(42)
@@ -234,7 +234,7 @@ def test_exp(shape, dtype, tile_size):
     @trace(input_specs=[(shape, dtype)])
     def kernel(a):
         result = np.exp(a)
-        knob.knob(result).tile_op(tile_size=tile_size)
+        knob(result).tile_op(tile_size=tile_size)
         return result
 
     np.random.seed(42)
@@ -270,7 +270,7 @@ def test_add_then_multiply():
     @trace(input_specs=[((128, 256), "f32"), ((128, 256), "f32")])
     def kernel(A, B):
         temp = np.add(A, B)
-        knob.knob(temp).tile_op(tile_size=[64, 128])
+        knob(temp).tile_op(tile_size=[64, 128])
         return np.multiply(temp, 2.0)
 
     run_kernel_test(
@@ -289,7 +289,7 @@ def test_add_then_square():
     @trace(input_specs=[((128, 256), "f32"), ((128, 256), "f32")])
     def kernel(A, B):
         result = np.square(np.add(A, B))
-        knob.knob(result).tile_op(tile_size=[64, 128])
+        knob(result).tile_op(tile_size=[64, 128])
         return result
 
     run_kernel_test(
@@ -309,7 +309,7 @@ def test_square_then_divide():
     @trace(input_specs=[((128, 256), "f32"), ((128, 256), "f32")])
     def kernel(A, B):
         squared = np.square(A)
-        knob.knob(squared).tile_op(tile_size=[64, 128])
+        knob(squared).tile_op(tile_size=[64, 128])
         return np.divide(squared, B)
 
     np.random.seed(42)
@@ -337,7 +337,7 @@ def test_complex_expression():
     ])
     def kernel(A, B, C):
         squared = np.square(A)
-        knob.knob(squared).tile_op(tile_size=[128, 128])
+        knob(squared).tile_op(tile_size=[128, 128])
         sum_result = np.add(squared, B)
         return np.divide(sum_result, C)
 
@@ -365,7 +365,7 @@ def test_square_in_expression():
     @trace(input_specs=[((128, 256), "f32")])
     def kernel(A):
         squared = np.square(A)
-        knob.knob(squared).tile_op(tile_size=[64, 128])
+        knob(squared).tile_op(tile_size=[64, 128])
         return np.add(squared, 1.0)
 
     run_kernel_test(
@@ -385,7 +385,7 @@ def test_exp_in_expression():
     @trace(input_specs=[((128, 128), "f32")])
     def kernel(A):
         squared = np.square(A)
-        knob.knob(squared).tile_op(tile_size=[64, 64])
+        knob(squared).tile_op(tile_size=[64, 64])
         return np.exp(squared * 0.1)
 
     np.random.seed(42)
@@ -410,7 +410,7 @@ def test_sqrt_in_expression():
     @trace(input_specs=[((128, 128), "f32")])
     def kernel(A):
         squared = np.square(A)
-        knob.knob(squared).tile_op(tile_size=[64, 64])
+        knob(squared).tile_op(tile_size=[64, 64])
         return np.sqrt(squared)
 
     np.random.seed(42)

@@ -37,7 +37,7 @@ def test_tensor_div_tensor_same_shape():
     @trace(input_specs=[(shape, "f32"), (shape, "f32")])
     def kernel(a, b):
         result = np.divide(a, b)
-        knob.knob(result).tile_op(tile_size=tile_size)
+        knob(result).tile_op(tile_size=tile_size)
         return result
 
     np.random.seed(42)
@@ -78,7 +78,7 @@ def test_tensor_div_scalar():
     @trace(input_specs=[(shape, "f32")])
     def kernel(x):
         result = x / 2.0
-        knob.knob(result).tile_op(tile_size=tile_size)
+        knob(result).tile_op(tile_size=tile_size)
         return result
 
     # After prepare-arithmetic: divf replaced by mulf in body
@@ -114,7 +114,7 @@ def test_scalar_div_tensor():
     @trace(input_specs=[(shape, "f32")])
     def kernel(x):
         result = 1.0 / x
-        knob.knob(result).tile_op(tile_size=tile_size)
+        knob(result).tile_op(tile_size=tile_size)
         return result
 
     # After prepare-arithmetic: replaced by linalg.reciprocal
@@ -152,7 +152,7 @@ def test_broadcast_div_column():
     @trace(input_specs=[(shape_a, "f32"), (shape_b, "f32")])
     def kernel(a, b):
         result = np.divide(a, b)
-        knob.knob(result).tile_op(tile_size=tile_size)
+        knob(result).tile_op(tile_size=tile_size)
         return result
 
     np.random.seed(42)
@@ -188,7 +188,7 @@ def test_broadcast_div_row():
     @trace(input_specs=[(shape_a, "f32"), (shape_b, "f32")])
     def kernel(a, b):
         result = np.divide(a, b)
-        knob.knob(result).tile_op(tile_size=tile_size)
+        knob(result).tile_op(tile_size=tile_size)
         return result
 
     np.random.seed(42)
@@ -226,7 +226,7 @@ def test_broadcast_div_rmsnorm_pattern():
     @trace(input_specs=[(shape_a, "f32"), (shape_b, "f32")])
     def kernel(values, rms):
         result = np.divide(values, rms)
-        knob.knob(result).tile_op(tile_size=tile_size)
+        knob(result).tile_op(tile_size=tile_size)
         return result
 
     np.random.seed(42)

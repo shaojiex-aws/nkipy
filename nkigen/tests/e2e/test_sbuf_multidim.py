@@ -26,7 +26,7 @@ def test_3d_temp_sbuf_single_leading_one():
     @trace(input_specs=[((BH, M, N), "f32"), ((BH, M, N), "f32")])
     def kernel(a, b):
         result = a + b
-        knob.knob(result).tile_op(tile_size=[1, 128, 64]).layout(mem_space="SharedHbm")
+        knob(result).tile_op(tile_size=[1, 128, 64]).layout(mem_space="SharedHbm")
         return result
 
     run_kernel_test(
@@ -48,7 +48,7 @@ def test_4d_temp_sbuf_multiple_leading_ones():
     @trace(input_specs=[((B1, B2, M, N), "f32"), ((B1, B2, M, N), "f32")])
     def kernel(a, b):
         result = a + b
-        knob.knob(result).tile_op(tile_size=[1, 1, 128, 64]).layout(mem_space="SharedHbm")
+        knob(result).tile_op(tile_size=[1, 1, 128, 64]).layout(mem_space="SharedHbm")
         return result
 
     run_kernel_test(
@@ -72,12 +72,12 @@ def test_3d_user_sbuf_partition_dim0():
     ])
     def kernel(a, b, c):
         intermediate = a + b
-        knob.knob(intermediate).tile_op(tile_size=[128, 1, 64]).layout(
+        knob(intermediate).tile_op(tile_size=[128, 1, 64]).layout(
             mem_space="Sbuf", partition_dim=0
         )
 
         result = intermediate + c
-        knob.knob(result).tile_op(tile_size=[128, 1, 64]).layout(mem_space="SharedHbm")
+        knob(result).tile_op(tile_size=[128, 1, 64]).layout(mem_space="SharedHbm")
         return result
 
     run_kernel_test(
@@ -102,12 +102,12 @@ def test_3d_user_sbuf_partition_dim1():
     ])
     def kernel(a, b, c):
         intermediate = a + b
-        knob.knob(intermediate).tile_op(tile_size=[1, 128, 64]).layout(
+        knob(intermediate).tile_op(tile_size=[1, 128, 64]).layout(
             mem_space="Sbuf", partition_dim=1
         )
 
         result = intermediate + c
-        knob.knob(result).tile_op(tile_size=[1, 128, 64]).layout(mem_space="SharedHbm")
+        knob(result).tile_op(tile_size=[1, 128, 64]).layout(mem_space="SharedHbm")
         return result
 
     run_kernel_test(

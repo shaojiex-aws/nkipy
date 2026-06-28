@@ -35,10 +35,10 @@ def test_two_matmuls_different_tiles():
     @trace(input_specs=[((M, K), "f32"), ((K, N), "f32"), ((N, N), "f32")])
     def two_matmul_kernel(a, b, e):
         c = np.matmul(a, b)
-        knob.knob(c).tile_op(tile_size=[128, 128, 128])
+        knob(c).tile_op(tile_size=[128, 128, 128])
 
         d = np.matmul(c, e)
-        knob.knob(d).tile_op(tile_size=[64, 64, 64])
+        knob(d).tile_op(tile_size=[64, 64, 64])
 
         return d
 
@@ -76,10 +76,10 @@ def test_two_adds_different_tiles():
     @trace(input_specs=[(shape, "f32"), (shape, "f32"), (shape, "f32")])
     def two_add_kernel(a, b, e):
         c = a + b
-        knob.knob(c).tile_op(tile_size=[128, 128])
+        knob(c).tile_op(tile_size=[128, 128])
 
         d = c + e
-        knob.knob(d).tile_op(tile_size=[64, 64])
+        knob(d).tile_op(tile_size=[64, 64])
 
         return d
 
@@ -114,13 +114,13 @@ def test_three_matmuls_same_and_different_tiles():
     ])
     def three_matmul_kernel(a, b, e, g):
         c = np.matmul(a, b)
-        knob.knob(c).tile_op(tile_size=[128, 128, 128])
+        knob(c).tile_op(tile_size=[128, 128, 128])
 
         d = np.matmul(c, e)
-        knob.knob(d).tile_op(tile_size=[64, 64, 64])
+        knob(d).tile_op(tile_size=[64, 64, 64])
 
         f = np.matmul(d, g)
-        knob.knob(f).tile_op(tile_size=[128, 128, 128])
+        knob(f).tile_op(tile_size=[128, 128, 128])
 
         return f
 
@@ -144,10 +144,10 @@ def test_mixed_matmul_and_add():
     @trace(input_specs=[((M, K), "f32"), ((K, N), "f32"), ((M, N), "f32")])
     def mixed_kernel(a, b, e):
         c = np.matmul(a, b)
-        knob.knob(c).tile_op(tile_size=[128, 128, 128])
+        knob(c).tile_op(tile_size=[128, 128, 128])
 
         d = c + e
-        knob.knob(d).tile_op(tile_size=[64, 64])
+        knob(d).tile_op(tile_size=[64, 64])
 
         return d
 
@@ -176,11 +176,11 @@ def test_matmul_add_chain():
     @trace(input_specs=[((M, K), "f32"), ((K, N), "f32"), ((M, N), "f32")])
     def matmul_add_kernel(a, b, bias):
         c = np.matmul(a, b)
-        knob.knob(c).tile_op(tile_size=[128, 128, 128])
+        knob(c).tile_op(tile_size=[128, 128, 128])
 
         # Add bias - using same spatial tile sizes as matmul output
         d = c + bias
-        knob.knob(d).tile_op(tile_size=[128, 128])
+        knob(d).tile_op(tile_size=[128, 128])
 
         return d
 

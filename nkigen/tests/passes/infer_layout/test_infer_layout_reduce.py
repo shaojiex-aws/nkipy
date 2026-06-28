@@ -36,12 +36,12 @@ def test_mean_propagates_to_sum():
     @trace(input_specs=[((M, N), "f32")])
     def kernel(x):
         sq = np.square(x.astype(np.float32))
-        knob.knob(sq).tile_op(tile_size=TILE_SIZE).layout(mem_space="Sbuf")
+        knob(sq).tile_op(tile_size=TILE_SIZE).layout(mem_space="Sbuf")
 
         result = np.mean(sq, axis=-1, keepdims=True)
         # divide(mean) is rank-2; the user supplies the elementwise output
         # tile here.
-        knob.knob(result).tile_op(tile_size=[128, 1]).layout(mem_space="SharedHbm")
+        knob(result).tile_op(tile_size=[128, 1]).layout(mem_space="SharedHbm")
         return result
 
     # Verify tile_op propagation ordering:
@@ -96,11 +96,11 @@ def test_rmsnorm_reduction_knob_propagation():
     @trace(input_specs=[((M, N), "f32")])
     def kernel(x):
         sq = np.square(x)
-        knob.knob(sq).tile_op(tile_size=tile_size).layout(mem_space="Sbuf")
+        knob(sq).tile_op(tile_size=tile_size).layout(mem_space="Sbuf")
         mean_sq = np.sum(sq, axis=1, keepdims=True) / 256.0
         rms = np.sqrt(mean_sq + eps)
         result = np.divide(x, rms)
-        knob.knob(result).tile_op(tile_size=tile_size).layout(mem_space="SharedHbm")
+        knob(result).tile_op(tile_size=tile_size).layout(mem_space="SharedHbm")
         return result
 
     # Verify the sum (keepdims=True) reduction's nkipy.layout gets the

@@ -173,11 +173,30 @@ pytest tests/ -n auto           # all tests in parallel (uses all cores)
 pytest tests/passes/            # per-pass FileCheck tests
 pytest tests/e2e/               # end-to-end (auto-skips without Trainium)
 pytest tests/unit/              # Python-level unit tests
+pytest -k test_add_2d           # name substring match
 pytest tests/ -n auto -q --tb=short  # parallel, quiet, short tracebacks
 ```
 
-Test modes: `Mode.LLVM` (JIT vs NumPy), `Mode.HW` (on-device), `Mode.STRING_CHECK`,
-`Mode.FILECHECK`. See `tests/README.md`.
+### Test Modes
+
+`Mode` flags in `tests/harness.py` control how each test verifies its kernel.
+Modes can be combined with `|`, e.g. `Mode.HW | Mode.STRING_CHECK`.
+
+| Mode | Meaning |
+|------|---------|
+| `LLVM` | LLVM JIT execution, compare to NumPy. Requires `stop_after`. |
+| `HW` | Trainium hardware execution. Auto-skips when no device is detected. |
+| `STRING_CHECK` | Assert compiled IR contains/excludes specific strings. |
+| `FILECHECK` | Run LLVM FileCheck against the compiled IR. |
+| `CODEGEN` | KernelBuilder codegen round-trip: gen KB Python, simulate, compare to NumPy. |
+
+### Dumping IR
+
+Pass `--dump-ir` to any test to save intermediate MLIR after every compiler pass:
+
+```bash
+pytest tests/e2e/test_rope.py::test_rope --dump-ir -v -s
+```
 
 ## License
 

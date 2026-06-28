@@ -54,7 +54,7 @@ def test_matmul_loop_canonicalization(M, N, K, tile_size, reduction_tile, reques
     @trace(input_specs=[((M, K), "f32"), ((K, N), "f32")])
     def matmul_kernel(a, b):
         result = np.matmul(a, b)
-        knob.knob(result).tile_op(tile_size=tile_size + reduction_tile)
+        knob(result).tile_op(tile_size=tile_size + reduction_tile)
         return result
 
     # Strict checks for matmul:

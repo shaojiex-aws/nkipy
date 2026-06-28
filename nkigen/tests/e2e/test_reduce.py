@@ -38,10 +38,10 @@ def test_reduce_square_trace(reduce_fn):
     @trace(input_specs=[((M, N), "f32")])
     def kernel(x):
         sq = np.square(x.astype(np.float32))
-        knob.knob(sq).tile_op(tile_size=TILE_SIZE).layout(mem_space="Sbuf")
+        knob(sq).tile_op(tile_size=TILE_SIZE).layout(mem_space="Sbuf")
 
         result = reduce_op(sq, axis=-1, keepdims=True)
-        knob.knob(result).tile_op(tile_size=[128, 1, 128]).layout(mem_space="SharedHbm")
+        knob(result).tile_op(tile_size=[128, 1, 128]).layout(mem_space="SharedHbm")
         return result
 
     run_kernel_test(
@@ -72,10 +72,10 @@ def test_reduce_sum_sim():
     @trace(input_specs=[((M, N), "f32")])
     def kernel(x):
         sq = np.square(x.astype(np.float32))
-        knob.knob(sq).tile_op(tile_size=TILE_SIZE).layout(mem_space="Sbuf")
+        knob(sq).tile_op(tile_size=TILE_SIZE).layout(mem_space="Sbuf")
 
         result = np.sum(sq, axis=-1, keepdims=True)
-        knob.knob(result).tile_op(tile_size=[128, 128]).layout(mem_space="SharedHbm")
+        knob(result).tile_op(tile_size=[128, 128]).layout(mem_space="SharedHbm")
         return result
 
     run_kernel_test(
@@ -99,13 +99,13 @@ def test_reduce_mean_sim():
     @trace(input_specs=[((M, N), "f32")])
     def kernel(x):
         sq = np.square(x.astype(np.float32))
-        knob.knob(sq).tile_op(tile_size=TILE_SIZE).layout(mem_space="Sbuf")
+        knob(sq).tile_op(tile_size=TILE_SIZE).layout(mem_space="Sbuf")
 
         sm = np.sum(sq, axis=-1, keepdims=True)
-        knob.knob(sm).tile_op(tile_size=[128, 128]).layout(mem_space="SharedHbm")
+        knob(sm).tile_op(tile_size=[128, 128]).layout(mem_space="SharedHbm")
 
         result = sm * np.float32(1.0 / N)
-        knob.knob(result).tile_op(tile_size=[128, 1]).layout(mem_space="SharedHbm")
+        knob(result).tile_op(tile_size=[128, 1]).layout(mem_space="SharedHbm")
         return result
 
     run_kernel_test(

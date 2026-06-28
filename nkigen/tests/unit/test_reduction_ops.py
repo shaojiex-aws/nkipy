@@ -32,7 +32,7 @@ def test_sum_axis(shape, axis, keepdims, tile_size, reduction_tile):
     @trace(input_specs=[(shape, "f32")])
     def kernel(a):
         result = np.sum(a, axis=axis, keepdims=keepdims)
-        knob.knob(result).tile_op(tile_size=tile_size + reduction_tile)
+        knob(result).tile_op(tile_size=tile_size + reduction_tile)
         return result
 
     run_kernel_test(
@@ -94,7 +94,7 @@ def test_mean_axis(shape, axis, keepdims, tile_size, reduction_tile):
     def kernel(a):
         # Decompose mean as sum * (1/N) so we can annotate the reduction
         sm = np.sum(a, axis=axis, keepdims=keepdims)
-        knob.knob(sm).tile_op(tile_size=tile_size + reduction_tile)
+        knob(sm).tile_op(tile_size=tile_size + reduction_tile)
         return sm * np.float32(1.0 / N)
 
     run_kernel_test(
@@ -150,7 +150,7 @@ def test_max_axis(shape, axis, keepdims, tile_size, reduction_tile):
     @trace(input_specs=[(shape, "f32")])
     def kernel(a):
         result = np.max(a, axis=axis, keepdims=keepdims)
-        knob.knob(result).tile_op(tile_size=tile_size + reduction_tile)
+        knob(result).tile_op(tile_size=tile_size + reduction_tile)
         return result
 
     run_kernel_test(
@@ -205,7 +205,7 @@ def test_min_axis(shape, axis, keepdims, tile_size, reduction_tile):
     @trace(input_specs=[(shape, "f32")])
     def kernel(a):
         result = np.min(a, axis=axis, keepdims=keepdims)
-        knob.knob(result).tile_op(tile_size=tile_size + reduction_tile)
+        knob(result).tile_op(tile_size=tile_size + reduction_tile)
         return result
 
     run_kernel_test(
@@ -252,10 +252,10 @@ def test_sum_of_squares():
     @trace(input_specs=[((128, 256), "f32")])
     def kernel(a):
         sq = np.square(a)
-        knob.knob(sq).tile_op(tile_size=[64, 128])
+        knob(sq).tile_op(tile_size=[64, 128])
 
         result = np.sum(sq, axis=-1, keepdims=True)
-        knob.knob(result).tile_op(tile_size=[64, 128])
+        knob(result).tile_op(tile_size=[64, 128])
         return result
 
     run_kernel_test(
@@ -290,10 +290,10 @@ def test_mean_of_squares():
     @trace(input_specs=[((128, N), "f32")])
     def kernel(a):
         sq = np.square(a)
-        knob.knob(sq).tile_op(tile_size=[64, 128])
+        knob(sq).tile_op(tile_size=[64, 128])
 
         sm = np.sum(sq, axis=-1, keepdims=True)
-        knob.knob(sm).tile_op(tile_size=[64, 128])
+        knob(sm).tile_op(tile_size=[64, 128])
         return sm * np.float32(1.0 / N)
 
     run_kernel_test(
@@ -329,12 +329,12 @@ def test_softmax_reductions():
     @trace(input_specs=[((128, 256), "f32")])
     def kernel(a):
         a_max = np.max(a, axis=-1, keepdims=True)
-        knob.knob(a_max).tile_op(tile_size=[64, 128])
+        knob(a_max).tile_op(tile_size=[64, 128])
 
         exp_a = np.exp(a - a_max)
 
         exp_sum = np.sum(exp_a, axis=-1, keepdims=True)
-        knob.knob(exp_sum).tile_op(tile_size=[64, 128])
+        knob(exp_sum).tile_op(tile_size=[64, 128])
 
         return exp_a / exp_sum
 

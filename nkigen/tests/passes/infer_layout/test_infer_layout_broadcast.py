@@ -34,7 +34,7 @@ def test_broadcast_div_propagates_clamped_tile():
     def kernel(x, reduced):
         intermediate = reduced + np.float32(1e-6)
         normed = x / np.sqrt(intermediate)
-        knob.knob(normed).tile_op(tile_size=[128, 128]).layout(mem_space="Sbuf")
+        knob(normed).tile_op(tile_size=[128, 128]).layout(mem_space="Sbuf")
         return normed
 
     # After infer-layout, the (256,1) ops should get clamped tile_size=[128, 1]
@@ -69,16 +69,16 @@ def test_broadcast_div_full_rmsnorm_pattern():
         x_fp32 = x.astype(np.float32)
 
         sq = np.square(x_fp32)
-        knob.knob(sq).tile_op(tile_size=tile_size).layout(mem_space="Sbuf")
+        knob(sq).tile_op(tile_size=tile_size).layout(mem_space="Sbuf")
 
         sum_sq = np.sum(sq, axis=-1, keepdims=True)
-        knob.knob(sum_sq).tile_op(tile_size=[128, 128]).layout(mem_space="Sbuf")
+        knob(sum_sq).tile_op(tile_size=[128, 128]).layout(mem_space="Sbuf")
 
         mean_sq = sum_sq * np.float32(1.0 / N)
-        knob.knob(mean_sq).tile_op(tile_size=[128, 1]).layout(mem_space="Sbuf")
+        knob(mean_sq).tile_op(tile_size=[128, 1]).layout(mem_space="Sbuf")
 
         normed = x_fp32 / np.sqrt(mean_sq + eps)
-        knob.knob(normed).tile_op(tile_size=tile_size).layout(mem_space="Sbuf")
+        knob(normed).tile_op(tile_size=tile_size).layout(mem_space="Sbuf")
 
         return normed
 

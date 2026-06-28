@@ -42,7 +42,7 @@ def test_add_tiling(shape, tile_size):
     @trace(input_specs=[(shape, "f32"), (shape, "f32")])
     def add_kernel(a, b):
         result = a + b
-        knob.knob(result).tile_op(tile_size=tile_size)
+        knob(result).tile_op(tile_size=tile_size)
         return result
 
     # Build FileCheck patterns based on dimensionality
@@ -86,7 +86,7 @@ def test_sub_2d():
     @trace(input_specs=[(shape, "f32"), (shape, "f32")])
     def sub_kernel(a, b):
         result = a - b
-        knob.knob(result).tile_op(tile_size=tile_size)
+        knob(result).tile_op(tile_size=tile_size)
         return result
 
     run_kernel_test(
@@ -106,7 +106,7 @@ def test_mul_2d():
     @trace(input_specs=[(shape, "f32"), (shape, "f32")])
     def mul_kernel(a, b):
         result = a * b
-        knob.knob(result).tile_op(tile_size=tile_size)
+        knob(result).tile_op(tile_size=tile_size)
         return result
 
     run_kernel_test(
@@ -131,7 +131,7 @@ def test_add_simple():
     @trace(input_specs=[(shape, "f32"), (shape, "f32")])
     def add_kernel(a, b):
         result = a + b
-        knob.knob(result).tile_op(tile_size=tile_size)
+        knob(result).tile_op(tile_size=tile_size)
         return result
 
     check_patterns = f"""
@@ -179,7 +179,7 @@ def test_tensor_add_scalar():
     @trace(input_specs=[(shape, "f32")])
     def kernel(x):
         result = x + 2.0
-        knob.knob(result).tile_op(tile_size=tile_size)
+        knob(result).tile_op(tile_size=tile_size)
         return result
 
     check_patterns = f"""
@@ -216,7 +216,7 @@ def test_scalar_minus_tensor():
     @trace(input_specs=[(shape, "f32")])
     def kernel(x):
         result = 5.0 - x
-        knob.knob(result).tile_op(tile_size=tile_size)
+        knob(result).tile_op(tile_size=tile_size)
         return result
 
     check_patterns = f"""
@@ -252,7 +252,7 @@ def test_tensor_mul_scalar():
     @trace(input_specs=[(shape, "f32")])
     def kernel(x):
         result = x * 3.0
-        knob.knob(result).tile_op(tile_size=tile_size)
+        knob(result).tile_op(tile_size=tile_size)
         return result
 
     check_patterns = f"""
@@ -288,7 +288,7 @@ def test_tensor_div_scalar():
     @trace(input_specs=[(shape, "f32")])
     def kernel(x):
         result = x / 2.0
-        knob.knob(result).tile_op(tile_size=tile_size)
+        knob(result).tile_op(tile_size=tile_size)
         return result
 
     check_patterns = f"""
@@ -325,7 +325,7 @@ def test_scalar_div_tensor():
     @trace(input_specs=[(shape, "f32")])
     def kernel(x):
         result = 1.0 / x
-        knob.knob(result).tile_op(tile_size=tile_size)
+        knob(result).tile_op(tile_size=tile_size)
         return result
 
     check_patterns = f"""

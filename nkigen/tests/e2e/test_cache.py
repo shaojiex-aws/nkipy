@@ -25,7 +25,7 @@ def test_elementwise_cache_all_inputs():
     @trace(input_specs=[((256, 256), "f32"), ((256, 256), "f32")])
     def kernel(a, b):
         c = a + b
-        knob.knob(c).tile_op(tile_size=[128, 128]).layout(
+        knob(c).tile_op(tile_size=[128, 128]).layout(
             mem_space="SharedHbm"
         ).cache(a, axis=[-1]).cache(b, axis=[-1])
         return c
@@ -43,7 +43,7 @@ def test_elementwise_cache_both_inputs():
     @trace(input_specs=[((256, 256), "f32"), ((256, 256), "f32")])
     def kernel(a, b):
         c = a + b
-        knob.knob(c).tile_op(tile_size=[128, 128]).layout(
+        knob(c).tile_op(tile_size=[128, 128]).layout(
             mem_space="SharedHbm"
         ).cache(a, axis=[-1]).cache(b, axis=[-1])
         return c
@@ -65,7 +65,7 @@ def test_elementwise_cache_broadcast():
     @trace(input_specs=[((256, 256), "f32"), ((256, 1), "f32")])
     def kernel(x, bias):
         y = x + bias
-        knob.knob(y).tile_op(tile_size=[128, 128]).layout(
+        knob(y).tile_op(tile_size=[128, 128]).layout(
             mem_space="SharedHbm"
         ).cache(x, axis=[-1]).cache(bias, axis=[-1])
         return y
@@ -88,10 +88,10 @@ def test_reduction_cache_input():
     @trace(input_specs=[((256, 256), "f32")])
     def kernel(x):
         sq = np.square(x)
-        knob.knob(sq).tile_op(tile_size=[128, 128]).layout(mem_space="Sbuf")
+        knob(sq).tile_op(tile_size=[128, 128]).layout(mem_space="Sbuf")
 
         result = np.sum(sq, axis=-1, keepdims=True)
-        knob.knob(result).tile_op(tile_size=[128, 128]).layout(
+        knob(result).tile_op(tile_size=[128, 128]).layout(
             mem_space="SharedHbm"
         ).cache(sq, axis=[-1])
         return result
@@ -116,7 +116,7 @@ def test_matmul_cache_both():
     @trace(input_specs=[((256, 128), "f32"), ((128, 256), "f32")])
     def kernel(a, b):
         c = a @ b
-        knob.knob(c).tile_op(tile_size=[128, 128, 128]).layout(
+        knob(c).tile_op(tile_size=[128, 128, 128]).layout(
             mem_space="SharedHbm"
         ).cache(a, axis=[0]).cache(b, axis=[2])
         return c
@@ -134,7 +134,7 @@ def test_matmul_large_cache_both():
     @trace(input_specs=[((512, 256), "f32"), ((256, 512), "f32")])
     def kernel(a, b):
         c = a @ b
-        knob.knob(c).tile_op(tile_size=[128, 128, 128]).layout(
+        knob(c).tile_op(tile_size=[128, 128, 128]).layout(
             mem_space="SharedHbm"
         ).cache(a, axis=[0]).cache(b, axis=[2])
         return c
@@ -157,7 +157,7 @@ def test_cache_without_tile_op_raises():
     @trace(input_specs=[((128, 128), "f32"), ((128, 128), "f32")])
     def kernel(a, b):
         c = a + b
-        knob.knob(c).cache(a, axis=[-1])
+        knob(c).cache(a, axis=[-1])
         return c
 
     with pytest.raises(ValueError, match="requires a preceding .tile_op"):
@@ -170,7 +170,7 @@ def test_cache_axis_out_of_bounds_raises():
     @trace(input_specs=[((128, 128), "f32"), ((128, 128), "f32")])
     def kernel(a, b):
         c = a + b
-        knob.knob(c).tile_op(tile_size=[128, 128]).cache(a, axis=[5])
+        knob(c).tile_op(tile_size=[128, 128]).cache(a, axis=[5])
         return c
 
     with pytest.raises(ValueError, match="out of bounds"):

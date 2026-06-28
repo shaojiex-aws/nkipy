@@ -24,7 +24,7 @@ def test_sqrt_basic():
     @trace(input_specs=[(shape, "f32")])
     def kernel(a):
         result = np.sqrt(a)
-        knob.knob(result).tile_op(tile_size=tile_size).layout(mem_space="SharedHbm")
+        knob(result).tile_op(tile_size=tile_size).layout(mem_space="SharedHbm")
         return result
 
     np.random.seed(42)
@@ -66,7 +66,7 @@ def test_sqrt_256x256():
     @trace(input_specs=[(shape, "f32")])
     def kernel(a):
         result = np.sqrt(a)
-        knob.knob(result).tile_op(tile_size=tile_size).layout(mem_space="SharedHbm")
+        knob(result).tile_op(tile_size=tile_size).layout(mem_space="SharedHbm")
         return result
 
     np.random.seed(42)

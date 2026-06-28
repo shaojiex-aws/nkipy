@@ -40,7 +40,7 @@ def test_matmul_seed_result_layout():
     def kernel(a, b):
         a_exp = np.exp(a)
         mm = np.matmul(a_exp, b)
-        knob.knob(mm).tile_op(tile_size=[128, 128, 128]).layout(mem_space="Sbuf")
+        knob(mm).tile_op(tile_size=[128, 128, 128]).layout(mem_space="Sbuf")
         return mm
 
     # exp(a) gets a default tile_op; matmul result keeps user annotation.
@@ -129,7 +129,7 @@ def test_matmul_forward_propagates_to_elementwise():
     @trace(input_specs=[((M, K), "f32"), ((K, N), "f32")])
     def kernel(a, b):
         mm = np.matmul(a, b)
-        knob.knob(mm).tile_op(tile_size=[128, 128, 128]).layout(mem_space="Sbuf")
+        knob(mm).tile_op(tile_size=[128, 128, 128]).layout(mem_space="Sbuf")
         return np.exp(mm)
 
     # exp should get a tile_op via defaultTileOps
@@ -157,9 +157,9 @@ def test_matmul_elementwise_chain_executes():
     @trace(input_specs=[((M, K), "f32"), ((K, N), "f32")])
     def kernel(a, b):
         mm = np.matmul(a, b)
-        knob.knob(mm).tile_op(tile_size=[128, 128, 128]).layout(mem_space="Sbuf")
+        knob(mm).tile_op(tile_size=[128, 128, 128]).layout(mem_space="Sbuf")
         y = np.exp(mm)
-        knob.knob(y).tile_op(tile_size=[128, 128]).layout(mem_space="SharedHbm")
+        knob(y).tile_op(tile_size=[128, 128]).layout(mem_space="SharedHbm")
         return y
 
     run_kernel_test(
@@ -190,7 +190,7 @@ def test_matmul_operand_backward_chain():
         y = np.exp(x)
         z = np.square(y)
         mm = np.matmul(z, b)
-        knob.knob(mm).tile_op(tile_size=[128, 128, 128]).layout(mem_space="Sbuf")
+        knob(mm).tile_op(tile_size=[128, 128, 128]).layout(mem_space="Sbuf")
         return mm
 
     # exp and square get default tile_ops. The new pass does NOT infer
@@ -226,9 +226,9 @@ def test_compatible_tile_sizes_no_conflict():
     @trace(input_specs=[(shape, "f32"), (shape, "f32"), (shape, "f32")])
     def kernel(a, b, c):
         x = a + b
-        knob.knob(x).tile_op(tile_size=[128, 128]).layout(mem_space="Sbuf")
+        knob(x).tile_op(tile_size=[128, 128]).layout(mem_space="Sbuf")
         y = x + c
-        knob.knob(y).tile_op(tile_size=[64, 64]).layout(mem_space="SharedHbm")
+        knob(y).tile_op(tile_size=[64, 64]).layout(mem_space="SharedHbm")
         return y
 
     # Should compile without conflict
@@ -252,9 +252,9 @@ def test_compatible_tile_sizes_executes():
     @trace(input_specs=[(shape, "f32"), (shape, "f32"), (shape, "f32")])
     def kernel(a, b, c):
         x = a + b
-        knob.knob(x).tile_op(tile_size=[128, 128]).layout(mem_space="Sbuf")
+        knob(x).tile_op(tile_size=[128, 128]).layout(mem_space="Sbuf")
         y = x + c
-        knob.knob(y).tile_op(tile_size=[64, 64]).layout(mem_space="SharedHbm")
+        knob(y).tile_op(tile_size=[64, 64]).layout(mem_space="SharedHbm")
         return y
 
     run_kernel_test(
@@ -281,7 +281,7 @@ def test_forward_propagation_elementwise():
     @trace(input_specs=[(shape, "f32")])
     def kernel(x):
         y = np.exp(x)
-        knob.knob(y).tile_op(tile_size=[128, 128]).layout(mem_space="Sbuf")
+        knob(y).tile_op(tile_size=[128, 128]).layout(mem_space="Sbuf")
         z = np.square(y)
         return z
 
@@ -416,7 +416,7 @@ def test_partial_annotation_fills_gaps():
     @trace(input_specs=[(shape, "f32"), (shape, "f32")])
     def kernel(x, y):
         a = np.exp(x)
-        knob.knob(a).tile_op(tile_size=[128, 128]).layout(mem_space="Sbuf")
+        knob(a).tile_op(tile_size=[128, 128]).layout(mem_space="Sbuf")
         b = np.square(a)
         c = b + y
         return c

@@ -42,19 +42,19 @@ def test_rmsnorm(M, N, tile_size):
         w_fp32 = weight.astype(np.float32)
 
         sq = np.square(x_fp32)
-        knob.knob(sq).tile_op(tile_size=tile_size).layout(mem_space="Sbuf")
+        knob(sq).tile_op(tile_size=tile_size).layout(mem_space="Sbuf")
 
         sum_sq = np.sum(sq, axis=-1, keepdims=True)
-        knob.knob(sum_sq).tile_op(tile_size=[128, 128]).layout(mem_space="Sbuf")
+        knob(sum_sq).tile_op(tile_size=[128, 128]).layout(mem_space="Sbuf")
 
         mean_sq = sum_sq * np.float32(1.0 / N)
-        knob.knob(mean_sq).tile_op(tile_size=[128, 1]).layout(mem_space="Sbuf")
+        knob(mean_sq).tile_op(tile_size=[128, 1]).layout(mem_space="Sbuf")
 
         normed = x_fp32 / np.sqrt(mean_sq + eps)
-        knob.knob(normed).tile_op(tile_size=tile_size).layout(mem_space="Sbuf")
+        knob(normed).tile_op(tile_size=tile_size).layout(mem_space="Sbuf")
 
         result = normed * w_fp32
-        knob.knob(result).tile_op(tile_size=tile_size).layout(mem_space="SharedHbm")
+        knob(result).tile_op(tile_size=tile_size).layout(mem_space="SharedHbm")
         return result
 
     run_kernel_test(

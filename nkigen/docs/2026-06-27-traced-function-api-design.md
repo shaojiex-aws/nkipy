@@ -142,7 +142,7 @@ Drop the standalone `fuse` export since it now lives on the builder.
 6. **Add test** — `tests/unit/test_traced_to_nisa.py`: trace a simple kernel,
    call `.to_nisa()`, assert output contains NISA ops.
 
-### Phase 3: Fix top-level exports
+### Phase 3: Fix top-level exports ✅ Done
 
 7. **Edit `nkigen/__init__.py`**:
    - Replace `from .frontend import knob` (module) with:

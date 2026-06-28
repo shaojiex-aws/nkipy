@@ -21,7 +21,7 @@ Usage:
     )
     def test_matmul_tiling(a, b):
         result = np.matmul(a, b)
-        knob.knob(result).tile_op(tile_size=[128, 128, 128])
+        knob(result).tile_op(tile_size=[128, 128, 128])
         return result
 
     # Function form (parametrized tests):
@@ -717,7 +717,7 @@ def nkigen_test(
         )
         def test_matmul_tiling(a, b):
             result = np.matmul(a, b)
-            knob.knob(result).tile_op(tile_size=[128, 128, 128])
+            knob(result).tile_op(tile_size=[128, 128, 128])
             return result
     """
     # Validate early (at decoration time) so misconfigured tests fail on import

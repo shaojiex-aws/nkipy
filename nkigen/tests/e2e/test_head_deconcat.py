@@ -58,11 +58,11 @@ def test_head_deconcat(request):
         # 4D transpose intermediate stays in HBM (not promoted to SBUF).
         # Without this, the 4D SBUF alloc has dim 0 = batch (not partition),
         # which legalize-layout cannot handle.
-        knob.knob(x).tile_op(tile_size=[128, 128]).layout(mem_space="SharedHbm")
+        knob(x).tile_op(tile_size=[128, 128]).layout(mem_space="SharedHbm")
 
         # Downstream matmul
         result = np.matmul(x, w)
-        knob.knob(result).tile_op(tile_size=[128, 128, 128]).layout(mem_space="SharedHbm")
+        knob(result).tile_op(tile_size=[128, 128, 128]).layout(mem_space="SharedHbm")
         return result
 
     # Verify LLVM simulation through legalize-layout

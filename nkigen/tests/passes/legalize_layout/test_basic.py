@@ -39,10 +39,10 @@ def test_matmul_sbuf_add_hbm():
     @trace(input_specs=[((M, K), "f32"), ((K, N), "f32"), ((M, N), "f32")])
     def matmul_add_kernel(a, b, bias):
         c = np.matmul(a, b)
-        knob.knob(c).tile_op(tile_size=matmul_tile + matmul_reduction_tile).layout(mem_space="Sbuf")
+        knob(c).tile_op(tile_size=matmul_tile + matmul_reduction_tile).layout(mem_space="Sbuf")
 
         result = c + bias
-        knob.knob(result).tile_op(tile_size=add_tile).layout(mem_space="SharedHbm")
+        knob(result).tile_op(tile_size=add_tile).layout(mem_space="SharedHbm")
 
         return result
 
@@ -87,10 +87,10 @@ def test_3d_add_chain_sbuf():
     @trace(input_specs=[((B, M, N), "f32"), ((B, M, N), "f32"), ((B, M, N), "f32")])
     def add_chain_3d(a, b, c):
         intermediate = a + b
-        knob.knob(intermediate).tile_op(tile_size=tile_size).layout(mem_space="Sbuf")
+        knob(intermediate).tile_op(tile_size=tile_size).layout(mem_space="Sbuf")
 
         result = intermediate + c
-        knob.knob(result).tile_op(tile_size=tile_size).layout(mem_space="SharedHbm")
+        knob(result).tile_op(tile_size=tile_size).layout(mem_space="SharedHbm")
 
         return result
 

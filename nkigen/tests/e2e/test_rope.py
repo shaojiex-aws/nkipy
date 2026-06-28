@@ -67,14 +67,14 @@ def test_rope():
 
         # Apply rotation
         out_0 = x0 * cos - x1 * sin
-        knob.knob(out_0).tile_op(tile_size=tile_size).layout(mem_space="Sbuf")
+        knob(out_0).tile_op(tile_size=tile_size).layout(mem_space="Sbuf")
 
         out_1 = x0 * sin + x1 * cos
-        knob.knob(out_1).tile_op(tile_size=tile_size).layout(mem_space="Sbuf")
+        knob(out_1).tile_op(tile_size=tile_size).layout(mem_space="Sbuf")
 
         # Concatenate back along head_dim axis
         result = np.concatenate([out_0, out_1], axis=-1)
-        knob.knob(result).tile_op(tile_size=tile_size).layout(mem_space="SharedHbm")
+        knob(result).tile_op(tile_size=tile_size).layout(mem_space="SharedHbm")
         return result
 
     run_kernel_test(
@@ -126,21 +126,21 @@ def test_rope_3d_multi_partition():
         # Without this, the multiply intermediates default to SBUF, and the
         # vector engine illegally indexes into specific partitions.
         t0 = q0 * freqs_cos
-        knob.knob(t0).tile_op(tile_size=rope_tile).layout(mem_space="SharedHbm")
+        knob(t0).tile_op(tile_size=rope_tile).layout(mem_space="SharedHbm")
         t1 = q1 * freqs_sin
-        knob.knob(t1).tile_op(tile_size=rope_tile).layout(mem_space="SharedHbm")
+        knob(t1).tile_op(tile_size=rope_tile).layout(mem_space="SharedHbm")
         q_rot0 = t0 - t1
-        knob.knob(q_rot0).tile_op(tile_size=rope_tile).layout(mem_space="SharedHbm")
+        knob(q_rot0).tile_op(tile_size=rope_tile).layout(mem_space="SharedHbm")
 
         t2 = q0 * freqs_sin
-        knob.knob(t2).tile_op(tile_size=rope_tile).layout(mem_space="SharedHbm")
+        knob(t2).tile_op(tile_size=rope_tile).layout(mem_space="SharedHbm")
         t3 = q1 * freqs_cos
-        knob.knob(t3).tile_op(tile_size=rope_tile).layout(mem_space="SharedHbm")
+        knob(t3).tile_op(tile_size=rope_tile).layout(mem_space="SharedHbm")
         q_rot1 = t2 + t3
-        knob.knob(q_rot1).tile_op(tile_size=rope_tile).layout(mem_space="SharedHbm")
+        knob(q_rot1).tile_op(tile_size=rope_tile).layout(mem_space="SharedHbm")
 
         result = np.concatenate([q_rot0, q_rot1], axis=-1)
-        knob.knob(result).tile_op(tile_size=attn_tile).layout(mem_space="SharedHbm")
+        knob(result).tile_op(tile_size=attn_tile).layout(mem_space="SharedHbm")
         return result
 
     run_kernel_test(
@@ -210,13 +210,13 @@ def test_rope_3d_compound(pdim):
     ])
     def kernel(q0, q1, freqs_cos, freqs_sin):
         q_rot0 = q0 * freqs_cos - q1 * freqs_sin
-        knob.knob(q_rot0).tile_op(tile_size=tile).layout(mem_space="Sbuf", partition_dim=pdim)
+        knob(q_rot0).tile_op(tile_size=tile).layout(mem_space="Sbuf", partition_dim=pdim)
 
         q_rot1 = q0 * freqs_sin + q1 * freqs_cos
-        knob.knob(q_rot1).tile_op(tile_size=tile).layout(mem_space="Sbuf", partition_dim=pdim)
+        knob(q_rot1).tile_op(tile_size=tile).layout(mem_space="Sbuf", partition_dim=pdim)
 
         result = np.concatenate([q_rot0, q_rot1], axis=-1)
-        knob.knob(result).tile_op(tile_size=concat_tile).layout(mem_space="SharedHbm")
+        knob(result).tile_op(tile_size=concat_tile).layout(mem_space="SharedHbm")
         return result
 
     run_kernel_test(

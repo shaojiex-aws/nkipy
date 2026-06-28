@@ -68,11 +68,11 @@ def test_matmul_sbuf_add_hbm(M, N, K, matmul_tile, matmul_reduction_tile, add_ti
     @trace(input_specs=[((M, K), "f32"), ((K, N), "f32"), ((M, N), "f32")])
     def matmul_add_kernel(a, b, bias):
         c = np.matmul(a, b)
-        knob.knob(c).tile_op(tile_size=matmul_tile + matmul_reduction_tile).layout(mem_space="Sbuf")
+        knob(c).tile_op(tile_size=matmul_tile + matmul_reduction_tile).layout(mem_space="Sbuf")
 
         # Add outputs to SharedHbm (returned from kernel)
         result = c + bias
-        knob.knob(result).tile_op(tile_size=add_tile).layout(mem_space="SharedHbm")
+        knob(result).tile_op(tile_size=add_tile).layout(mem_space="SharedHbm")
 
         return result
 
@@ -99,9 +99,9 @@ def test_matmul_hbm_add_hbm(M, N, K, matmul_tile, matmul_reduction_tile, add_til
     @trace(input_specs=[((M, K), "f32"), ((K, N), "f32"), ((M, N), "f32")])
     def matmul_add_kernel_hbm(a, b, bias):
         c = np.matmul(a, b)
-        knob.knob(c).tile_op(tile_size=matmul_tile + matmul_reduction_tile).layout(mem_space="SharedHbm")
+        knob(c).tile_op(tile_size=matmul_tile + matmul_reduction_tile).layout(mem_space="SharedHbm")
         result = c + bias
-        knob.knob(result).tile_op(tile_size=add_tile).layout(mem_space="SharedHbm")
+        knob(result).tile_op(tile_size=add_tile).layout(mem_space="SharedHbm")
         return result
 
     run_kernel_test(

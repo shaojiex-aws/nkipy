@@ -38,7 +38,7 @@ def test_exp_activation():
     @trace(input_specs=[((M, N), "f32")])
     def exp_kernel(x):
         result = np.exp(x)
-        knob.knob(result).tile_op(tile_size=tile_size).layout(mem_space="SharedHbm")
+        knob(result).tile_op(tile_size=tile_size).layout(mem_space="SharedHbm")
         return result
 
     run_kernel_test(
@@ -64,7 +64,7 @@ def test_tensor_add_scalar():
     @trace(input_specs=[((M, N), "f32")])
     def add_scalar_kernel(x):
         result = x + scalar_value
-        knob.knob(result).tile_op(tile_size=tile_size).layout(mem_space="SharedHbm")
+        knob(result).tile_op(tile_size=tile_size).layout(mem_space="SharedHbm")
         return result
 
     run_kernel_test(
@@ -95,17 +95,17 @@ def test_sigmoid():
     def sigmoid_kernel(x):
         # Sigmoid: 1 / (1 + exp(-x))
         neg_x = -x
-        knob.knob(neg_x).tile_op(tile_size=tile_size).layout(mem_space="Sbuf")
+        knob(neg_x).tile_op(tile_size=tile_size).layout(mem_space="Sbuf")
 
         exp_neg_x = np.exp(neg_x)
-        knob.knob(exp_neg_x).tile_op(tile_size=tile_size).layout(mem_space="Sbuf")
+        knob(exp_neg_x).tile_op(tile_size=tile_size).layout(mem_space="Sbuf")
 
         one_plus_exp = 1.0 + exp_neg_x
-        knob.knob(one_plus_exp).tile_op(tile_size=tile_size).layout(mem_space="Sbuf")
+        knob(one_plus_exp).tile_op(tile_size=tile_size).layout(mem_space="Sbuf")
 
         # Division gets converted to reciprocal by prepare-arithmetic
         result = 1.0 / one_plus_exp
-        knob.knob(result).tile_op(tile_size=tile_size).layout(mem_space="SharedHbm")
+        knob(result).tile_op(tile_size=tile_size).layout(mem_space="SharedHbm")
 
         return result
 
@@ -133,7 +133,7 @@ def test_scalar_minus_tensor():
     def sub_scalar_kernel(x):
         # scalar - tensor requires reverse_operands
         result = scalar_value - x
-        knob.knob(result).tile_op(tile_size=tile_size).layout(mem_space="SharedHbm")
+        knob(result).tile_op(tile_size=tile_size).layout(mem_space="SharedHbm")
         return result
 
     run_kernel_test(
@@ -159,7 +159,7 @@ def test_division_to_reciprocal():
     @trace(input_specs=[((M, N), "f32")])
     def div_kernel(x):
         result = x / divisor
-        knob.knob(result).tile_op(tile_size=tile_size).layout(mem_space="SharedHbm")
+        knob(result).tile_op(tile_size=tile_size).layout(mem_space="SharedHbm")
         return result
 
     run_kernel_test(

@@ -2,7 +2,7 @@
 Tests for the knob-driven-fusion pass.
 
 Pattern: two elementwise ops with matching tile_size, annotated with
-knob.knob(...).fuse().  After tiling each op gets its own scf.for loop; after
+knob(...).fuse().  After tiling each op gets its own scf.for loop; after
 fusion they should collapse into a single loop.
 
 Run with: python -m pytest tests/passes/knob_driven_fusion/ -v
@@ -28,10 +28,10 @@ def test_fuse_two_adds():
                         ((M, N), "f32"), ((M, N), "f32")])
     def kernel(a, b, c, d):
         x = a + b
-        knob.knob(x).tile_op(tile_size=[128, 128]).layout(mem_space="SharedHbm")
+        knob(x).tile_op(tile_size=[128, 128]).layout(mem_space="SharedHbm")
         y = c + d
-        knob.knob(y).tile_op(tile_size=[128, 128]).layout(mem_space="SharedHbm")
-        knob.knob(x, y).fuse()
+        knob(y).tile_op(tile_size=[128, 128]).layout(mem_space="SharedHbm")
+        knob(x, y).fuse()
         return x, y
 
     # Before fusion (post tiling) we'd see two separate `scf.for %arg{ } = %c0
@@ -69,10 +69,10 @@ def test_fuse_two_adds_loop_count():
                         ((M, N), "f32"), ((M, N), "f32")])
     def kernel(a, b, c, d):
         x = a + b
-        knob.knob(x).tile_op(tile_size=[128, 128]).layout(mem_space="SharedHbm")
+        knob(x).tile_op(tile_size=[128, 128]).layout(mem_space="SharedHbm")
         y = c + d
-        knob.knob(y).tile_op(tile_size=[128, 128]).layout(mem_space="SharedHbm")
-        knob.knob(x, y).fuse()
+        knob(y).tile_op(tile_size=[128, 128]).layout(mem_space="SharedHbm")
+        knob(x, y).fuse()
         return x, y
 
     # One outer scf.for, then one inner scf.for, then both adds, no
@@ -103,10 +103,10 @@ def test_fuse_numerics():
                         ((M, N), "f32"), ((M, N), "f32")])
     def kernel(a, b, c, d):
         x = a + b
-        knob.knob(x).tile_op(tile_size=[128, 128]).layout(mem_space="SharedHbm")
+        knob(x).tile_op(tile_size=[128, 128]).layout(mem_space="SharedHbm")
         y = c + d
-        knob.knob(y).tile_op(tile_size=[128, 128]).layout(mem_space="SharedHbm")
-        knob.knob(x, y).fuse()
+        knob(y).tile_op(tile_size=[128, 128]).layout(mem_space="SharedHbm")
+        knob(x, y).fuse()
         return x, y
 
     run_kernel_test(
@@ -132,10 +132,10 @@ def test_fuse_mismatched_tiles_errors():
                         ((M, N), "f32"), ((M, N), "f32")])
     def kernel(a, b, c, d):
         x = a + b
-        knob.knob(x).tile_op(tile_size=[128, 128]).layout(mem_space="SharedHbm")
+        knob(x).tile_op(tile_size=[128, 128]).layout(mem_space="SharedHbm")
         y = c + d
-        knob.knob(y).tile_op(tile_size=[64, 64]).layout(mem_space="SharedHbm")
-        knob.knob(x, y).fuse()
+        knob(y).tile_op(tile_size=[64, 64]).layout(mem_space="SharedHbm")
+        knob(x, y).fuse()
         return x, y
 
     with pytest.raises(RuntimeError, match="mismatched loop bounds"):

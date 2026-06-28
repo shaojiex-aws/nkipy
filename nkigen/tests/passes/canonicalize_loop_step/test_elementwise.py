@@ -49,7 +49,7 @@ def test_add_loop_canonicalization(shape, tile_size):
     @trace(input_specs=[(shape, "f32"), (shape, "f32")])
     def add_kernel(a, b):
         result = a + b
-        knob.knob(result).tile_op(tile_size=tile_size)
+        knob(result).tile_op(tile_size=tile_size)
         return result
 
     # Strict checks:
@@ -87,7 +87,7 @@ def test_mul_loop_canonicalization(shape, tile_size):
     @trace(input_specs=[(shape, "f32"), (shape, "f32")])
     def mul_kernel(a, b):
         result = a * b
-        knob.knob(result).tile_op(tile_size=tile_size)
+        knob(result).tile_op(tile_size=tile_size)
         return result
 
     check_patterns = f"""
@@ -124,7 +124,7 @@ def test_add_3d_loop_canonicalization(shape, tile_size):
     @trace(input_specs=[(shape, "f32"), (shape, "f32")])
     def add_kernel(a, b):
         result = a + b
-        knob.knob(result).tile_op(tile_size=tile_size)
+        knob(result).tile_op(tile_size=tile_size)
         return result
 
     # Strict checks: 3 nested loops with arith.muli for each offset recovery

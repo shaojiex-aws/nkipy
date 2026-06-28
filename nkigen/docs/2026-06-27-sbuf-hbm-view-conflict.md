@@ -61,7 +61,5 @@ separate HBM buffer holds the copied data.
 
 - The frontend deliberately avoids `collapse_shape` / `expand_shape`.
   All user reshapes are `reinterpret_cast` (contiguous, row-major).
-- `collapse_shape` / `expand_shape` appear only in later passes
-  (simplify-linalg, legalize-layout) for SBUF physical tiling.
 - The conflict only arises when a view crosses a mem_space boundary.
   Same-space views (SBUF→SBUF, HBM→HBM) are fine and common.

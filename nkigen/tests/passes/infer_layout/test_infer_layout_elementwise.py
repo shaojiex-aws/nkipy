@@ -45,7 +45,7 @@ def test_silu_chain_annotations():
     @trace(input_specs=[(shape, "f32"), (shape, "f32")])
     def silu_kernel(gate, up):
         gated = gate / (1.0 + np.exp(-gate)) * up
-        knob.knob(gated).tile_op(tile_size=tile_size).layout(mem_space="Sbuf")
+        knob(gated).tile_op(tile_size=tile_size).layout(mem_space="Sbuf")
         return gated
 
     # After infer-layout, every elementwise op should have a nkipy.tile_op
@@ -85,7 +85,7 @@ def test_silu_chain_tiling_executes():
     @trace(input_specs=[(shape, "f32"), (shape, "f32")])
     def silu_kernel(gate, up):
         gated = gate / (1.0 + np.exp(-gate)) * up
-        knob.knob(gated).tile_op(tile_size=tile_size).layout(mem_space="Sbuf")
+        knob(gated).tile_op(tile_size=tile_size).layout(mem_space="Sbuf")
         return gated
 
     run_kernel_test(
@@ -115,7 +115,7 @@ def test_simple_chain():
     def chain_kernel(x):
         y = np.exp(x)
         z = y + 1.0
-        knob.knob(z).tile_op(tile_size=tile_size).layout(mem_space="Sbuf")
+        knob(z).tile_op(tile_size=tile_size).layout(mem_space="Sbuf")
         return z
 
     # After infer-layout, both linalg.exp and linalg.generic(add) should
@@ -145,7 +145,7 @@ def test_simple_chain_tiling_executes():
     def chain_kernel(x):
         y = np.exp(x)
         z = y + 1.0
-        knob.knob(z).tile_op(tile_size=tile_size).layout(mem_space="Sbuf")
+        knob(z).tile_op(tile_size=tile_size).layout(mem_space="Sbuf")
         return z
 
     run_kernel_test(
@@ -174,9 +174,9 @@ def test_existing_annotations_preserved():
     @trace(input_specs=[(shape, "f32")])
     def kernel(x):
         y = np.exp(x)
-        knob.knob(y).tile_op(tile_size=tile_size).layout(mem_space="Sbuf")
+        knob(y).tile_op(tile_size=tile_size).layout(mem_space="Sbuf")
         z = y + 1.0
-        knob.knob(z).tile_op(tile_size=tile_size).layout(mem_space="Sbuf")
+        knob(z).tile_op(tile_size=tile_size).layout(mem_space="Sbuf")
         return z
 
     # Both ops already have annotations. After infer-layout, the pass should
@@ -217,10 +217,10 @@ def test_stops_at_matmul_boundary():
     @trace(input_specs=[(shape, "f32"), (shape, "f32")])
     def kernel(a, b):
         mm = np.matmul(a, b)
-        knob.knob(mm).tile_op(tile_size=matmul_tile + [128]).layout(mem_space="Sbuf")
+        knob(mm).tile_op(tile_size=matmul_tile + [128]).layout(mem_space="Sbuf")
         y = np.exp(mm)
         z = y + 1.0
-        knob.knob(z).tile_op(tile_size=ew_tile).layout(mem_space="Sbuf")
+        knob(z).tile_op(tile_size=ew_tile).layout(mem_space="Sbuf")
         return z
 
     # After infer-layout:
@@ -255,10 +255,10 @@ def test_matmul_plus_elementwise_tiling_executes():
     @trace(input_specs=[(shape, "f32"), (shape, "f32")])
     def kernel(a, b):
         mm = np.matmul(a, b)
-        knob.knob(mm).tile_op(tile_size=matmul_tile + [128]).layout(mem_space="Sbuf")
+        knob(mm).tile_op(tile_size=matmul_tile + [128]).layout(mem_space="Sbuf")
         y = np.exp(mm)
         z = y + 1.0
-        knob.knob(z).tile_op(tile_size=ew_tile).layout(mem_space="Sbuf")
+        knob(z).tile_op(tile_size=ew_tile).layout(mem_space="Sbuf")
         return z
 
     run_kernel_test(
@@ -314,9 +314,9 @@ def test_3d_partition_dim_inferred_from_tile():
     @trace(input_specs=[((B, S, D), "f32"), ((B, S, D), "f32")])
     def kernel_3d_pdim(a, b):
         intermediate = np.exp(a)
-        knob.knob(intermediate).tile_op(tile_size=tile_size).layout(mem_space="Sbuf", partition_dim=1)
+        knob(intermediate).tile_op(tile_size=tile_size).layout(mem_space="Sbuf", partition_dim=1)
         result = intermediate * b
-        knob.knob(result).tile_op(tile_size=tile_size).layout(mem_space="Sbuf", partition_dim=1)
+        knob(result).tile_op(tile_size=tile_size).layout(mem_space="Sbuf", partition_dim=1)
         return result
 
     # After infer-layout, ALL ops should have partition_dim = 1 since
@@ -352,7 +352,7 @@ def test_3d_partition_dim_propagation_unannotated():
         y = np.exp(x)
         # Only annotate the final result — y gets tile_size via BFS
         z = y + bias
-        knob.knob(z).tile_op(tile_size=tile_size).layout(mem_space="Sbuf", partition_dim=1)
+        knob(z).tile_op(tile_size=tile_size).layout(mem_space="Sbuf", partition_dim=1)
         return z
 
     # partition_dim=1 should propagate backward from z to exp
@@ -389,7 +389,7 @@ def test_3d_partition_dim_enables_canonicalize():
     def kernel_3d_canon(x, bias):
         y = np.exp(x)
         z = y + bias
-        knob.knob(z).tile_op(tile_size=tile_size).layout(mem_space="Sbuf", partition_dim=1)
+        knob(z).tile_op(tile_size=tile_size).layout(mem_space="Sbuf", partition_dim=1)
         return z
 
     # After canonicalize-partition-dim, transposes should be inserted

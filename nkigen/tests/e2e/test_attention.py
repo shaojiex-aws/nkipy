@@ -42,19 +42,19 @@ def test_softmax(M, N, tile_size):
         x_fp32 = x.astype(np.float32)
 
         x_max = np.max(x_fp32, axis=-1, keepdims=True)
-        knob.knob(x_max).tile_op(tile_size=[128, 128]).layout(mem_space="Sbuf")
+        knob(x_max).tile_op(tile_size=[128, 128]).layout(mem_space="Sbuf")
 
         shifted = x_fp32 - x_max
-        knob.knob(shifted).tile_op(tile_size=tile_size).layout(mem_space="Sbuf")
+        knob(shifted).tile_op(tile_size=tile_size).layout(mem_space="Sbuf")
 
         exp_x = np.exp(shifted)
-        knob.knob(exp_x).tile_op(tile_size=tile_size).layout(mem_space="Sbuf")
+        knob(exp_x).tile_op(tile_size=tile_size).layout(mem_space="Sbuf")
 
         sum_exp = np.sum(exp_x, axis=-1, keepdims=True)
-        knob.knob(sum_exp).tile_op(tile_size=[128, 128]).layout(mem_space="Sbuf")
+        knob(sum_exp).tile_op(tile_size=[128, 128]).layout(mem_space="Sbuf")
 
         result = exp_x / sum_exp
-        knob.knob(result).tile_op(tile_size=tile_size).layout(mem_space="SharedHbm")
+        knob(result).tile_op(tile_size=tile_size).layout(mem_space="SharedHbm")
         return result
 
     run_kernel_test(
@@ -94,7 +94,7 @@ def test_qkv_projection(M, hidden_size, matmul_tile, reduction_tile, elementwise
     )
     def qkv_kernel(x, weight):
         qkv = np.matmul(x, weight)
-        knob.knob(qkv).tile_op(tile_size=matmul_tile + reduction_tile).layout(mem_space="Sbuf")
+        knob(qkv).tile_op(tile_size=matmul_tile + reduction_tile).layout(mem_space="Sbuf")
 
         q, k, v = np.split(qkv, 3, axis=-1)
         return q, k, v
@@ -142,24 +142,24 @@ def test_attention_scores_loop(batch, n_heads, seq_len, head_dim, tile_size):
             k_i = k_transposed[i]
 
             scores = np.matmul(q_i, k_i) * scale
-            knob.knob(scores).tile_op(tile_size=tile_size).layout(mem_space="Sbuf")
+            knob(scores).tile_op(tile_size=tile_size).layout(mem_space="Sbuf")
 
             scores_fp32 = scores.astype(np.float32)
 
             scores_max = np.max(scores_fp32, axis=-1, keepdims=True)
-            knob.knob(scores_max).tile_op(tile_size=[128, 128]).layout(mem_space="Sbuf")
+            knob(scores_max).tile_op(tile_size=[128, 128]).layout(mem_space="Sbuf")
 
             shifted = scores_fp32 - scores_max
-            knob.knob(shifted).tile_op(tile_size=tile_size).layout(mem_space="Sbuf")
+            knob(shifted).tile_op(tile_size=tile_size).layout(mem_space="Sbuf")
 
             exp_s = np.exp(shifted)
-            knob.knob(exp_s).tile_op(tile_size=tile_size).layout(mem_space="Sbuf")
+            knob(exp_s).tile_op(tile_size=tile_size).layout(mem_space="Sbuf")
 
             sum_exp = np.sum(exp_s, axis=-1, keepdims=True)
-            knob.knob(sum_exp).tile_op(tile_size=[128, 128]).layout(mem_space="Sbuf")
+            knob(sum_exp).tile_op(tile_size=[128, 128]).layout(mem_space="Sbuf")
 
             softmax_out = exp_s / sum_exp
-            knob.knob(softmax_out).tile_op(tile_size=tile_size).layout(mem_space="SharedHbm")
+            knob(softmax_out).tile_op(tile_size=tile_size).layout(mem_space="SharedHbm")
 
             acc[i] = softmax_out
             return acc
@@ -208,27 +208,27 @@ def test_attention_scores_sbuf_bmm(batch, n_heads, seq_len, head_dim, tile_size)
     )
     def attention_kernel(q, k_transposed):
         bmm_result = np.matmul(q, k_transposed)
-        knob.knob(bmm_result).tile_op(tile_size=tile_size + [128]).layout(mem_space="Sbuf")
+        knob(bmm_result).tile_op(tile_size=tile_size + [128]).layout(mem_space="Sbuf")
 
         scores = bmm_result * scale
-        knob.knob(scores).tile_op(tile_size=tile_size).layout(mem_space="Sbuf", partition_dim=1)
+        knob(scores).tile_op(tile_size=tile_size).layout(mem_space="Sbuf", partition_dim=1)
 
         scores_fp32 = scores.astype(np.float32)
 
         scores_max = np.max(scores_fp32, axis=-1, keepdims=True)
-        knob.knob(scores_max).tile_op(tile_size=[1, 128, 128]).layout(mem_space="Sbuf", partition_dim=1)
+        knob(scores_max).tile_op(tile_size=[1, 128, 128]).layout(mem_space="Sbuf", partition_dim=1)
 
         shifted = scores_fp32 - scores_max
-        knob.knob(shifted).tile_op(tile_size=tile_size).layout(mem_space="Sbuf", partition_dim=1)
+        knob(shifted).tile_op(tile_size=tile_size).layout(mem_space="Sbuf", partition_dim=1)
 
         exp_s = np.exp(shifted)
-        knob.knob(exp_s).tile_op(tile_size=tile_size).layout(mem_space="Sbuf", partition_dim=1)
+        knob(exp_s).tile_op(tile_size=tile_size).layout(mem_space="Sbuf", partition_dim=1)
 
         sum_exp = np.sum(exp_s, axis=-1, keepdims=True)
-        knob.knob(sum_exp).tile_op(tile_size=[1, 128, 128]).layout(mem_space="Sbuf", partition_dim=1)
+        knob(sum_exp).tile_op(tile_size=[1, 128, 128]).layout(mem_space="Sbuf", partition_dim=1)
 
         result = exp_s / sum_exp
-        knob.knob(result).tile_op(tile_size=tile_size).layout(mem_space="Sbuf", partition_dim=1)
+        knob(result).tile_op(tile_size=tile_size).layout(mem_space="Sbuf", partition_dim=1)
         return result
 
     # Verify LLVM simulation matches NumPy through legalize-layout

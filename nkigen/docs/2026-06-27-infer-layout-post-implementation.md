@@ -179,15 +179,13 @@ a boundary copy pass — see
 NISA emitter always emitted `nki.output_names = ["output"]` regardless
 of how many return values. Fixed to emit `["output_0", "output_1", ...]`.
 
-## Cleanup: consolidate layout annotation in infer-layout
+## Cleanup: consolidate layout annotation in infer-layout ✅ Done
 
-Currently, default layout annotations happen in two places:
-- `builder.py` `finish_function`: func args → SharedHbm, return values → SharedHbm
-- `infer-layout` `defaultLayouts`: intermediates → SBUF, return values → SharedHbm
-
-This is redundant and confusing. Proposal: remove annotations from
-`builder.py` and let infer-layout handle ALL defaults (func args,
-return values, intermediates) in one place.
+Removed layout annotations from `builder.py` (func args and return
+values). All default layout decisions now live in `defaultLayouts`:
+- Func args → SharedHbm (always)
+- Return values / matmul outputs → SharedHbm
+- Intermediates → Sbuf, partition_dim=0
 
 ## Summary
 

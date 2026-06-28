@@ -107,7 +107,7 @@ def test_bmm_e2e(B, M, N, K, tile_size, reduction_tile):
     @trace(input_specs=[((B, M, K), "f32"), ((B, K, N), "f32")])
     def bmm_kernel(a, b):
         result = np.matmul(a, b)
-        knob.knob(result).tile_op(tile_size=tile_size + reduction_tile).layout(mem_space="SharedHbm")
+        knob(result).tile_op(tile_size=tile_size + reduction_tile).layout(mem_space="SharedHbm")
         return result
 
     run_kernel_test(

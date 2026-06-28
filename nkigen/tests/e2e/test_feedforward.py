@@ -44,7 +44,7 @@ def test_feedforward_sbuf(batch_size, hidden_size, intermediate_size,
         """Feedforward network: Gate+Up projection -> SwiGLU -> Down projection"""
         # Gate and Up projection
         mm_gup = np.matmul(x, gate_up_weight)
-        knob.knob(mm_gup).tile_op(tile_size=matmul_tile + matmul_reduction_tile).layout(mem_space="Sbuf")
+        knob(mm_gup).tile_op(tile_size=matmul_tile + matmul_reduction_tile).layout(mem_space="Sbuf")
 
         # Split into gate and up components
         split_axis = mm_gup.ndim - 1
@@ -53,27 +53,27 @@ def test_feedforward_sbuf(batch_size, hidden_size, intermediate_size,
         # Apply SiLU activation to gate: sigmoid(gate) * gate
         # Break down sigmoid into individual ops so each can be tiled
         neg_gate = -gate
-        knob.knob(neg_gate).tile_op(tile_size=elementwise_tile).layout(mem_space="Sbuf")
+        knob(neg_gate).tile_op(tile_size=elementwise_tile).layout(mem_space="Sbuf")
 
         exp_neg_gate = np.exp(neg_gate)
-        knob.knob(exp_neg_gate).tile_op(tile_size=elementwise_tile).layout(mem_space="Sbuf")
+        knob(exp_neg_gate).tile_op(tile_size=elementwise_tile).layout(mem_space="Sbuf")
 
         one_plus_exp = exp_neg_gate + 1.0
-        knob.knob(one_plus_exp).tile_op(tile_size=elementwise_tile).layout(mem_space="Sbuf")
+        knob(one_plus_exp).tile_op(tile_size=elementwise_tile).layout(mem_space="Sbuf")
 
         sigmoid_gate = 1.0 / one_plus_exp
-        knob.knob(sigmoid_gate).tile_op(tile_size=elementwise_tile).layout(mem_space="Sbuf")
+        knob(sigmoid_gate).tile_op(tile_size=elementwise_tile).layout(mem_space="Sbuf")
 
         swish_gate = gate * sigmoid_gate
-        knob.knob(swish_gate).tile_op(tile_size=elementwise_tile).layout(mem_space="Sbuf")
+        knob(swish_gate).tile_op(tile_size=elementwise_tile).layout(mem_space="Sbuf")
 
         # Element-wise multiplication (gating)
         gated = swish_gate * up
-        knob.knob(gated).tile_op(tile_size=elementwise_tile).layout(mem_space="Sbuf")
+        knob(gated).tile_op(tile_size=elementwise_tile).layout(mem_space="Sbuf")
 
         # Down projection
         output = np.matmul(gated, down_weight)
-        knob.knob(output).tile_op(tile_size=matmul_tile + matmul_reduction_tile).layout(mem_space="SharedHbm")
+        knob(output).tile_op(tile_size=matmul_tile + matmul_reduction_tile).layout(mem_space="SharedHbm")
 
         return output
 
@@ -109,7 +109,7 @@ def test_feedforward_sbuf_compact_silu(batch_size, hidden_size, intermediate_siz
         """Feedforward network: Gate+Up projection -> SwiGLU -> Down projection"""
         # Gate and Up projection
         mm_gup = np.matmul(x, gate_up_weight)
-        knob.knob(mm_gup).tile_op(tile_size=matmul_tile + matmul_reduction_tile).layout(mem_space="Sbuf")
+        knob(mm_gup).tile_op(tile_size=matmul_tile + matmul_reduction_tile).layout(mem_space="Sbuf")
 
         # Split into gate and up components
         split_axis = mm_gup.ndim - 1
@@ -117,11 +117,11 @@ def test_feedforward_sbuf_compact_silu(batch_size, hidden_size, intermediate_siz
 
         # SwiGLU: SiLU(gate) * up = (gate / (1 + exp(-gate))) * up
         gated = gate / (1.0 + np.exp(-gate)) * up
-        knob.knob(gated).tile_op(tile_size=elementwise_tile).layout(mem_space="Sbuf")
+        knob(gated).tile_op(tile_size=elementwise_tile).layout(mem_space="Sbuf")
 
         # Down projection
         output = np.matmul(gated, down_weight)
-        knob.knob(output).tile_op(tile_size=matmul_tile + matmul_reduction_tile).layout(mem_space="SharedHbm")
+        knob(output).tile_op(tile_size=matmul_tile + matmul_reduction_tile).layout(mem_space="SharedHbm")
 
         return output
 

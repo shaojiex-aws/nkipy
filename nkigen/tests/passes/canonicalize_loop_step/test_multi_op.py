@@ -29,10 +29,10 @@ def test_matmul_add_chain():
     @trace(input_specs=[((M, K), "f32"), ((K, N), "f32"), ((M, N), "f32")])
     def matmul_add_kernel(a, b, bias):
         c = np.matmul(a, b)
-        knob.knob(c).tile_op(tile_size=matmul_tile + matmul_reduction_tile)
+        knob(c).tile_op(tile_size=matmul_tile + matmul_reduction_tile)
 
         result = c + bias
-        knob.knob(result).tile_op(tile_size=add_tile)
+        knob(result).tile_op(tile_size=add_tile)
 
         return result
 
@@ -82,10 +82,10 @@ def test_matmul_add_different_tile_sizes():
     @trace(input_specs=[((M, K), "f32"), ((K, N), "f32"), ((M, N), "f32")])
     def matmul_add_kernel(a, b, bias):
         c = np.matmul(a, b)
-        knob.knob(c).tile_op(tile_size=matmul_tile + matmul_reduction_tile)
+        knob(c).tile_op(tile_size=matmul_tile + matmul_reduction_tile)
         
         result = c + bias
-        knob.knob(result).tile_op(tile_size=add_tile)
+        knob(result).tile_op(tile_size=add_tile)
 
         return result
 
@@ -138,10 +138,10 @@ def test_add_add_chain():
     @trace(input_specs=[(shape, "f32"), (shape, "f32"), (shape, "f32")])
     def add_add_kernel(a, b, d):
         c = a + b
-        knob.knob(c).tile_op(tile_size=tile_size)
+        knob(c).tile_op(tile_size=tile_size)
 
         result = c + d
-        knob.knob(result).tile_op(tile_size=tile_size)
+        knob(result).tile_op(tile_size=tile_size)
 
         return result
 

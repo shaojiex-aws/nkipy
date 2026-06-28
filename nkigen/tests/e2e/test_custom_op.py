@@ -149,7 +149,7 @@ def test_matmul_custom_activation_string_check():
     def matmul_activation_kernel(x, weight):
         # Matrix multiply
         mm_out = np.matmul(x, weight)
-        knob.knob(mm_out).tile_op(tile_size=[128, 128, 128]).layout(mem_space="SharedHbm")
+        knob(mm_out).tile_op(tile_size=[128, 128, 128]).layout(mem_space="SharedHbm")
 
         # Custom SiLU activation on result (input/output on HBM)
         output = custom_silu(mm_out)
@@ -281,7 +281,7 @@ def test_kernel_builder_silu():
     )
     def matmul_silu_kernel(x, weight):
         mm_out = np.matmul(x, weight)
-        knob.knob(mm_out).tile_op(tile_size=[128, 128, 128]).layout(mem_space="SharedHbm")
+        knob(mm_out).tile_op(tile_size=[128, 128, 128]).layout(mem_space="SharedHbm")
 
         output = custom_silu(mm_out)
         return output

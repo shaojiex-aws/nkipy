@@ -41,10 +41,10 @@ def test_3d_add_chain():
     @trace(input_specs=[((B, M, N), "f32"), ((B, M, N), "f32"), ((B, M, N), "f32")])
     def add_chain_3d(a, b, c):
         intermediate = a + b
-        knob.knob(intermediate).tile_op(tile_size=tile_size).layout(mem_space="Sbuf")
+        knob(intermediate).tile_op(tile_size=tile_size).layout(mem_space="Sbuf")
 
         result = intermediate + c
-        knob.knob(result).tile_op(tile_size=tile_size).layout(mem_space="SharedHbm")
+        knob(result).tile_op(tile_size=tile_size).layout(mem_space="SharedHbm")
 
         return result
 
@@ -72,10 +72,10 @@ def test_3d_add_hbm_only():
     @trace(input_specs=[((B, M, N), "f32"), ((B, M, N), "f32"), ((B, M, N), "f32")])
     def add_chain_3d_hbm(a, b, c):
         intermediate = a + b
-        knob.knob(intermediate).tile_op(tile_size=tile_size).layout(mem_space="SharedHbm")
+        knob(intermediate).tile_op(tile_size=tile_size).layout(mem_space="SharedHbm")
 
         result = intermediate + c
-        knob.knob(result).tile_op(tile_size=tile_size).layout(mem_space="SharedHbm")
+        knob(result).tile_op(tile_size=tile_size).layout(mem_space="SharedHbm")
 
         return result
 

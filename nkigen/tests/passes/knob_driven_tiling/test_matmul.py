@@ -65,7 +65,7 @@ def test_matmul_tiling(M, N, K, tile_size, reduction_tile, request):
     @trace(input_specs=[((M, K), "f32"), ((K, N), "f32")])
     def matmul_kernel(a, b):
         result = np.matmul(a, b)
-        knob.knob(result).tile_op(tile_size=tile_size + reduction_tile)
+        knob(result).tile_op(tile_size=tile_size + reduction_tile)
         return result
 
     check_patterns = f"""
@@ -104,7 +104,7 @@ def test_matmul_simple_256():
     @trace(input_specs=[((M, K), "f32"), ((K, N), "f32")])
     def matmul_kernel(a, b):
         result = np.matmul(a, b)
-        knob.knob(result).tile_op(tile_size=tile_size + reduction_tile)
+        knob(result).tile_op(tile_size=tile_size + reduction_tile)
         return result
 
     check_patterns = f"""
@@ -155,7 +155,7 @@ def test_batch_matmul_tiling(B, M, N, K, tile_size, reduction_tile, request):
     @trace(input_specs=[((B, M, K), "f32"), ((B, K, N), "f32")])
     def batch_matmul_kernel(a, b):
         result = np.matmul(a, b)
-        knob.knob(result).tile_op(tile_size=tile_size + reduction_tile)
+        knob(result).tile_op(tile_size=tile_size + reduction_tile)
         return result
 
     check_patterns = f"""
@@ -194,7 +194,7 @@ def test_matmul_k_tile_too_large():
     @trace(input_specs=[((M, K), "f32"), ((K, N), "f32")])
     def matmul_kernel(a, b):
         result = np.matmul(a, b)
-        knob.knob(result).tile_op(tile_size=tile_size + reduction_tile)
+        knob(result).tile_op(tile_size=tile_size + reduction_tile)
         return result
 
     # This should raise an exception
