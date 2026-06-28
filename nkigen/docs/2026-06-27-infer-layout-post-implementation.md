@@ -86,32 +86,73 @@ void propagateTileOps(func::FuncOp func) {
 }
 ```
 
-## Bug 2: Transpose allocs wrongly assigned SBUF
+## Bug 2: Alloc assigned SBUF but is actually a return value (via view) ✅ Fixed (infer-layout part)
 
 **Affects:** test_head_deconcat, test_qwen3_layer
-**Errors:** `tile shape rank 2 but permutation has 4 dimensions` /
-`tile rank 2 != alloc rank 3`
+
+**Errors:**
+- head_deconcat: `'nisa.dma_transpose' op source tile shape rank 2 but
+  permutation has 4 dimensions`
+- qwen3: `[LegalizeLayout] Error: tile rank 2 != alloc rank 3`
 
 ### What happens
 
-```mlir
-%transposed = linalg.transpose(%input) permutation=[0,2,1,3]
-              → output: memref<2x128x2x128xf32>
+User code reshapes + transposes, then returns the result:
+
+```python
+y = np.transpose(x.reshape(2, 2, 128, 128), [0, 2, 1, 3])
+out = y.reshape(2, 128, 256)
+knob.knob(out).tile_op(tile_size=[1, 128, 256]).layout(mem_space='SharedHbm')
+return out
 ```
 
-`defaultLayouts` sees this alloc isn't a return value → assigns
-`Sbuf, partition_dim=0`. But:
-- dim 0 is batch (size 2), not a partition dim
-- SBUF produces rank-2 tiles, but the transpose permutation is rank-4
-- The alloc needs SharedHbm because it gets reshaped to 2D downstream
+After tracing:
 
-Also `isAnnotatableOp` doesn't include `linalg::TransposeOp`, so the
-transpose tile_op code (lines 138-149) is dead.
+```mlir
+%alloc = memref.alloc() : memref<2x128x2x128xf32>
+nkipy.layout(%alloc) {mem_space = #nkipy.mem<Sbuf>, partition_dim = 0}   ← defaultLayouts
+
+linalg.transpose ins(%in) outs(%alloc) permutation = [0, 2, 1, 3]
+
+%view = memref.reinterpret_cast %alloc to memref<2x128x256xf32>
+nkipy.layout(%view) {mem_space = #nkipy.mem<SharedHbm>}                  ← user annotation
+return %view
+```
+
+The same underlying memory has **two conflicting layouts**: the alloc
+says SBUF, the view says SharedHbm. `defaultLayouts` checks
+`isReturnValue(%alloc)` — but it's `%view` that flows to `return`,
+not `%alloc` directly. So the check fails and the alloc gets SBUF.
+
+LegalizeLayout then processes this SBUF alloc (rank 4). It traces
+through `reinterpret_cast` to find consumers and infers a tile from
+the rank-3 view → rank mismatch.
 
 ### Fix
 
-1. Add `linalg::TransposeOp` to `isAnnotatableOp`
-2. In `defaultLayouts`: high-rank (>2D) transpose outputs → SharedHbm
+In `defaultLayouts`, when checking `isReturnValue(alloc)`, also trace
+through `reinterpret_cast` chains. If any view of the alloc reaches
+`func.return`, treat the alloc as a return value → SharedHbm.
+
+Also: `defaultTileOps` has a branch for `linalg::TransposeOp` that
+computes a tile, but it's guarded by `isAnnotatableOp(linalgOp)` at
+the top of the walk. `isAnnotatableOp` only returns true for
+elementwise/reduction/matmul, so the transpose branch never fires.
+
+We should add `TransposeOp` to `isAnnotatableOp`. The tile logic for
+transpose is: for perm `[0, 2, 1, 3]` on output shape `[2, 128, 2, 128]`:
+
+```
+dim 0: perm[0]=0 (identity) → tile=1    ← loop over this dim
+dim 1: perm[1]=2 (swapped)  → tile=128  ← full, part of the 2D transpose
+dim 2: perm[2]=1 (swapped)  → tile=2    ← full, part of the 2D transpose
+dim 3: perm[3]=3 (identity) → tile=1    ← loop over this dim
+```
+
+This decomposes a 4D transpose into looped 2D transposes.
+
+Tests still fail due to a downstream LegalizeLayout bug — see
+[legalize-layout-high-rank-sbuf](2026-06-28-legalize-layout-high-rank-sbuf.md).
 
 ## Bug 3: HBM-to-HBM DMA transpose
 

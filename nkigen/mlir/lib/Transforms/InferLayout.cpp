@@ -76,11 +76,21 @@ static IntegerAttr getPartitionDimAttr(Value val) {
   return nullptr;
 }
 
-/// Check if a value is used in a func.return.
+/// Check if a value is used in a func.return, tracing through
+/// reinterpret_cast views (a reshape of a return value is still returned).
 static bool isReturnValue(Value val) {
-  for (Operation *user : val.getUsers())
-    if (isa<func::ReturnOp>(user))
-      return true;
+  llvm::SmallPtrSet<Value, 8> visited;
+  SmallVector<Value> worklist = {val};
+  while (!worklist.empty()) {
+    Value v = worklist.pop_back_val();
+    if (!visited.insert(v).second) continue;
+    for (Operation *user : v.getUsers()) {
+      if (isa<func::ReturnOp>(user))
+        return true;
+      if (auto cast = dyn_cast<memref::ReinterpretCastOp>(user))
+        worklist.push_back(cast.getResult());
+    }
+  }
   return false;
 }
 

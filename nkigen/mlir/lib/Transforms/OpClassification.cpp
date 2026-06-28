@@ -62,7 +62,8 @@ bool isMatmulOp(linalg::LinalgOp linalgOp) {
 
 bool isAnnotatableOp(linalg::LinalgOp linalgOp) {
   return isElementwiseOp(linalgOp) || isReductionGeneric(linalgOp) ||
-         isMatmulOp(linalgOp);
+         isMatmulOp(linalgOp) ||
+         isa<linalg::TransposeOp>(linalgOp.getOperation());
 }
 
 } // namespace nkipy
