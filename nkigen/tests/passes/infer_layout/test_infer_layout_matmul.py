@@ -43,13 +43,15 @@ def test_matmul_seed_result_layout():
         knob.knob(mm).tile_op(tile_size=[128, 128, 128]).layout(mem_space="Sbuf")
         return mm
 
-    # exp(a) should get matmul operand A layout: partition_dim=1
+    # exp(a) gets a default tile_op; matmul result keeps user annotation.
+    # The new pass does NOT infer partition_dim=1 for matmul operand A
+    # (knob-driven-tiling handles operand promotion internally).
     run_kernel_test(
         kernel,
         stop_after='infer-layout',
         check_ir_contains=[
-            "partition_dim = 1",         # operand A gets partition_dim=1
-            "tile_size = array<i64: 128, 128>",
+            "loop_tile_size = array<i64: 128, 128, 128>",
+            "loop_tile_size = array<i64: 128, 256>",
         ],
         modes=Mode.STRING_CHECK,
     )
@@ -69,15 +71,14 @@ def test_matmul_no_annotation_auto_seeds():
     def kernel(a, b):
         return np.matmul(a, b)
 
-    # Result C: layout tile = value-shape [128, 512];
-    # tile_op iter-space = [M_t, N_t, K_t] = [128, 512, 128].
+    # Result C: tile_op iter-space = [M_t, N_t, K_t] = [128, 512, 128].
+    # Return value gets SharedHbm (no partition_dim).
     run_kernel_test(
         kernel,
         stop_after='infer-layout',
         check_ir_contains=[
-            "tile_size = array<i64: 128, 512>",
             "loop_tile_size = array<i64: 128, 512, 128>",
-            "partition_dim = 0",
+            "mem_space = #nkipy.mem<SharedHbm>",
         ],
         modes=Mode.STRING_CHECK,
     )
@@ -103,8 +104,8 @@ def test_matmul_auto_seed_large_dims():
         kernel,
         stop_after='infer-layout',
         check_ir_contains=[
-            "tile_size = array<i64: 128, 512>",
             "loop_tile_size = array<i64: 128, 512, 128>",
+            "mem_space = #nkipy.mem<SharedHbm>",
         ],
         modes=Mode.STRING_CHECK,
     )
@@ -131,12 +132,12 @@ def test_matmul_forward_propagates_to_elementwise():
         knob.knob(mm).tile_op(tile_size=[128, 128, 128]).layout(mem_space="Sbuf")
         return np.exp(mm)
 
-    # exp should get an annotation via forward propagation
+    # exp should get a tile_op via defaultTileOps
     check_patterns = """
     CHECK: linalg.matmul
-    CHECK: nkipy.layout{{.*}}tile_size
+    CHECK: nkipy.tile_op{{.*}}loop_tile_size
     CHECK: linalg.exp
-    CHECK: nkipy.layout{{.*}}tile_size
+    CHECK: nkipy.tile_op{{.*}}loop_tile_size
     """
     run_kernel_test(
         kernel,
@@ -192,12 +193,13 @@ def test_matmul_operand_backward_chain():
         knob.knob(mm).tile_op(tile_size=[128, 128, 128]).layout(mem_space="Sbuf")
         return mm
 
-    # Both exp and square should get partition_dim=1 (matmul operand A layout)
+    # exp and square get default tile_ops. The new pass does NOT infer
+    # partition_dim=1 for matmul operand A (handled by knob-driven-tiling).
     check_patterns = """
     CHECK: linalg.exp
-    CHECK: nkipy.layout{{.*}}partition_dim = 1
+    CHECK: nkipy.tile_op{{.*}}loop_tile_size
     CHECK: linalg.square
-    CHECK: nkipy.layout{{.*}}partition_dim = 1
+    CHECK: nkipy.tile_op{{.*}}loop_tile_size
     CHECK: linalg.matmul
     """
     run_kernel_test(
@@ -234,8 +236,8 @@ def test_compatible_tile_sizes_no_conflict():
         kernel,
         stop_after='infer-layout',
         check_ir_contains=[
-            "tile_size = array<i64: 128, 128>",
-            "tile_size = array<i64: 64, 64>",
+            "loop_tile_size = array<i64: 128, 128>",
+            "loop_tile_size = array<i64: 64, 64>",
         ],
         modes=Mode.STRING_CHECK,
     )
@@ -285,9 +287,9 @@ def test_forward_propagation_elementwise():
 
     check_patterns = """
     CHECK: linalg.exp
-    CHECK: nkipy.layout{{.*}}tile_size
+    CHECK: nkipy.tile_op{{.*}}loop_tile_size
     CHECK: linalg.square
-    CHECK: nkipy.layout{{.*}}tile_size
+    CHECK: nkipy.tile_op{{.*}}loop_tile_size
     """
     run_kernel_test(
         kernel,
@@ -304,10 +306,10 @@ def test_forward_propagation_elementwise():
 def test_fallback_3d_defaults():
     """
     For a 3D tensor with no annotations, fallback should produce:
-      partition_dim=0, tile_size=[min(dim0,128), 1, dim_last]
+      loop_tile_size=[min(dim0,128), dim1, dim2]
 
     Shape [128, 4, 256]:
-      tile = [min(128,128), 1, 256] = [128, 1, 256]
+      tile = [min(128,128), 4, 256] = [128, 4, 256]
     """
     shape = (128, 4, 256)
 
@@ -319,8 +321,7 @@ def test_fallback_3d_defaults():
         kernel,
         stop_after='infer-layout',
         check_ir_contains=[
-            "tile_size = array<i64: 128, 1, 256>",
-            "partition_dim = 0",
+            "loop_tile_size = array<i64: 128, 4, 256>",
         ],
         modes=Mode.STRING_CHECK,
     )
@@ -328,7 +329,7 @@ def test_fallback_3d_defaults():
 
 def test_fallback_small_partition_dim():
     """
-    When dim 0 < 128, tile_size[0] should be the actual dim size.
+    When dim 0 < 128, tile[0] should be the actual dim size.
 
     Shape [64, 512]:
       tile = [min(64,128), 512] = [64, 512]
@@ -343,8 +344,7 @@ def test_fallback_small_partition_dim():
         kernel,
         stop_after='infer-layout',
         check_ir_contains=[
-            "tile_size = array<i64: 64, 512>",
-            "partition_dim = 0",
+            "loop_tile_size = array<i64: 64, 512>",
         ],
         modes=Mode.STRING_CHECK,
     )
@@ -363,12 +363,12 @@ def test_fallback_chain_no_annotations():
         z = np.square(y)
         return z
 
-    # All ops should get annotations
+    # All ops should get tile_ops
     check_patterns = """
     CHECK: linalg.exp
-    CHECK: nkipy.layout{{.*}}tile_size
+    CHECK: nkipy.tile_op{{.*}}loop_tile_size
     CHECK: linalg.square
-    CHECK: nkipy.layout{{.*}}tile_size
+    CHECK: nkipy.tile_op{{.*}}loop_tile_size
     """
     run_kernel_test(
         kernel,
@@ -421,14 +421,14 @@ def test_partial_annotation_fills_gaps():
         c = b + y
         return c
 
-    # All three ops should have annotations
+    # All three ops should have tile_ops
     check_patterns = """
     CHECK: linalg.exp
-    CHECK: nkipy.layout{{.*}}tile_size
+    CHECK: nkipy.tile_op{{.*}}loop_tile_size
     CHECK: linalg.square
-    CHECK: nkipy.layout{{.*}}tile_size
+    CHECK: nkipy.tile_op{{.*}}loop_tile_size
     CHECK: linalg.add
-    CHECK: nkipy.layout{{.*}}tile_size
+    CHECK: nkipy.tile_op{{.*}}loop_tile_size
     """
     run_kernel_test(
         kernel,

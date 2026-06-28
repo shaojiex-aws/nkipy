@@ -48,21 +48,21 @@ def test_silu_chain_annotations():
         knob.knob(gated).tile_op(tile_size=tile_size).layout(mem_space="Sbuf")
         return gated
 
-    # After infer-layout, we expect nkipy.annotate ops with tile_size on every
-    # elementwise op in the chain. Each op should be followed by one.
+    # After infer-layout, every elementwise op should have a nkipy.tile_op
+    # with loop_tile_size propagated from the user's annotation on gated.
     check_patterns = """
     CHECK: linalg.generic
-    CHECK: nkipy.layout{{.*}}tile_size
+    CHECK: nkipy.tile_op{{.*}}loop_tile_size
     CHECK: linalg.exp
-    CHECK: nkipy.layout{{.*}}tile_size
+    CHECK: nkipy.tile_op{{.*}}loop_tile_size
     CHECK: linalg.generic
-    CHECK: nkipy.layout{{.*}}tile_size
+    CHECK: nkipy.tile_op{{.*}}loop_tile_size
     CHECK: linalg.reciprocal
-    CHECK: nkipy.layout{{.*}}tile_size
+    CHECK: nkipy.tile_op{{.*}}loop_tile_size
     CHECK: linalg.mul
-    CHECK: nkipy.layout{{.*}}tile_size
+    CHECK: nkipy.tile_op{{.*}}loop_tile_size
     CHECK: linalg.mul
-    CHECK: nkipy.layout{{.*}}tile_size
+    CHECK: nkipy.tile_op{{.*}}loop_tile_size
     """
     run_kernel_test(
         silu_kernel,
@@ -119,12 +119,12 @@ def test_simple_chain():
         return z
 
     # After infer-layout, both linalg.exp and linalg.generic(add) should
-    # have nkipy.annotate with tile_size
+    # have nkipy.tile_op with loop_tile_size
     check_patterns = """
     CHECK: linalg.exp
-    CHECK: nkipy.layout{{.*}}tile_size
+    CHECK: nkipy.tile_op{{.*}}loop_tile_size
     CHECK: linalg.generic
-    CHECK: nkipy.layout{{.*}}tile_size
+    CHECK: nkipy.tile_op{{.*}}loop_tile_size
     """
     run_kernel_test(
         chain_kernel,
@@ -180,13 +180,12 @@ def test_existing_annotations_preserved():
         return z
 
     # Both ops already have annotations. After infer-layout, the pass should
-    # report 0 inferred annotations. We verify the IR still has the same
-    # structure: exp then annotate, then generic then annotate.
+    # preserve them. Each op keeps its tile_op.
     check_patterns = """
     CHECK: linalg.exp
-    CHECK: nkipy.layout{{.*}}tile_size
+    CHECK: nkipy.tile_op{{.*}}loop_tile_size
     CHECK: linalg.generic
-    CHECK: nkipy.layout{{.*}}tile_size
+    CHECK: nkipy.tile_op{{.*}}loop_tile_size
     """
     run_kernel_test(
         kernel,
@@ -225,16 +224,16 @@ def test_stops_at_matmul_boundary():
         return z
 
     # After infer-layout:
-    # - matmul should still have its own annotate with tile_size [128,128,128]
-    # - exp should get an inferred annotate with tile_size [128,128]
-    # - generic(add) should have its original annotate with tile_size [128,128]
+    # - matmul keeps its user tile_op
+    # - exp gets tile propagated from z
+    # - generic(add) keeps its user tile_op
     check_patterns = """
     CHECK: linalg.matmul
-    CHECK: nkipy.layout{{.*}}tile_size
+    CHECK: nkipy.tile_op{{.*}}loop_tile_size
     CHECK: linalg.exp
-    CHECK: nkipy.layout{{.*}}tile_size
+    CHECK: nkipy.tile_op{{.*}}loop_tile_size
     CHECK: linalg.generic
-    CHECK: nkipy.layout{{.*}}tile_size
+    CHECK: nkipy.tile_op{{.*}}loop_tile_size
     """
     run_kernel_test(
         kernel,
@@ -287,13 +286,13 @@ def test_no_annotations_generates_defaults():
     def kernel(x):
         return np.exp(x)
 
-    # Default tile: partition_dim=0, tile_size=[min(256,128), 256] = [128, 256].
+    # Default: loop_tile_size=[min(256,128), 256]=[128, 256], SharedHbm for return value.
     run_kernel_test(
         kernel,
         stop_after='infer-layout',
         check_ir_contains=[
-            "tile_size = array<i64: 128, 256>",
-            "partition_dim = 0",
+            "loop_tile_size = array<i64: 128, 256>",
+            "mem_space = #nkipy.mem<SharedHbm>",
         ],
         modes=Mode.STRING_CHECK,
     )
@@ -356,11 +355,13 @@ def test_3d_partition_dim_propagation_unannotated():
         knob.knob(z).tile_op(tile_size=tile_size).layout(mem_space="Sbuf", partition_dim=1)
         return z
 
-    # Both ops should have partition_dim = 1 after infer-layout
+    # partition_dim=1 should propagate backward from z to exp
     check_patterns = """
     CHECK: linalg.exp
+    CHECK: nkipy.tile_op{{.*}}loop_tile_size = array<i64: 1, 128, 64>
     CHECK: nkipy.layout{{.*}}partition_dim = 1
     CHECK: linalg.add
+    CHECK: nkipy.tile_op{{.*}}loop_tile_size = array<i64: 1, 128, 64>
     CHECK: nkipy.layout{{.*}}partition_dim = 1
     """
     run_kernel_test(

@@ -44,17 +44,15 @@ def test_mean_propagates_to_sum():
         knob.knob(result).tile_op(tile_size=[128, 1]).layout(mem_space="SharedHbm")
         return result
 
-    # Verify annotation propagation ordering:
-    # square (user knob) -> sum (inferred) -> div (user knob).
-    # Sum (keepdims=True): layout tile=[128,1], tile_op=[128,128] iter-space.
-    # Divide is rank-2 elementwise: layout tile=[128,1].
+    # Verify tile_op propagation ordering:
+    # square (user knob) -> sum (default) -> div (user knob).
     check_patterns = """
     CHECK: linalg.square
-    CHECK: nkipy.layout{{.*}}tile_size
+    CHECK: nkipy.tile_op{{.*}}loop_tile_size
     CHECK: linalg.generic
-    CHECK: nkipy.layout{{.*}}tile_size = array<i64: 128, 1>
+    CHECK: nkipy.tile_op{{.*}}loop_tile_size
     CHECK: linalg.generic
-    CHECK: nkipy.layout{{.*}}tile_size = array<i64: 128, 1>
+    CHECK: nkipy.tile_op{{.*}}loop_tile_size
     """
     run_kernel_test(
         kernel,
