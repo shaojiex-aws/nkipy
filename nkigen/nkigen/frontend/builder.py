@@ -186,15 +186,10 @@ class IRBuilder:
         self._ip = ir.InsertionPoint(self._entry_block)
         self._ip.__enter__()
 
-        shared_hbm = mem_space_attr("SharedHbm")
         handles: list[TensorHandle] = []
         for arg, (shape, dtype) in zip(
             self._entry_block.arguments, zip(arg_shapes, arg_dtypes)
         ):
-            nkipy_d.LayoutOp(
-                target=arg, mem_space=shared_hbm,
-                partition_dim=None, tile_size=None, loc=self._file_loc,
-            )
             elem_ty = _np_to_mlir(dtype)
             h = TensorHandle(arg, shape, np.dtype(dtype) if not isinstance(dtype, str) else _mlir_type_to_np(elem_ty), elem_ty)
             self._parameters.append(h)
@@ -203,17 +198,6 @@ class IRBuilder:
 
     def finish_function(self, result_handles: list[TensorHandle]):
         values = [h._value for h in result_handles]
-        ms_attr = mem_space_attr("SharedHbm")
-        for v in values:
-            has_mem_space = any(
-                use.owner.name == "nkipy.layout" and "mem_space" in use.owner.attributes
-                for use in v.uses
-            )
-            if not has_mem_space:
-                nkipy_d.LayoutOp(
-                    target=v, mem_space=ms_attr,
-                    partition_dim=None, tile_size=None, loc=self._file_loc,
-                )
         func.ReturnOp(values, loc=self._file_loc)
         self._ip.__exit__(None, None, None)
         self._ip = None

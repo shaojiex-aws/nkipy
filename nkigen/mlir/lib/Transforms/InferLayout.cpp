@@ -251,12 +251,22 @@ struct NkipyInferLayoutPass : public InferLayoutBase<NkipyInferLayoutPass> {
     }
   }
 
-  /// Step 3: emit nkipy.layout(mem_space) on allocs that lack one.
+  /// Step 3: emit nkipy.layout(mem_space) on unannotated values.
   void defaultLayouts(func::FuncOp func) {
     MLIRContext *ctx = func.getContext();
     auto sharedHbm = MemSpaceAttr::get(ctx, MemSpaceEnum::SharedHbm);
     auto sbuf = MemSpaceAttr::get(ctx, MemSpaceEnum::Sbuf);
     auto pdim0 = IntegerAttr::get(IntegerType::get(ctx, 32, IntegerType::Unsigned), 0);
+
+    // Func args are always SharedHbm (hardware constraint).
+    OpBuilder argBuilder(func);
+    argBuilder.setInsertionPointToStart(&func.getBody().front());
+    for (Value arg : func.getArguments()) {
+      if (!hasLayoutMemSpace(arg)) {
+        argBuilder.create<nkipy::LayoutOp>(arg.getLoc(), arg,
+            sharedHbm, /*partition_dim=*/nullptr, /*tile_size=*/nullptr);
+      }
+    }
 
     func.walk([&](memref::AllocOp allocOp) {
       Value alloc = allocOp.getResult();

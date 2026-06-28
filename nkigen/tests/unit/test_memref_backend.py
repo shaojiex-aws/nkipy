@@ -29,7 +29,7 @@ FRONTEND_CASES = [
     pytest.param(
         [((128, 64), "f32"), ((128, 64), "f32")],
         lambda a, b: a + b,
-        ["#nkipy.mem<SharedHbm>", "linalg.add"],
+        ["linalg.add"],
         id="add",
     ),
     pytest.param(
@@ -65,7 +65,7 @@ FRONTEND_CASES = [
     pytest.param(
         [((64, 32), "f32"), ((64, 32), "f32")],
         lambda a, b: a * b,
-        ["#nkipy.mem<SharedHbm>", "linalg.mul"],
+        ["linalg.mul"],
         id="mul",
     ),
 ]
