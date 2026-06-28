@@ -152,17 +152,18 @@ def trace(
                 _clear_registry()
                 b.cleanup()
 
-        def to_kernel_builder(target: str = "trn2", api_version: str = "v1",
-                              dump_dir: Optional[str] = None,
-                              comments: bool = False) -> str:
-            """Generate readable ``kernel_builder`` Python source for this kernel.
+        def to_nisa(target: str = "trn2", *, dump_dir: Optional[str] = None) -> str:
+            """Run the full knob pipeline. Returns NISA MLIR assembly."""
+            from ..driver.pipeline import apply_complete_knob_pipeline
+            mlir_text = to_mlir()
+            return apply_complete_knob_pipeline(
+                str(mlir_text), target=target, dump_dir=dump_dir,
+            )
 
-            Runs the full nkigen pipeline up to (but not including) NISA
-            lowering, then emits equivalent kernel_builder code as text. The
-            result is directly executable/compilable through the standard NKI
-            flow. Pass ``comments=True`` to annotate each op with its shape /
-            memory space / op_id. See ``nkigen.codegen.kernelbuilder``.
-            """
+        def to_nki(target: str = "trn2", *, api_version: str = "v1",
+                   dump_dir: Optional[str] = None,
+                   comments: bool = False) -> str:
+            """Generate kernel_builder Python source for this kernel."""
             from ..codegen.kernelbuilder import trace_to_kernelbuilder
             return trace_to_kernelbuilder(
                 wrapper, target=target, api_version=api_version,
@@ -170,7 +171,8 @@ def trace(
             )
 
         wrapper.to_mlir = to_mlir
-        wrapper.to_kernel_builder = to_kernel_builder
+        wrapper.to_nisa = to_nisa
+        wrapper.to_nki = to_nki
         wrapper.__traced__ = True
         wrapper.input_specs = input_specs
 

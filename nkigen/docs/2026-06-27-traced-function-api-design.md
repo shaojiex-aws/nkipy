@@ -122,7 +122,7 @@ Drop the standalone `fuse` export since it now lives on the builder.
 
 3. **Update tests** — `knob.fuse(c, d)` / `fuse(c, d)` → `knob(c, d).fuse()`.
 
-### Phase 2: `to_nisa()` and `to_nki()` methods
+### Phase 2: `to_nisa()` and `to_nki()` methods ✅ Done
 
 4. **Edit `nkigen/frontend/trace.py`**:
    - Add `to_nisa()` closure:
