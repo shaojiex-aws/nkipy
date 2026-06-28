@@ -156,7 +156,7 @@ Drop the standalone `fuse` export since it now lives on the builder.
 8. **Update test imports** — `from nkigen import knob` then `knob(x).tile_op(...)`
    (already works in most tests; fix the few that use `knob.knob(x)`).
 
-### Phase 4: Cleanup
+### Phase 4: Cleanup ✅ Done
 
 9. **Update `nkigen/driver/__init__.py` docstring** — note that `to_nisa()` is the
    preferred entry point.

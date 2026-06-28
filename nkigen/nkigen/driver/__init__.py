@@ -1,9 +1,11 @@
 """
 Driver: compilation pipeline orchestration.
 
-Wraps the ``nkipy-opt`` binary and coordinates the multi-phase pass pipeline
-(``apply_complete_knob_pipeline``), and exposes the legacy in-process
-``apply_passes`` pass manager.
+Preferred entry point for users: ``traced_fn.to_nisa(target="trn2")``.
+
+This module wraps the ``nkipy-opt`` binary and coordinates the multi-phase
+pass pipeline. ``apply_complete_knob_pipeline`` is still available for
+tests that need ``stop_after`` / ``dump_dir`` control.
 """
 
 __all__ = []

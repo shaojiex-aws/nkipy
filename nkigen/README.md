@@ -32,22 +32,23 @@ from nkigen import trace, knob
 @trace(input_specs=[((128, 256), "f32")])
 def add_scalar(x):
     result = x + 2.0
-    knob.knob(result).tile_op(tile_size=[128, 128]).layout(mem_space="SharedHbm")
+    knob(result).tile_op(tile_size=[128, 128]).layout(mem_space="SharedHbm")
     return result
 
-module = add_scalar.to_mlir()
+# Compile to NISA assembly
+nisa_ir = add_scalar.to_nisa(target="trn2")
 
-from nkigen.driver.pipeline import apply_complete_knob_pipeline
-nisa_ir = apply_complete_knob_pipeline(str(module), target="trn2")
+# Or generate kernel_builder Python source
+nki_code = add_scalar.to_nki(target="trn2")
 ```
 
 ## The `knob` API
 
-`knob.knob(tensor)` returns a chainable builder. Methods emit `nkipy.*` ops
+`knob(tensor)` returns a chainable builder. Methods emit `nkipy.*` ops
 and return `self`:
 
 ```python
-knob.knob(x).tile_op(tile_size=[64, 64]).layout(mem_space="Sbuf")
+knob(x).tile_op(tile_size=[64, 64]).layout(mem_space="Sbuf")
 ```
 
 - **`.tile_op(tile_size=[...])`** — loop tile for the producing op. One entry
@@ -56,20 +57,20 @@ knob.knob(x).tile_op(tile_size=[64, 64]).layout(mem_space="Sbuf")
   - Reduction: matches *input* rank (compiler knows which axis reduces).
   - Matmul `A[M,K] @ B[K,N] -> C[M,N]`: `[M_t, N_t, K_t]`.
 - **`.layout(mem_space=..., partition_dim=...)`** — memory placement.
-  `mem_space` in `{"Hbm", "Psum", "Sbuf", "SharedHbm"}`. The physical
-  factorization tile for SBUF is auto-derived from the consuming `tile_op`
-  via indexing maps (no manual `tile_size` param).
+  `mem_space` in `{"Hbm", "Psum", "Sbuf", "SharedHbm"}`. `partition_dim`
+  is only valid with `mem_space="Sbuf"` (HBM has no partition concept).
 - **`.cache(axis=[...])`** — SBUF staging hint (requires a preceding
   `.tile_op()`). Lists post-tiling loop levels where a cache buffer is
   allocated.
-- **`knob.fuse(a, b, ...)`** — fuse sibling `scf.for` loops (each must have
+- **`knob(a, b).fuse()`** — fuse sibling `scf.for` loops (each must have
   a matching `.tile_op`).
 
 Unannotated intermediates get tiling/placement inferred by `infer-layout`.
 
 ## Compilation Pipeline
 
-Defined in `nkigen/driver/pipeline.py` -> `apply_complete_knob_pipeline()`.
+Entry point: `traced_fn.to_nisa(target="trn2")`. Internally defined in
+`nkigen/driver/pipeline.py` -> `apply_complete_knob_pipeline()`.
 
 ```
 ┌─────────────────────────────────────────────────────────────────────┐
@@ -128,8 +129,11 @@ Defined in `nkigen/driver/pipeline.py` -> `apply_complete_knob_pipeline()`.
 ## Inspecting Intermediate IR
 
 ```python
-from nkigen.driver.pipeline import apply_complete_knob_pipeline
+# Full pipeline
+nisa_ir = my_kernel.to_nisa(target="trn2")
 
+# Dump all intermediate passes
+from nkigen.driver.pipeline import apply_complete_knob_pipeline
 apply_complete_knob_pipeline(mlir_str, dump_dir="debug_outputs/")
 apply_complete_knob_pipeline(mlir_str, stop_after="legalize-layout")
 ```
@@ -159,9 +163,7 @@ nkigen/
 ## Public API
 
 ```python
-from nkigen import trace, knob, TracedArray, CustomOp, verify_against_numpy
-from nkigen.apis import knob as knob_fn, fori_loop
-from nkigen.driver.pipeline import apply_complete_knob_pipeline
+from nkigen import trace, knob, fori_loop, TracedArray, CustomOp, verify_against_numpy
 ```
 
 ## Testing
