@@ -169,7 +169,11 @@ class NisaEmitter:
         if len(results) > 1:
             ret_str = f' -> ({", ".join(results)})'
 
-        attrs = ' attributes {nki.output_names = ["output"]}' if results else ""
+        if results:
+            names = ", ".join(f'"output_{i}"' for i in range(len(results)))
+            attrs = f' attributes {{nki.output_names = [{names}]}}'
+        else:
+            attrs = ""
         self._line(f'func.func @{sym_name}({", ".join(params)}){ret_str}{attrs} {{')
         self._indent += 1
         self._emit_block(block)

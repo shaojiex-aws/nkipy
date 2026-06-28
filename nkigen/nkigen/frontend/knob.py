@@ -76,6 +76,12 @@ class _KnobBuilder:
             self._validate_mem_space(mem_space)
         if partition_dim is not None:
             self._validate_partition_dim(partition_dim)
+            if mem_space is not None and mem_space != "Sbuf":
+                raise ValueError(
+                    f"partition_dim is only valid with mem_space='Sbuf', "
+                    f"got mem_space='{mem_space}'. "
+                    f"HBM has no partition/free dimension concept."
+                )
 
         mem_space_attr = _mem_space_attr(mem_space)
         partition_dim_attr = _partition_dim_attr(partition_dim)

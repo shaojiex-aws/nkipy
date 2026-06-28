@@ -87,7 +87,7 @@ def softmax_3d(x):
     # (BH, 128, 1) creates a 5D physical layout where the collapse_shape
     # back to 2D has a tile/base mismatch in linalg-to-nisa.
     x_max = np.max(x_fp32, axis=-1, keepdims=True)
-    knob.knob(x_max).tile_op(tile_size=[1, 128, 128]).layout(mem_space="SharedHbm", partition_dim=1)
+    knob.knob(x_max).tile_op(tile_size=[1, 128, 128]).layout(mem_space="Sbuf", partition_dim=1)
 
     shifted = x_fp32 - x_max
     knob.knob(shifted).tile_op(tile_size=attn_tile).layout(mem_space="Sbuf", partition_dim=1)
@@ -96,7 +96,7 @@ def softmax_3d(x):
     knob.knob(exp_s).tile_op(tile_size=attn_tile).layout(mem_space="Sbuf", partition_dim=1)
 
     sum_exp = np.sum(exp_s, axis=-1, keepdims=True)
-    knob.knob(sum_exp).tile_op(tile_size=[1, 128, 128]).layout(mem_space="SharedHbm", partition_dim=1)
+    knob.knob(sum_exp).tile_op(tile_size=[1, 128, 128]).layout(mem_space="Sbuf", partition_dim=1)
 
     # Softmax result is a sub-kernel boundary (feeds into context matmul).
     result = exp_s / sum_exp

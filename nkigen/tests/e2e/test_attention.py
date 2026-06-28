@@ -228,7 +228,7 @@ def test_attention_scores_sbuf_bmm(batch, n_heads, seq_len, head_dim, tile_size)
         knob.knob(sum_exp).tile_op(tile_size=[1, 128, 128]).layout(mem_space="Sbuf", partition_dim=1)
 
         result = exp_s / sum_exp
-        knob.knob(result).tile_op(tile_size=tile_size).layout(mem_space="SharedHbm", partition_dim=1)
+        knob.knob(result).tile_op(tile_size=tile_size).layout(mem_space="Sbuf", partition_dim=1)
         return result
 
     # Verify LLVM simulation matches NumPy through legalize-layout

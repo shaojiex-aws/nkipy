@@ -154,49 +154,48 @@ This decomposes a 4D transpose into looped 2D transposes.
 Tests still fail due to a downstream LegalizeLayout bug — see
 [legalize-layout-high-rank-sbuf](2026-06-28-legalize-layout-high-rank-sbuf.md).
 
-## Bug 3: HBM-to-HBM DMA transpose
+## Bug 3: partition_dim on SharedHbm is invalid ✅ Fixed (knob.py validation)
 
 **Affects:** test_sigmoid_partition_dim_1, test_exp_partition_dim_1
 **Error:** `neuronx-cc` exit code 70
 
-### What happens
+The test specifies `partition_dim=1` on a SharedHbm layout. HBM has no
+partitions — this is meaningless and causes `canonicalize-partition-dim`
+to produce an HBM-to-HBM DMA transpose (hardware unsupported).
 
-```mlir
-%result = alloc : memref<128x64xf32>     ← SharedHbm (return value, correct)
-%staging = alloc : memref<64x128xf32>    ← SharedHbm (defaultLayouts assigns this)
+Fix: `knob.py` now raises an error if `partition_dim` is specified with
+non-SBUF mem_space. Test updated to use SBUF for the compute annotation.
 
-compute → %staging
-dma_transpose %staging → %result         ← HBM-to-HBM: hardware can't do this
-```
+Remaining issue: the test still needs a way to express "compute in SBUF
+with partition_dim=1, then copy result to HBM for return." This requires
+a boundary copy pass — see
+[materialize-boundary-copies](2026-06-28-materialize-boundary-copies.md).
 
-DMA transpose requires at least one operand in SBUF. The old pass assigned
-SBUF to `%staging`. The new pass sees it's not a return value and not a
-matmul output, but still gives it SharedHbm (??? — actually it should give
-Sbuf by the current logic; need to investigate why it doesn't).
+## Bug 4: Multi-output naming (unrelated) ✅ Fixed
 
-### Fix
-
-The staging alloc for `canonicalize-partition-dim` transposing copies should
-be SBUF. Either:
-- `canonicalize-partition-dim` marks it SBUF when it creates the alloc, or
-- `defaultLayouts` correctly assigns it (may already be correct if the
-  alloc has no memspace — need to verify what's actually happening here)
-
-## Bug 4: Multi-output naming (unrelated)
-
-**Affects:** test_qkv_projection
+**Affects:** test_qkv_projection, test_add_and_mul_hw, test_add_and_sub_hw
 **Error:** `nki.output_names has 1 entries but output index is 1`
 
-Kernel returns 3 values but `nki.output_names = ["output"]`. Tracing bug,
-not infer-layout.
+NISA emitter always emitted `nki.output_names = ["output"]` regardless
+of how many return values. Fixed to emit `["output_0", "output_1", ...]`.
+
+## Cleanup: consolidate layout annotation in infer-layout
+
+Currently, default layout annotations happen in two places:
+- `builder.py` `finish_function`: func args → SharedHbm, return values → SharedHbm
+- `infer-layout` `defaultLayouts`: intermediates → SBUF, return values → SharedHbm
+
+This is redundant and confusing. Proposal: remove annotations from
+`builder.py` and let infer-layout handle ALL defaults (func args,
+return values, intermediates) in one place.
 
 ## Summary
 
 | Bug | Tests | Fix |
 |-----|-------|-----|
 | 1: propagation ordering | 3 | reverse-walk propagation before defaults |
-| 2: transpose → SBUF | 2 | assign SharedHbm + fix isAnnotatableOp |
-| 3: HBM-HBM DMA | 2 | staging alloc must be SBUF |
-| 4: output naming | 1 | tracing layer (separate) |
+| 2: transpose allocs | 2 | isReturnValue + isAnnotatableOp |
+| 3: partition_dim on HBM | 2 | knob.py validation + test update |
+| 4: output naming | 3 | NISA emitter fix |
 | FileCheck updates | 17 | update test assertions |
-| Pre-existing | 11 | not caused by rewrite |
+| Pre-existing | ~9 | neuronx-cc failures, not caused by rewrite |

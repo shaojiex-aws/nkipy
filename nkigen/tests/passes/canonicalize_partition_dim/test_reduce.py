@@ -37,7 +37,7 @@ def test_3d_reduction_max_partition_dim_1():
         knob.knob(sq).tile_op(tile_size=[1, M, N]).layout(mem_space="Sbuf", partition_dim=1)
 
         sm = np.max(sq, axis=-1, keepdims=True)
-        knob.knob(sm).tile_op(tile_size=[1, M, N]).layout(mem_space="SharedHbm", partition_dim=1)
+        knob.knob(sm).tile_op(tile_size=[1, M, N]).layout(mem_space="Sbuf", partition_dim=1)
         return sm
 
     # String check: verify transposes and permuted shapes
@@ -82,7 +82,7 @@ def test_3d_reduction_sum_partition_dim_1():
         knob.knob(y).tile_op(tile_size=[1, M, N]).layout(mem_space="Sbuf", partition_dim=1)
 
         sm = np.sum(y, axis=-1, keepdims=True)
-        knob.knob(sm).tile_op(tile_size=[1, M, N]).layout(mem_space="SharedHbm", partition_dim=1)
+        knob.knob(sm).tile_op(tile_size=[1, M, N]).layout(mem_space="Sbuf", partition_dim=1)
         return sm
 
     # String check: verify transposes and permuted shapes

@@ -33,7 +33,7 @@ def test_exp_partition_dim_1():
     @trace(input_specs=[((M, N), "f32")])
     def kernel(x):
         result = np.exp(x)
-        knob.knob(result).tile_op(tile_size=tile_size).layout(mem_space="SharedHbm", partition_dim=1)
+        knob.knob(result).tile_op(tile_size=tile_size).layout(mem_space="Sbuf", partition_dim=1)
         return result
 
     run_kernel_test(
@@ -73,7 +73,7 @@ def test_sigmoid_partition_dim_1():
         knob.knob(one_plus_exp).tile_op(tile_size=tile_size).layout(mem_space="Sbuf", partition_dim=1)
 
         result = 1.0 / one_plus_exp
-        knob.knob(result).tile_op(tile_size=tile_size).layout(mem_space="SharedHbm", partition_dim=1)
+        knob.knob(result).tile_op(tile_size=tile_size).layout(mem_space="Sbuf", partition_dim=1)
 
         return result
 

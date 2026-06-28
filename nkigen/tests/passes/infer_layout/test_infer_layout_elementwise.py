@@ -316,7 +316,7 @@ def test_3d_partition_dim_inferred_from_tile():
         intermediate = np.exp(a)
         knob.knob(intermediate).tile_op(tile_size=tile_size).layout(mem_space="Sbuf", partition_dim=1)
         result = intermediate * b
-        knob.knob(result).tile_op(tile_size=tile_size).layout(mem_space="SharedHbm", partition_dim=1)
+        knob.knob(result).tile_op(tile_size=tile_size).layout(mem_space="Sbuf", partition_dim=1)
         return result
 
     # After infer-layout, ALL ops should have partition_dim = 1 since
@@ -389,7 +389,7 @@ def test_3d_partition_dim_enables_canonicalize():
     def kernel_3d_canon(x, bias):
         y = np.exp(x)
         z = y + bias
-        knob.knob(z).tile_op(tile_size=tile_size).layout(mem_space="SharedHbm", partition_dim=1)
+        knob.knob(z).tile_op(tile_size=tile_size).layout(mem_space="Sbuf", partition_dim=1)
         return z
 
     # After canonicalize-partition-dim, transposes should be inserted
