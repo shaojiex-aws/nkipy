@@ -371,6 +371,9 @@ def _compile_nisa_to_neff(
         # for neuronx-cc output so repeat invocations of the same
         # fixture-based test don't collide.
         debug_dir = os.path.join(dump_dir, "neff")
+        if os.path.exists(debug_dir):
+            import shutil
+            shutil.rmtree(debug_dir)
     else:
         debug_dir = tempfile.mkdtemp(prefix="e2e_compile_")
     os.makedirs(debug_dir, exist_ok=True)
