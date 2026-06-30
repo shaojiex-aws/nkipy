@@ -116,16 +116,24 @@ Value emitTile(OpBuilder &builder, Location loc, Value target,
   return tileOp.getResult(0);
 }
 
-/// Emit promote_tensor for a specific DPS operand position.
+/// Emit promote_tensor for a specific DPS operand position. When `tile` is
+/// non-empty it is attached as the physical SBUF tile (used for matmul
+/// operands, which are promoted block-sized but read tile-sized); otherwise
+/// PromoteTensorOp falls back to its leaf-sized default.
 void emitPromoteOperand(OpBuilder &builder, Location loc, Value tiledOp,
-                        int64_t operandIdx, Attribute memSpace) {
+                        int64_t operandIdx, Attribute memSpace,
+                        ArrayRef<int64_t> tile = {}) {
   auto anyValueType = transform::AnyValueType::get(builder.getContext());
   SmallVector<int64_t> position = {operandIdx};
   auto getOp = builder.create<transform::GetOperandOp>(
       loc, anyValueType, tiledOp, ArrayRef<int64_t>(position),
       /*is_inverted=*/false, /*is_all=*/false);
+  auto tileAttr = tile.empty()
+      ? DenseI64ArrayAttr{}
+      : DenseI64ArrayAttr::get(builder.getContext(), tile);
   builder.create<transform::PromoteTensorOp>(
-      loc, anyValueType, getOp.getResult(), /*memory_space=*/memSpace);
+      loc, anyValueType, getOp.getResult(), /*memory_space=*/memSpace,
+      /*tile_size=*/tileAttr);
 }
 
 /// Promote all DPS inputs and the output to SBUF.
@@ -541,6 +549,12 @@ bool buildMatmulBlockingTransforms(OpBuilder &builder, Location loc,
   // Tile M blocks
   Value blockMTiled = emitTile(builder, loc, matmul, {blockM, 0, 0});
 
+  // matmul_transpose_a operands are read at tile granularity: A^T as
+  // [tileK, tileM], B as [tileK, tileN]. These buffers are promoted
+  // block-sized but accessed tile-sized, so pass the tile explicitly.
+  SmallVector<int64_t> lhsTile = {tileK, tileM};
+  SmallVector<int64_t> rhsTile = {tileK, tileN};
+
   Value afterBlockM;
   if (!isMemrefMode) {
     // Transpose matmul: matmul(A,B) → matmul_transpose_a(transpose(A), B)
@@ -552,22 +566,24 @@ bool buildMatmulBlockingTransforms(OpBuilder &builder, Location loc,
     // Promote the transpose output to SBUF.
     auto getTransposeOp = builder.create<transform::GetProducerOfOperand>(
         loc, anyOpType, afterBlockM, /*operand_number=*/0);
-    emitPromoteOperand(builder, loc, getTransposeOp.getResult(), 1, sbufMemSpace);
+    emitPromoteOperand(builder, loc, getTransposeOp.getResult(), 1,
+                       sbufMemSpace, lhsTile);
   } else {
     // Memref: use custom nkipy.transpose_matmul (upstream doesn't support memref)
+    auto tileAttr = DenseI64ArrayAttr::get(builder.getContext(), lhsTile);
     auto transposeMatmul = builder.create<transform::NkipyTransposeMatmulOp>(
-        loc, anyOpType, blockMTiled);
+        loc, anyOpType, blockMTiled, tileAttr);
     afterBlockM = transposeMatmul.getTransformed();
   }
 
   // Promote LHS at block-M level (reused across all N-blocks)
-  emitPromoteOperand(builder, loc, afterBlockM, 0, sbufMemSpace);
+  emitPromoteOperand(builder, loc, afterBlockM, 0, sbufMemSpace, lhsTile);
 
   // Tile N blocks
   Value blockNTiled = emitTile(builder, loc, afterBlockM, {0, blockN, 0});
 
   // Promote RHS at block-N level (reused within this N-block)
-  emitPromoteOperand(builder, loc, blockNTiled, 1, sbufMemSpace);
+  emitPromoteOperand(builder, loc, blockNTiled, 1, sbufMemSpace, rhsTile);
 
   // --- Level 2: Tile-level tiling (within blocks) ---
 

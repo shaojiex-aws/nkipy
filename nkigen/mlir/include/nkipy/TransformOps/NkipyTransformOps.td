@@ -43,7 +43,8 @@ def Nkipy_PromoteTensorOp : Op<Transform_Dialect, "nkipy.promote_tensor",
   }];
 
   let arguments = (ins TransformValueHandleTypeInterface:$tensor,
-      OptionalAttr<AnyAttr>:$memory_space);
+      OptionalAttr<AnyAttr>:$memory_space,
+      OptionalAttr<DenseI64ArrayAttr>:$tile_size);
   let results = (outs TransformValueHandleTypeInterface:$promoted);
 
   let assemblyFormat =
@@ -69,7 +70,8 @@ def NkipyTransposeMatmulOp : Op<Transform_Dialect, "nkipy.transpose_matmul",
     Returns a handle to the new `linalg.matmul_transpose_a` op.
   }];
 
-  let arguments = (ins TransformHandleTypeInterface:$target);
+  let arguments = (ins TransformHandleTypeInterface:$target,
+      OptionalAttr<DenseI64ArrayAttr>:$tile_size);
   let results = (outs TransformHandleTypeInterface:$transformed);
 
   let assemblyFormat =

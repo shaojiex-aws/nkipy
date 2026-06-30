@@ -1,7 +1,7 @@
 # Explicit SBUF tile on nkipy.layout (eliminate LegalizeLayout inference)
 
 **Date:** 2026-06-30
-**Status:** Proposed
+**Status:** WIP (steps 0–3 done; steps 4–5 pending)
 **Unblocks:** [legalize-layout-high-rank-sbuf](2026-06-28-legalize-layout-high-rank-sbuf.md), Problem 1 Step 2
 
 ## Problem
@@ -165,64 +165,106 @@ nkipy.layout(%transposedInit) {mem_space = Sbuf, partition_dim = 0,
               sbuf_tile_size = array<i64: min(K,128), M>}
 ```
 
-This is the only alloc that needs special handling — everything else
-is covered by step 1.
+> **Superseded by the step-3 fix below.** `[min(K,128), M]` is wrong:
+> the transpose output is consumed at tile granularity `[K_t, M_t]`,
+> not block granularity `[K, M]`. The fix passes the correct tile
+> explicitly (see step 3).
 
-### Step 3: Simplify LegalizeLayout ✅ (with 2 known regressions)
+### Step 3: Simplify LegalizeLayout ✅
 
 `traceToLinalgOperands` removed. LegalizeLayout errors if
 `sbuf_tile_size` is missing. All SBUF allocs now get explicit tile:
 
 1. **infer-layout** `computeSbufTileSizes` ✅
-2. **`NkipyTransposeMatmulOp`** ✅
-3. **`PromoteTensorOp`** ✅: tile = `[min(shape[0], 128), shape[1]...]`
-4. **`canonicalize-reshape`** ✅: same tile formula
+2. **`NkipyTransposeMatmulOp`** ✅: explicit `[tileK, tileM]` from caller
+3. **`PromoteTensorOp`** ✅: explicit tile from caller, else
+   `[min(shape[0], 128), shape[1]...]`
+4. **`canonicalize-reshape`** ✅: `[min(shape[0], 128), shape[1]...]`
 5. **Test IR** ✅: updated
 
-#### Known regressions (2 tests)
+#### The matmul-operand regression (fixed)
 
-`test_feedforward_sbuf` and `test_feedforward_sbuf_compact_silu`
-fail with neuronx-cc `[NCC_IBIR243] Access pattern out of bounds`.
+Two tests — `test_feedforward_sbuf` and
+`test_feedforward_sbuf_compact_silu` — previously failed with
+neuronx-cc `[NCC_IBIR243] Access pattern out of bounds`. Here is why,
+grounded in the dumped IR.
 
-**What happens:**
+The two buffers that broke are both **matmul block-level operands**,
+promoted by `buildMatmulBlockingTransforms` /
+`NkipyTransposeMatmulOp`. Here is the matmul loop nest as it appears
+pre-legalize (`mm_gup = x @ gate_up_weight`, trimmed; the `x` matmul
+becomes `matmul_transpose_a(transpose(x), gate_up_weight)`):
 
-The `PromoteTensorOp` code attaches `tile_size=[128, 256]` to a
-`256x256` promoted alloc (using `min(shape[0], 128), shape[1]`).
-LegalizeLayout sees `numBlocks=[2, 1]`, attaches sbuf_map, and
-`tileMemrefCopy` tiles the HBM→SBUF copy. The resulting access
-pattern is rejected by neuronx-cc.
+```mlir
+%alloc = memref.alloc() : memref<256x512xf32, Sbuf>            // mm_gup output
+scf.for %block_m = 0 to 1 step 1 {                            // block-M (degenerate, M=256)
+  %x_blk = memref.subview %arg0[...] [256, 256]               // x block from HBM
 
-**Why the old code worked:**
+  // ── %alloc_12: transpose output [K, M] = 256x256 (NkipyTransposeMatmulOp) ──
+  %alloc_12 = memref.alloc() : memref<256x256xf32, Sbuf>
+  nkipy.layout(%alloc_12) {tile_size = [128, 256]}            // ← WRONG (step 2 heuristic)
+  linalg.transpose ins(%x_blk) outs(%alloc_12) perm = [1, 0]  // x^T, lives in SBUF
 
-`traceToLinalgOperands` found `[128, 128]` subview accesses from
-the elementwise tiling loops AND the full-size `[256, 256]` from the
-`memref.copy`. It filtered out full-size accesses, kept `[128, 128]`,
-giving `numBlocks=[2, 2]`. This tiling pattern was valid.
+  scf.for %block_n = 0 to 2 step 1 {                          // block-N, step BLOCK_N=256
+    %w_blk = memref.subview %arg1[0, %block_n*256] [256, 256]  // gate_up_weight block (HBM)
 
-**The conflict:**
+    // ── %alloc_15: RHS copy-in 256x256 (block-N promote_tensor) ──
+    %alloc_15 = memref.alloc() : memref<256x256xf32, Sbuf>
+    nkipy.layout(%alloc_15) {tile_size = [128, 256]}          // ← WRONG (promote heuristic)
+    memref.copy %w_blk, %alloc_15                             // HBM → SBUF block copy
 
-`PromoteTensorOp` computes tile as `[min(shape[0], 128), shape[1]]`
-= `[128, 256]`. But `traceToLinalgOperands` finds `[128, 128]` from
-actual subview accesses. These are DIFFERENT tiles for the same alloc.
-The `[128, 128]` tile (from subview tracing) is correct — it matches
-how the data is actually accessed in the tiling loops.
+    scf.for %tile_m = 0 to 2 step 1 {                        // tile-M, step TILE_M=128
+      %lhsT_m = memref.subview %alloc_12[0, %tile_m*128] [256, 128]   // [K, TILE_M]
+      scf.for %tile_n = 0 to 2 step 1 {                      // tile-N, step TILE_N=128
+        %rhs_n = memref.subview %alloc_15[0, %tile_n*128] [256, 128]  // [K, TILE_N]
+        %psum  = memref.alloc() : memref<128x128xf32, Psum>
+        scf.for %k = 0 to 2 step 1 {                         // reduction, step TILE_K=128
+          %a = memref.subview %lhsT_m[%k*128, 0] [128, 128]  // ← reads %alloc_12 as [TILE_K, TILE_M] = 128x128
+          %b = memref.subview %rhs_n[%k*128, 0]  [128, 128]  // ← reads %alloc_15 as [TILE_K, TILE_N] = 128x128
+          linalg.matmul_transpose_a ins(%a, %b) outs(%psum)
+        }
+        memref.copy %psum, ...                               // PSUM → %alloc tile
+      }
+    }
+  }
+}
+```
 
-**Root issue:**
+`%alloc_12` (`x^T`, LHS) and `%alloc_15` (`gate_up_weight`, RHS) are
+both allocated/copied at the **block** level (`256x256`) but read by
+the innermost `matmul_transpose_a` at the **tile** level
+(`[TILE_K, *] = [128, 128]`). The `[min(shape[0], 128), shape[1]]`
+heuristic only caps the partition dim, giving `[128, 256]` →
+`numBlocks = [2, 1]`, which neuronx-cc rejects. The correct tile is
+`[128, 128]` → `numBlocks = [2, 2]`.
 
-The correct physical tile for a promoted alloc can only be determined
-AFTER tiling creates subview access patterns. `computeSbufTileSizes`
-(infer-layout, runs before tiling) uses indexing maps which give the
-wrong answer for allocs whose access pattern changes after promotion.
-`PromoteTensorOp` uses `[min(shape[0], 128), shape[1]]` which is
-also wrong (doesn't match actual subview access).
+The heuristic is fine for **elementwise/reduction/transpose**
+promotion, where `promote_tensor` runs *after* `emitTile`, so the
+operand is already leaf-sized (free dim never tiled). It only breaks
+for **matmul**, where LHS/RHS/transpose promotion happens at the
+*block* level, *before* the inner tiling splits the free dimension.
 
-**Fix needed:**
+#### Fix: pass the correct tile explicitly from the matmul builder
 
-Don't attach `tile_size` from `PromoteTensorOp`. Keep
-`traceToLinalgOperands` as fallback for allocs without explicit
-`tile_size`. Alternatively, move tile computation to the beginning
-of LegalizeLayout (Phase 0) where subviews exist — same tracing
-logic as `traceToLinalgOperands` but stored on the layout upfront.
+No tracing, no new pass, no extra inference. `buildMatmulBlockingTransforms`
+already knows the iterator tile (`tileM, tileN, tileK`), so it knows
+each operand's physical tile directly:
+
+- transpose output / LHS `A^T`: `[tileK, tileM]`
+- RHS `B`: `[tileK, tileN]`
+
+`promote_tensor` and `nkipy.transpose_matmul` each take an optional
+`tile_size` attribute. The matmul builder passes these tiles; the ops
+attach them to `nkipy.layout` verbatim. When the attribute is absent
+(elementwise path), the ops fall back to the existing
+`[min(shape[0], 128), shape[1]]` default — so that path is unchanged.
+
+This keeps the design's "one authoritative tile per alloc, set
+upfront" model: the producer of the buffer (here, the tiling transform
+that creates it) states the physical tile, and LegalizeLayout just
+reads it. Re-introducing `traceToLinalgOperands` (even as a fallback)
+was rejected — it brings back the post-tiling trace and the
+"inconsistent tile sizes" failure mode this redesign exists to remove.
 
 ### Step 4: Tile transposes/copies using the explicit tile
 

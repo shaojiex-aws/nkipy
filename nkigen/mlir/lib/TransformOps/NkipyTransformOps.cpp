@@ -150,10 +150,16 @@ transform::PromoteTensorOp::apply(transform::TransformRewriter &rewriter,
           newMemrefType.getRank() >= 2) {
         auto pdim0 = rewriter.getIntegerAttr(
             rewriter.getIntegerType(32, /*isSigned=*/false), 0);
-        SmallVector<int64_t> tile(newMemrefType.getShape().begin(),
-                                  newMemrefType.getShape().end());
-        tile[0] = std::min(tile[0], (int64_t)128);
-        auto tileAttr = DenseI64ArrayAttr::get(rewriter.getContext(), tile);
+        // Caller-supplied tile (matmul operands, read at tile granularity)
+        // takes precedence. Otherwise the operand is already leaf-sized
+        // (elementwise promotion runs after tiling), so cap dim 0 at 128.
+        DenseI64ArrayAttr tileAttr = getTileSizeAttr();
+        if (!tileAttr) {
+          SmallVector<int64_t> tile(newMemrefType.getShape().begin(),
+                                    newMemrefType.getShape().end());
+          tile[0] = std::min(tile[0], (int64_t)128);
+          tileAttr = DenseI64ArrayAttr::get(rewriter.getContext(), tile);
+        }
         rewriter.create<nkipy::LayoutOp>(
             value.getLoc(), alloc.getResult(), nkipyMs, pdim0, tileAttr);
       }
@@ -226,12 +232,17 @@ transform::NkipyTransposeMatmulOp::apply(transform::TransformRewriter &rewriter,
         {K, M}, elemTy, MemRefLayoutAttrInterface{}, sbufAttr);
     Value transposedInit = rewriter.create<memref::AllocOp>(loc, transposedType);
 
-    // Attach sbuf_tile_size: partition dim (K) capped at 128.
+    // Attach sbuf_tile_size. The transpose output (A^T) is consumed by
+    // matmul_transpose_a at tile granularity [tileK, tileM], so the caller
+    // passes that tile. Fall back to [min(K,128), M] when unset.
     {
       auto pdim0 = rewriter.getIntegerAttr(
           rewriter.getIntegerType(32, /*isSigned=*/false), 0);
-      SmallVector<int64_t> tile = {std::min(K, (int64_t)128), M};
-      auto tileAttr = DenseI64ArrayAttr::get(rewriter.getContext(), tile);
+      DenseI64ArrayAttr tileAttr = getTileSizeAttr();
+      if (!tileAttr) {
+        SmallVector<int64_t> tile = {std::min(K, (int64_t)128), M};
+        tileAttr = DenseI64ArrayAttr::get(rewriter.getContext(), tile);
+      }
       rewriter.create<nkipy::LayoutOp>(
           loc, transposedInit, sbufAttr, pdim0, tileAttr);
     }
