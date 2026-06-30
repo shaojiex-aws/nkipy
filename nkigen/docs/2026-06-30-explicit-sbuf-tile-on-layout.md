@@ -53,7 +53,7 @@ copy is needed — see
 
 Order: step 0 → materialize-boundary-copies → step 1.
 
-### Step 1: infer-layout computes `sbuf_tile_size` for all SBUF allocs
+### Step 1 ✅: infer-layout computes `sbuf_tile_size` for all SBUF allocs
 
 infer-layout already emits `nkipy.tile_op` (loop_tile_size) and
 `nkipy.layout` (mem_space, partition_dim) for every op/alloc. Extend

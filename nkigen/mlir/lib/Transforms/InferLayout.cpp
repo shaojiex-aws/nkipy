@@ -325,12 +325,86 @@ struct NkipyInferLayoutPass : public InferLayoutBase<NkipyInferLayoutPass> {
     });
   }
 
+  /// Step 5: compute sbuf_tile_size for SBUF allocs from tile_op + indexing maps.
+  void computeSbufTileSizes(func::FuncOp func) {
+    func.walk([&](memref::AllocOp allocOp) {
+      Value alloc = allocOp.getResult();
+
+      // Only SBUF allocs need sbuf_tile_size.
+      nkipy::LayoutOp layoutOp;
+      for (Operation *user : alloc.getUsers()) {
+        auto l = dyn_cast<nkipy::LayoutOp>(user);
+        if (l && l.getTarget() == alloc && l.getMemSpace()) {
+          if (l.getMemSpace()->getValue() == MemSpaceEnum::Sbuf)
+            layoutOp = l;
+          break;
+        }
+      }
+      if (!layoutOp || layoutOp.getTileSizeAttr())
+        return;
+
+      // Find tile_op on this alloc.
+      nkipy::TileOp tileOp;
+      for (Operation *user : alloc.getUsers())
+        if (auto t = dyn_cast<nkipy::TileOp>(user)) {
+          tileOp = t;
+          break;
+        }
+      if (!tileOp)
+        return;
+
+      auto loopTile = tileOp.getLoopTileSizeAttr().asArrayRef();
+
+      // Find the linalg op that writes to this alloc (DPS init).
+      linalg::LinalgOp producer;
+      for (OpOperand &use : alloc.getUses()) {
+        auto candidate = dyn_cast<linalg::LinalgOp>(use.getOwner());
+        if (candidate && candidate.isDpsInit(&use)) {
+          producer = candidate;
+          break;
+        }
+      }
+      if (!producer)
+        return;
+
+      // Get output indexing map and derive sbuf_tile_size.
+      OpOperand *initOperand = nullptr;
+      for (OpOperand &operand : producer.getDpsInitsMutable()) {
+        if (operand.get() == alloc) {
+          initOperand = &operand;
+          break;
+        }
+      }
+      if (!initOperand)
+        return;
+
+      AffineMap outMap = producer.getMatchingIndexingMap(initOperand);
+      SmallVector<int64_t> sbufTile;
+      for (unsigned i = 0; i < outMap.getNumResults(); i++) {
+        auto expr = outMap.getResult(i);
+        if (auto dimExpr = dyn_cast<AffineDimExpr>(expr)) {
+          unsigned pos = dimExpr.getPosition();
+          if (pos < loopTile.size())
+            sbufTile.push_back(loopTile[pos]);
+          else
+            sbufTile.push_back(1);
+        } else {
+          sbufTile.push_back(1);
+        }
+      }
+
+      layoutOp.setTileSizeAttr(
+          DenseI64ArrayAttr::get(func.getContext(), sbufTile));
+    });
+  }
+
   void runOnOperation() override {
     func::FuncOp func = getOperation();
     propagateTileAndLayout(func);
     defaultTileOps(func);
     defaultLayouts(func);
     materializeReturnCopies(func);
+    computeSbufTileSizes(func);
     llvm::errs() << "[InferLayout] Done\n";
   }
 };

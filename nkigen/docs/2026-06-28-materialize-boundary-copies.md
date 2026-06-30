@@ -76,17 +76,49 @@ scf.for %i = ... {
 }
 ```
 
-### Step C: Matmul SBUF→HBM copy
+### Step C ✅: Matmul SBUF→HBM copy (already handled)
 
-knob-driven-tiling's matmul blocking handles PSUM→SBUF copy-back
-via promotion. If the output alloc is SharedHbm (return value or
-user annotation), the SBUF→HBM copy is currently handled by
-`tileMemrefCopy` in LegalizeLayout. Eventually moves into
-knob-driven-tiling.
+knob-driven-tiling's promotion generates all copies at tile size
+inside the tiling loops. The per-tile flow:
 
-### Step D: HBM-to-HBM copy (already handled)
+```mlir
+scf.for %block_m = ... {
+  scf.for %block_n = ... {
+    scf.for %tile_m = ... {
+      scf.for %tile_n = ... {
+        // Load output init HBM→SBUF→PSUM
+        nisa.dma_copy(dst=sbuf %init, src=hbm %out[tile])
+        nisa.tensor_copy(dst=psum %acc, src=sbuf %init)
+        // Matmul accumulate
+        scf.for %k = ... {
+          nisa.matmul(dst=psum %acc, ...)
+        }
+        // Store PSUM→SBUF→HBM
+        nisa.tensor_copy(dst=sbuf %buf, src=psum %acc)
+        nisa.dma_copy(dst=hbm %out[tile], src=sbuf %buf)
+      }
+    }
+  }
+}
+```
 
-`canonicalize-reshape` already inserts a contiguous HBM alloc +
-`nisa.dma_copy` for cases like `return x.reshape(...)`. The DMA
-engine handles HBM→HBM copies directly — no SBUF staging, no
-tiling needed. No changes required.
+All copies are already at tile size — `tileMemrefCopy` in
+LegalizeLayout is a no-op for this case (tile-sized SBUF allocs
+don't have sbuf_map, so it skips them).
+
+`tileMemrefCopy` is still needed for `canonicalize-reshape` copies
+(large SBUF allocs with sbuf_map copied to HBM). Removal deferred
+until copy insertion moves before knob-driven-tiling.
+
+### Step D: HBM-to-HBM copy (canonicalize-reshape)
+
+`canonicalize-reshape` inserts a copy when a non-contiguous HBM view
+(e.g. `return x.reshape(...)`) needs to be materialized as a
+contiguous output. The copy needs SBUF staging (HBM→SBUF→HBM per
+tile).
+
+Currently `canonicalize-reshape` runs after knob-driven-tiling and
+the copy is tiled by `tileMemrefCopy` in LegalizeLayout. When we
+move `canonicalize-reshape` before knob-driven-tiling, it attaches a
+tile_op to the copy and knob-driven-tiling tiles it with SBUF staging
+(same as any HBM↔SBUF copy). Then `tileMemrefCopy` can be removed.
