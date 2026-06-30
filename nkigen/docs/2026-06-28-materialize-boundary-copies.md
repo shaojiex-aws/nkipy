@@ -52,16 +52,29 @@ return %hbm_out
 
 knob-driven-tiling then tiles the copy.
 
-### Step B: HBM-to-HBM transpose → fix in canonicalize-partition-dim
+### Step B ✅: HBM-to-HBM transpose (already handled)
 
-When `canonicalize-partition-dim` inserts boundary transposes, ensure
-at least one side is SBUF. The source-side staging buffer should be
-SBUF (the compute chain writes to SBUF). Only the destination (the
-return value or downstream HBM consumer) is SharedHbm.
+`nisa.dma_transpose` requires one side in SBUF. An HBM-to-HBM
+transpose must be decomposed into:
+1. `dma_transpose` HBM → SBUF (transpose + load into temp buffer)
+2. `dma_copy` SBUF → HBM (store to destination)
 
-After step 1 of the sbuf_tile_size doc (canonicalize-partition-dim
-reads tile_op for seedTileSizeAttr), the boundary transposes get
-tile_ops → knob-driven-tiling tiles them.
+This is already handled by knob-driven-tiling's promotion. When the
+user writes `np.transpose(hbm_input)` with output in SharedHbm, the
+tiling + promotion produces exactly this sequence. The `knob.py`
+validation (no `partition_dim` on non-SBUF) prevents
+`canonicalize-partition-dim` from creating HBM-to-HBM transposes.
+No additional work needed.
+
+Generated NISA (2 ops per tile — `buildTransposeTiling` only
+promotes the output, so `dma_transpose` reads HBM directly):
+
+```mlir
+scf.for %i = ... {
+  nisa.dma_transpose(dst=sbuf %buf, src=hbm %arg0[tile], perm=[1,0])  // HBM→SBUF
+  nisa.dma_copy(dst=hbm %out[tile], src=sbuf %buf)                    // SBUF→HBM
+}
+```
 
 ### Step C: Matmul SBUF→HBM copy
 

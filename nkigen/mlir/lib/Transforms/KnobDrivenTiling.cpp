@@ -68,6 +68,7 @@ struct KnobInfo {
   int64_t opId = -1;  // nkipy.op_id for per-instance matching, -1 if not set
   int numDpsInputs = -1;  // Number of DPS inputs, -1 if unknown
   bool isElementwise = false;  // Whether this op is elementwise (verified during extraction)
+  bool isTranspose = false;   // Whether this op is a transpose
   bool isReduction = false;  // Whether this op has both parallel and reduction iterators
   SmallVector<int64_t> matmulDims;  // [M, N, K] for matmul ops (for dynamic blocking)
   SmallVector<CacheInfo> caches;  // per-input cache annotations
@@ -358,7 +359,7 @@ std::map<std::string, std::vector<KnobInfo>> extractKnobsByOpType(
               }
               validationError = validateMatmulTileSize(linalgOp, knobWithId);
             } else if (isTransposeOp(opName)) {
-              knobWithId.isElementwise = true;
+              knobWithId.isTranspose = true;
               knobWithId.numDpsInputs = linalgOp.getNumDpsInputs();
               validationError = validateElementwiseTileSize(linalgOp, knobWithId);
             } else if (isElementwiseOp(linalgOp)) {
@@ -424,7 +425,7 @@ void emitCacheAwarePromotion(OpBuilder &builder, Location loc,
   }
 }
 
-/// Build tiling + SBUF promotion for elementwise (and transpose) operations.
+/// Build tiling + SBUF promotion for elementwise operations.
 void buildElementwiseTiling(OpBuilder &builder, Location loc,
                             Value moduleArg,
                             const std::string &opName,
@@ -438,6 +439,25 @@ void buildElementwiseTiling(OpBuilder &builder, Location loc,
   int numInputs = knob.numDpsInputs >= 0 ? knob.numDpsInputs
       : (isNamedUnaryElementwiseOp(opName) ? 1 : 2);
   emitCacheAwarePromotion(builder, loc, tiledOp, numInputs, knob.caches);
+}
+
+/// Build tiling + output-only SBUF promotion for transpose operations.
+/// Input stays in its original mem_space (dma_transpose reads HBM directly).
+void buildTransposeTiling(OpBuilder &builder, Location loc,
+                          Value moduleArg,
+                          const std::string &opName,
+                          const KnobInfo &knob,
+                          DictionaryAttr opAttrs) {
+  logTileSizes(opName + " transpose tile_size", knob.tileSize);
+
+  auto sbufMemSpace = nkipy::MemSpaceAttr::get(
+      builder.getContext(), nkipy::MemSpaceEnum::Sbuf);
+
+  Value matched = emitMatch(builder, loc, moduleArg, opName, opAttrs);
+  Value tiledOp = emitTile(builder, loc, matched, knob.tileSize);
+
+  int numInputs = knob.numDpsInputs >= 0 ? knob.numDpsInputs : 1;
+  emitPromoteOperand(builder, loc, tiledOp, numInputs, sbufMemSpace);
 }
 
 /// Build tiling + SBUF promotion for reduction operations.
@@ -660,6 +680,9 @@ struct NkipyKnobDrivenTilingPass
             llvm::errs() << "[KnobDrivenTiling] Failed to build matmul transforms\n";
             continue;
           }
+          hasAnyTransforms = true;
+        } else if (knob.isTranspose) {
+          buildTransposeTiling(builder, loc, moduleArg, opName, knob, opAttrs);
           hasAnyTransforms = true;
         } else if (knob.isElementwise) {
           // Single-level tiling for elementwise ops (named or elementwise generic)
