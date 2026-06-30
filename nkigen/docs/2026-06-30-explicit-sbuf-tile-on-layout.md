@@ -154,7 +154,7 @@ The matmul `transpose_a` alloc — created by `NkipyTransposeMatmulOp`
 during knob-driven-tiling (after infer-layout runs). Step 2 handles
 this.
 
-### Step 2: `NkipyTransposeMatmulOp` attaches tile to its output
+### Step 2 ✅: `NkipyTransposeMatmulOp` attaches tile to its output
 
 `NkipyTransposeMatmulOp::apply` creates the transpose output alloc
 `[K, M]` during transform interpretation (after infer-layout). It
@@ -168,28 +168,61 @@ nkipy.layout(%transposedInit) {mem_space = Sbuf, partition_dim = 0,
 This is the only alloc that needs special handling — everything else
 is covered by step 1.
 
-### Step 3: Simplify LegalizeLayout
+### Step 3: Simplify LegalizeLayout ✅ (with 2 known regressions)
 
-LegalizeLayout reads `sbuf_tile_size` from `nkipy.layout` directly.
-No fallback, no `traceToLinalgOperands`:
+`traceToLinalgOperands` removed. LegalizeLayout errors if
+`sbuf_tile_size` is missing. All SBUF allocs now get explicit tile:
 
-```cpp
-for (auto allocOp : sbufAllocs) {
-    auto layout = findLayoutOpFor(allocOp.getResult());
-    if (!layout || !layout.getTileSizeAttr()) {
-        // Error: every SBUF alloc must have sbuf_tile_size by now.
-        signalPassFailure();
-        return;
-    }
-    auto tile = layout.getTileSizeAttr();
-    // compute numBlocks = shape / tile
-    ...
-}
-```
+1. **infer-layout** `computeSbufTileSizes` ✅
+2. **`NkipyTransposeMatmulOp`** ✅
+3. **`PromoteTensorOp`** ✅: tile = `[min(shape[0], 128), shape[1]...]`
+4. **`canonicalize-reshape`** ✅: same tile formula
+5. **Test IR** ✅: updated
 
-Remove `traceToLinalgOperands` entirely. The "inconsistent tile sizes"
-error becomes impossible — each alloc has ONE authoritative tile set
-by the pass that created it.
+#### Known regressions (2 tests)
+
+`test_feedforward_sbuf` and `test_feedforward_sbuf_compact_silu`
+fail with neuronx-cc `[NCC_IBIR243] Access pattern out of bounds`.
+
+**What happens:**
+
+The `PromoteTensorOp` code attaches `tile_size=[128, 256]` to a
+`256x256` promoted alloc (using `min(shape[0], 128), shape[1]`).
+LegalizeLayout sees `numBlocks=[2, 1]`, attaches sbuf_map, and
+`tileMemrefCopy` tiles the HBM→SBUF copy. The resulting access
+pattern is rejected by neuronx-cc.
+
+**Why the old code worked:**
+
+`traceToLinalgOperands` found `[128, 128]` subview accesses from
+the elementwise tiling loops AND the full-size `[256, 256]` from the
+`memref.copy`. It filtered out full-size accesses, kept `[128, 128]`,
+giving `numBlocks=[2, 2]`. This tiling pattern was valid.
+
+**The conflict:**
+
+`PromoteTensorOp` computes tile as `[min(shape[0], 128), shape[1]]`
+= `[128, 256]`. But `traceToLinalgOperands` finds `[128, 128]` from
+actual subview accesses. These are DIFFERENT tiles for the same alloc.
+The `[128, 128]` tile (from subview tracing) is correct — it matches
+how the data is actually accessed in the tiling loops.
+
+**Root issue:**
+
+The correct physical tile for a promoted alloc can only be determined
+AFTER tiling creates subview access patterns. `computeSbufTileSizes`
+(infer-layout, runs before tiling) uses indexing maps which give the
+wrong answer for allocs whose access pattern changes after promotion.
+`PromoteTensorOp` uses `[min(shape[0], 128), shape[1]]` which is
+also wrong (doesn't match actual subview access).
+
+**Fix needed:**
+
+Don't attach `tile_size` from `PromoteTensorOp`. Keep
+`traceToLinalgOperands` as fallback for allocs without explicit
+`tile_size`. Alternatively, move tile computation to the beginning
+of LegalizeLayout (Phase 0) where subviews exist — same tracing
+logic as `traceToLinalgOperands` but stored on the layout upfront.
 
 ### Step 4: Tile transposes/copies using the explicit tile
 

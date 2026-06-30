@@ -37,7 +37,6 @@
 #include "llvm/Support/Debug.h"
 #include "llvm/Support/raw_ostream.h"
 
-#include <queue>
 
 #define DEBUG_TYPE "legalize-layout"
 
@@ -107,64 +106,6 @@ static BlockLoopNest createBlockLoopNest(
   return result;
 }
 
-/// Trace a value forward through uses to find ALL linalg operands it feeds.
-static void traceToLinalgOperands(
-    Value val,
-    SmallVector<std::tuple<linalg::LinalgOp, unsigned, SmallVector<int64_t>>> &results) {
-  llvm::SmallPtrSet<Value, 16> visited;
-  std::queue<Value> workList;
-  workList.push(val);
-
-  while (!workList.empty()) {
-    Value current = workList.front();
-    workList.pop();
-
-    if (visited.contains(current))
-      continue;
-    visited.insert(current);
-
-    for (OpOperand &use : current.getUses()) {
-      Operation *user = use.getOwner();
-
-      if (auto linalgOp = dyn_cast<linalg::LinalgOp>(user)) {
-        MemRefType operandType = dyn_cast<MemRefType>(current.getType());
-        if (operandType) {
-          SmallVector<int64_t> tileShape(operandType.getShape().begin(),
-                                         operandType.getShape().end());
-          for (unsigned i = 0; i < linalgOp->getNumOperands(); ++i) {
-            if (linalgOp->getOperand(i) == current) {
-              results.push_back({linalgOp, i, tileShape});
-              break;
-            }
-          }
-        }
-        continue;
-      }
-
-      if (auto subviewOp = dyn_cast<memref::SubViewOp>(user)) {
-        workList.push(subviewOp.getResult());
-        continue;
-      }
-
-      if (auto castOp = dyn_cast<memref::CastOp>(user)) {
-        workList.push(castOp.getResult());
-        continue;
-      }
-
-      if (auto copyOp = dyn_cast<memref::CopyOp>(user)) {
-        if (copyOp.getTarget() == current) {
-          MemRefType memrefType = dyn_cast<MemRefType>(current.getType());
-          if (memrefType) {
-            SmallVector<int64_t> tileShape(memrefType.getShape().begin(),
-                                           memrefType.getShape().end());
-            results.push_back({linalg::LinalgOp(nullptr), 0, tileShape});
-          }
-        }
-        continue;
-      }
-    }
-  }
-}
 
 //===----------------------------------------------------------------------===//
 // Pass definition
@@ -339,44 +280,11 @@ struct NkipyLegalizeLayoutPass
       }
 
       if (refTile.empty()) {
-        SmallVector<std::tuple<linalg::LinalgOp, unsigned, SmallVector<int64_t>>> linalgUses;
-        traceToLinalgOperands(allocOp.getResult(), linalgUses);
-
-        SmallVector<SmallVector<int64_t>> tileSizes;
-        for (auto &[op, idx, tileShape] : linalgUses)
-          tileSizes.push_back(tileShape);
-
-        if (tileSizes.empty()) {
-          llvm::errs() << "  -> Skipping (no nkipy.layout, no linalg uses)\n";
-          continue;
-        }
-
-        SmallVector<SmallVector<int64_t>> validTileSizes;
-        SmallVector<int64_t> origShapeVec(origShape.begin(), origShape.end());
-        for (auto &tile : tileSizes) {
-          if (SmallVector<int64_t>(tile) == origShapeVec)
-            continue;
-          if (!tile.empty() && tile[0] > maxPartitionDim())
-            continue;
-          validTileSizes.push_back(tile);
-        }
-
-        if (validTileSizes.empty()) {
-          llvm::errs() << "  -> Skipping (already at tile size)\n";
-          continue;
-        }
-
-        refTile = validTileSizes[0];
-        for (size_t i = 1; i < validTileSizes.size(); ++i) {
-          if (validTileSizes[i] != refTile) {
-            llvm::errs() << "[LegalizeLayout] Error: inconsistent tile sizes\n";
-            hasError = true;
-            return results;
-          }
-        }
-        llvm::errs() << "  Inferred tile from consumers: [";
-        llvm::interleave(refTile, llvm::errs(), ",");
-        llvm::errs() << "]\n";
+        llvm::errs() << "[LegalizeLayout] Error: SBUF alloc at "
+                     << allocOp.getLoc()
+                     << " missing tile_size on nkipy.layout\n";
+        hasError = true;
+        return results;
       }
 
       if ((int64_t)refTile.size() != R) {

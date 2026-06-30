@@ -144,6 +144,21 @@ transform::PromoteTensorOp::apply(transform::TransformRewriter &rewriter,
     llvm::SmallPtrSet<Operation *, 4> preservedOps;
     preservedOps.insert(alloc);
 
+    if (auto nkipyMs = dyn_cast_or_null<nkipy::MemSpaceAttr>(
+            newMemrefType.getMemorySpace())) {
+      if (nkipyMs.getValue() == nkipy::MemSpaceEnum::Sbuf &&
+          newMemrefType.getRank() >= 2) {
+        auto pdim0 = rewriter.getIntegerAttr(
+            rewriter.getIntegerType(32, /*isSigned=*/false), 0);
+        SmallVector<int64_t> tile(newMemrefType.getShape().begin(),
+                                  newMemrefType.getShape().end());
+        tile[0] = std::min(tile[0], (int64_t)128);
+        auto tileAttr = DenseI64ArrayAttr::get(rewriter.getContext(), tile);
+        rewriter.create<nkipy::LayoutOp>(
+            value.getLoc(), alloc.getResult(), nkipyMs, pdim0, tileAttr);
+      }
+    }
+
     if (needsCopyIn) {
       auto copyOp = rewriter.create<memref::CopyOp>(
           value.getLoc(), value, alloc.getResult());
@@ -210,6 +225,16 @@ transform::NkipyTransposeMatmulOp::apply(transform::TransformRewriter &rewriter,
     auto transposedType = MemRefType::get(
         {K, M}, elemTy, MemRefLayoutAttrInterface{}, sbufAttr);
     Value transposedInit = rewriter.create<memref::AllocOp>(loc, transposedType);
+
+    // Attach sbuf_tile_size: partition dim (K) capped at 128.
+    {
+      auto pdim0 = rewriter.getIntegerAttr(
+          rewriter.getIntegerType(32, /*isSigned=*/false), 0);
+      SmallVector<int64_t> tile = {std::min(K, (int64_t)128), M};
+      auto tileAttr = DenseI64ArrayAttr::get(rewriter.getContext(), tile);
+      rewriter.create<nkipy::LayoutOp>(
+          loc, transposedInit, sbufAttr, pdim0, tileAttr);
+    }
 
     rewriter.create<linalg::TransposeOp>(
         loc, lhs, transposedInit, ArrayRef<int64_t>{1, 0});

@@ -134,6 +134,22 @@ struct CanonicalizeReshapePass
       Location loc = op->getLoc();
 
       auto allocOp = builder.create<memref::AllocOp>(loc, allocType);
+
+      // Attach sbuf_tile_size for SBUF allocs.
+      if (auto nkipyMs = dyn_cast_or_null<nkipy::MemSpaceAttr>(memSpace)) {
+        if (nkipyMs.getValue() == nkipy::MemSpaceEnum::Sbuf &&
+            allocType.getRank() >= 2) {
+          auto pdim0 = builder.getIntegerAttr(
+              builder.getIntegerType(32, /*isSigned=*/false), 0);
+          SmallVector<int64_t> tile(allocType.getShape().begin(),
+                                    allocType.getShape().end());
+          tile[0] = std::min(tile[0], (int64_t)128);
+          auto tileAttr = DenseI64ArrayAttr::get(func.getContext(), tile);
+          builder.create<nkipy::LayoutOp>(
+              loc, allocOp.getResult(), nkipyMs, pdim0, tileAttr);
+        }
+      }
+
       auto copyOp = builder.create<memref::CopyOp>(
           loc, result, allocOp.getResult());
       llvm::SmallPtrSet<Operation *, 2> exceptions;

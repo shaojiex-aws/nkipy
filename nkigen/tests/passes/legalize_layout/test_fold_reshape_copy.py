@@ -60,6 +60,7 @@ module {
     %c0 = arith.constant 0 : index
 
     %alloc_out = memref.alloc() {alignment = 64 : i64} : memref<256x128xf32, #nkipy.mem<Sbuf>>
+    nkipy.layout(%alloc_out : memref<256x128xf32, #nkipy.mem<Sbuf>>) {mem_space = #nkipy.mem<Sbuf>, partition_dim = 0 : ui32, tile_size = array<i64: 128, 128>}
 
     scf.for %iv = %c0 to %c2 step %c1 {
       %off = arith.muli %iv, %c128 : index
@@ -68,6 +69,7 @@ module {
         : memref<256x128xf32, strided<[?, ?], offset: ?>, #nkipy.mem<SharedHbm>>
         to memref<128x128xf32, strided<[?, ?], offset: ?>, #nkipy.mem<SharedHbm>>
       %tile_a = memref.alloc() {alignment = 64 : i64} : memref<128x128xf32, #nkipy.mem<Sbuf>>
+      nkipy.layout(%tile_a : memref<128x128xf32, #nkipy.mem<Sbuf>>) {mem_space = #nkipy.mem<Sbuf>, partition_dim = 0 : ui32, tile_size = array<i64: 128, 128>}
       memref.copy %sv_a, %tile_a
         : memref<128x128xf32, strided<[?, ?], offset: ?>, #nkipy.mem<SharedHbm>>
         to memref<128x128xf32, #nkipy.mem<Sbuf>>
@@ -76,11 +78,13 @@ module {
         : memref<256x128xf32, strided<[?, ?], offset: ?>, #nkipy.mem<SharedHbm>>
         to memref<128x128xf32, strided<[?, ?], offset: ?>, #nkipy.mem<SharedHbm>>
       %tile_b = memref.alloc() {alignment = 64 : i64} : memref<128x128xf32, #nkipy.mem<Sbuf>>
+      nkipy.layout(%tile_b : memref<128x128xf32, #nkipy.mem<Sbuf>>) {mem_space = #nkipy.mem<Sbuf>, partition_dim = 0 : ui32, tile_size = array<i64: 128, 128>}
       memref.copy %sv_b, %tile_b
         : memref<128x128xf32, strided<[?, ?], offset: ?>, #nkipy.mem<SharedHbm>>
         to memref<128x128xf32, #nkipy.mem<Sbuf>>
 
       %tile_out = memref.alloc() {alignment = 64 : i64} : memref<128x128xf32, #nkipy.mem<Sbuf>>
+      nkipy.layout(%tile_out : memref<128x128xf32, #nkipy.mem<Sbuf>>) {mem_space = #nkipy.mem<Sbuf>, partition_dim = 0 : ui32, tile_size = array<i64: 128, 128>}
       linalg.add ins(%tile_a, %tile_b
         : memref<128x128xf32, #nkipy.mem<Sbuf>>,
           memref<128x128xf32, #nkipy.mem<Sbuf>>)
@@ -140,11 +144,13 @@ module {
 
     // Full SBUF alloc loaded from HBM (no reshape -- ranks match)
     %alloc = memref.alloc() {alignment = 64 : i64} : memref<256x2x64xf32, #nkipy.mem<Sbuf>>
+    nkipy.layout(%alloc : memref<256x2x64xf32, #nkipy.mem<Sbuf>>) {mem_space = #nkipy.mem<Sbuf>, partition_dim = 0 : ui32, tile_size = array<i64: 128, 1, 64>}
     memref.copy %arg1, %alloc
       : memref<256x2x64xf32, strided<[?, ?, ?], offset: ?>, #nkipy.mem<SharedHbm>>
       to memref<256x2x64xf32, #nkipy.mem<Sbuf>>
 
     %alloc_out = memref.alloc() {alignment = 64 : i64} : memref<256x2x64xf32, #nkipy.mem<Sbuf>>
+    nkipy.layout(%alloc_out : memref<256x2x64xf32, #nkipy.mem<Sbuf>>) {mem_space = #nkipy.mem<Sbuf>, partition_dim = 0 : ui32, tile_size = array<i64: 128, 1, 64>}
 
     // Linalg ops use 3D operands; legalize-layout flattens tile allocs to 2D
     scf.for %i = %c0 to %c2 step %c1 {
@@ -154,6 +160,7 @@ module {
           : memref<256x2x64xf32, strided<[?, ?, ?], offset: ?>, #nkipy.mem<SharedHbm>>
           to memref<128x1x64xf32, strided<[?, ?, ?], offset: ?>, #nkipy.mem<SharedHbm>>
         %tile_a = memref.alloc() {alignment = 64 : i64} : memref<128x1x64xf32, #nkipy.mem<Sbuf>>
+        nkipy.layout(%tile_a : memref<128x1x64xf32, #nkipy.mem<Sbuf>>) {mem_space = #nkipy.mem<Sbuf>, partition_dim = 0 : ui32, tile_size = array<i64: 128, 1, 64>}
         memref.copy %sv_a, %tile_a
           : memref<128x1x64xf32, strided<[?, ?, ?], offset: ?>, #nkipy.mem<SharedHbm>>
           to memref<128x1x64xf32, #nkipy.mem<Sbuf>>
@@ -163,6 +170,7 @@ module {
           to memref<128x1x64xf32, strided<[128, 64, 1], offset: ?>, #nkipy.mem<Sbuf>>
 
         %tile_out = memref.alloc() {alignment = 64 : i64} : memref<128x1x64xf32, #nkipy.mem<Sbuf>>
+        nkipy.layout(%tile_out : memref<128x1x64xf32, #nkipy.mem<Sbuf>>) {mem_space = #nkipy.mem<Sbuf>, partition_dim = 0 : ui32, tile_size = array<i64: 128, 1, 64>}
         linalg.add ins(%tile_a, %sv_b
             : memref<128x1x64xf32, #nkipy.mem<Sbuf>>,
               memref<128x1x64xf32, strided<[128, 64, 1], offset: ?>, #nkipy.mem<Sbuf>>)
