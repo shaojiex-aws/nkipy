@@ -94,17 +94,6 @@ static bool isReturnValue(Value val) {
   return false;
 }
 
-/// Check if a value is the output of a matmul-like op.
-static bool isMatmulOutput(Value val) {
-  for (OpOperand &use : val.getUses()) {
-    auto linalgOp = dyn_cast<linalg::LinalgOp>(use.getOwner());
-    if (!linalgOp) continue;
-    if (isMatmulOp(linalgOp) && linalgOp.isDpsInit(&use))
-      return true;
-  }
-  return false;
-}
-
 //===----------------------------------------------------------------------===//
 // Pass
 //===----------------------------------------------------------------------===//
@@ -276,8 +265,8 @@ struct NkipyInferLayoutPass : public InferLayoutBase<NkipyInferLayoutPass> {
       OpBuilder builder(allocOp);
       builder.setInsertionPointAfter(allocOp);
 
-      // Return values and matmul outputs → SharedHbm
-      if (isReturnValue(alloc) || isMatmulOutput(alloc)) {
+      // Return values → SharedHbm; everything else → Sbuf.
+      if (isReturnValue(alloc)) {
         builder.create<nkipy::LayoutOp>(alloc.getLoc(), alloc,
             sharedHbm, /*partition_dim=*/nullptr, /*tile_size=*/nullptr);
       } else {
@@ -287,11 +276,61 @@ struct NkipyInferLayoutPass : public InferLayoutBase<NkipyInferLayoutPass> {
     });
   }
 
+  /// Step 4: if a return value is SBUF, insert SBUF→HBM copy.
+  void materializeReturnCopies(func::FuncOp func) {
+    MLIRContext *ctx = func.getContext();
+    auto sharedHbm = MemSpaceAttr::get(ctx, MemSpaceEnum::SharedHbm);
+
+    func.walk([&](func::ReturnOp returnOp) {
+      OpBuilder builder(returnOp);
+      for (unsigned i = 0; i < returnOp.getNumOperands(); i++) {
+        Value val = returnOp.getOperand(i);
+        auto memrefType = dyn_cast<MemRefType>(val.getType());
+        if (!memrefType)
+          continue;
+
+        // Check if this return value is SBUF.
+        bool isSbuf = false;
+        for (Operation *user : val.getUsers()) {
+          auto layout = dyn_cast<nkipy::LayoutOp>(user);
+          if (layout && layout.getTarget() == val && layout.getMemSpace()) {
+            if (layout.getMemSpace()->getValue() == MemSpaceEnum::Sbuf)
+              isSbuf = true;
+            break;
+          }
+        }
+        if (!isSbuf)
+          continue;
+
+        // Insert HBM alloc + copy.
+        auto hbmType = MemRefType::get(
+            memrefType.getShape(), memrefType.getElementType());
+        Value hbmAlloc = builder.create<memref::AllocOp>(
+            val.getLoc(), hbmType);
+        builder.create<nkipy::LayoutOp>(val.getLoc(), hbmAlloc,
+            sharedHbm, /*partition_dim=*/nullptr, /*tile_size=*/nullptr);
+        builder.create<memref::CopyOp>(val.getLoc(), val, hbmAlloc);
+
+        // Copy the tile_op to the HBM alloc (for knob-driven-tiling).
+        for (Operation *user : val.getUsers()) {
+          if (auto tileOp = dyn_cast<nkipy::TileOp>(user)) {
+            builder.create<nkipy::TileOp>(val.getLoc(), hbmAlloc,
+                tileOp.getLoopTileSizeAttr());
+            break;
+          }
+        }
+
+        returnOp.setOperand(i, hbmAlloc);
+      }
+    });
+  }
+
   void runOnOperation() override {
     func::FuncOp func = getOperation();
     propagateTileAndLayout(func);
     defaultTileOps(func);
     defaultLayouts(func);
+    materializeReturnCopies(func);
     llvm::errs() << "[InferLayout] Done\n";
   }
 };

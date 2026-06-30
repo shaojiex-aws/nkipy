@@ -705,6 +705,10 @@ struct NkipyCanonicalizePartitionDimPass
       SmallVector<int64_t> perm = buildPermutation(rank, partDim);
       SmallVector<int64_t> invPerm = invertPermutation(perm);
       auto seedTileSizeAttr = annotateOp.getTileSizeAttr();
+      if (!seedTileSizeAttr) {
+        if (auto tileOp = findTileOp(target))
+          seedTileSizeAttr = tileOp.getLoopTileSizeAttr();
+      }
 
       // Validate partition tile size fits hardware.
       if (seedTileSizeAttr) {

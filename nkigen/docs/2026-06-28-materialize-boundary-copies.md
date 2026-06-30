@@ -5,90 +5,75 @@
 
 ## Problem
 
-Several cases need copy + tile_op insertion that currently aren't handled:
+When mem_space boundaries are crossed or output aliasing is needed,
+copies must be inserted:
 
 1. **SBUF return value**: user annotates result as SBUF, but hardware
    requires return values in SharedHbm. Need SBUF→HBM copy.
 
 2. **HBM-to-HBM transpose**: `canonicalize-partition-dim` can produce
    a transpose where both source and dest are SharedHbm. Hardware DMA
-   transpose requires at least one side in SBUF. Need to stage through
-   SBUF (load tile → SBUF, transpose → HBM).
+   transpose requires at least one side in SBUF.
 
-3. **HBM-to-HBM copy** (general): any `memref.copy` between two HBM
-   buffers needs to stage through SBUF with tiling.
+3. **Matmul output to HBM**: matmul computes in PSUM, copies to SBUF.
+   If the output needs to be in HBM (return value or user annotation),
+   an additional SBUF→HBM copy is needed.
 
-## Where in the pipeline
+4. **HBM-to-HBM copy**: e.g. `return x.reshape(128, 256)` — the
+   reshaped view aliases the input. `canonicalize-reshape` inserts a
+   contiguous HBM alloc + `nisa.dma_copy` (HBM DMA engine handles
+   this directly, no SBUF staging needed). Already works today.
 
-```
-infer-layout          ← annotates mem_space, tile_op
-canonicalize-partition-dim ← may insert transposes
-knob-driven-tiling    ← generates scf.for loops from tile_ops
-                      ← ★ materialize-boundary-copies HERE ★
-canonicalize-reshape
-legalize-layout
-```
+## Principle
 
-**After knob-driven-tiling** is the right place because:
-- By then, all user-facing tile_ops have been consumed into loops
-- We can see which copies/transposes are untiled (no enclosing loop)
-- We can insert new tile_ops + loops for the boundary copies
-- It runs before legalize-layout, which needs everything properly tiled
+No separate pass. Each pass that creates a boundary-crossing op is
+responsible for tiling it:
+- Either tile directly (explicit `scf.for` + subviews), or
+- Attach `nkipy.tile_op` so knob-driven-tiling handles it
 
-## What the pass does
+## Implementation steps
 
-Walk all `linalg.transpose` and `memref.copy` ops that are NOT inside
-an `scf.for` (i.e., untiled). For each:
+### Step A ✅: SBUF return value → insert copy in infer-layout
 
-### Case 1: SBUF return value
+infer-layout's `defaultLayouts` marks return values as SharedHbm.
+If a user explicitly annotates a return value as SBUF, infer-layout
+should detect this (SBUF alloc flowing to `func.return`) and insert
+an HBM alloc + copy + tile_op:
 
 ```mlir
-// Before:
-%sbuf_result = memref.alloc() : memref<128x64xf32, #nkipy.mem<Sbuf>>
-linalg.reciprocal ... outs(%sbuf_result)
-return %sbuf_result
-
-// After:
-%sbuf_result = memref.alloc() : memref<128x64xf32, #nkipy.mem<Sbuf>>
-linalg.reciprocal ... outs(%sbuf_result)
-%hbm_out = memref.alloc() : memref<128x64xf32, #nkipy.mem<SharedHbm>>
-memref.copy %sbuf_result, %hbm_out  // tiled by this pass
+// User wrote: knob(result).layout(mem_space="Sbuf"); return result
+// infer-layout inserts:
+%hbm_out = memref.alloc() : memref<...xf32>
+nkipy.layout(%hbm_out) {mem_space = SharedHbm}
+memref.copy %result, %hbm_out
+nkipy.tile_op(%hbm_out) {loop_tile_size = ...}
 return %hbm_out
 ```
 
-### Case 2: HBM-to-HBM transpose (untiled)
+knob-driven-tiling then tiles the copy.
 
-```mlir
-// Before:
-linalg.transpose ins(%hbm_src) outs(%hbm_dst) permutation=[1,0]
+### Step B: HBM-to-HBM transpose → fix in canonicalize-partition-dim
 
-// After (tile into loop, stage through SBUF):
-scf.for %i ... {
-  %sbuf_tile = memref.alloc() ...
-  %src_slice = memref.subview %hbm_src[%i, ...] [tile] ...
-  memref.copy %src_slice, %sbuf_tile           // HBM → SBUF load
-  %dst_slice = memref.subview %hbm_dst[%i, ...] [tile] ...
-  linalg.transpose ins(%sbuf_tile) outs(%dst_slice)  // SBUF → HBM transpose
-}
-```
+When `canonicalize-partition-dim` inserts boundary transposes, ensure
+at least one side is SBUF. The source-side staging buffer should be
+SBUF (the compute chain writes to SBUF). Only the destination (the
+return value or downstream HBM consumer) is SharedHbm.
 
-### Case 3: HBM-to-HBM copy (untiled)
+After step 1 of the sbuf_tile_size doc (canonicalize-partition-dim
+reads tile_op for seedTileSizeAttr), the boundary transposes get
+tile_ops → knob-driven-tiling tiles them.
 
-Same as case 2 but without permutation — just stage through SBUF.
+### Step C: Matmul SBUF→HBM copy
 
-## Interaction with existing passes
+knob-driven-tiling's matmul blocking handles PSUM→SBUF copy-back
+via promotion. If the output alloc is SharedHbm (return value or
+user annotation), the SBUF→HBM copy is currently handled by
+`tileMemrefCopy` in LegalizeLayout. Eventually moves into
+knob-driven-tiling.
 
-- **infer-layout** stays simple: just annotates. If a user says
-  result is SBUF, that's fine.
-- **builder.py `finish_function`**: currently annotates unannotated
-  return values as SharedHbm. Keep this — it handles the common case.
-  The new pass handles the case where the user explicitly overrides.
-- **canonicalize-partition-dim**: can freely insert transposes without
-  worrying about mem_space staging — this pass cleans it up.
-- **legalize-layout**: by the time it runs, all SBUF allocs are
-  properly tiled and all boundary copies go through SBUF.
+### Step D: HBM-to-HBM copy (already handled)
 
-## Func args
-
-Func args are already annotated as SharedHbm by `builder.py` at trace
-time (line 194). infer-layout doesn't touch them. No change needed.
+`canonicalize-reshape` already inserts a contiguous HBM alloc +
+`nisa.dma_copy` for cases like `return x.reshape(...)`. The DMA
+engine handles HBM→HBM copies directly — no SBUF staging, no
+tiling needed. No changes required.
