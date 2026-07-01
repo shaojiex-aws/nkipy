@@ -13,6 +13,7 @@
 #include "nkipy/Dialect/NkipyAttrs.h"
 #include "nkipy/Dialect/NkipyOps.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
+#include "mlir/Dialect/Linalg/IR/Linalg.h"
 #include "mlir/Dialect/MemRef/IR/MemRef.h"
 #include "mlir/Pass/Pass.h"
 #include "mlir/Transforms/GreedyPatternRewriteDriver.h"
@@ -80,6 +81,7 @@ struct CanonicalizeReshapePass
 
   void getDependentDialects(DialectRegistry &registry) const override {
     registry.insert<memref::MemRefDialect>();
+    registry.insert<linalg::LinalgDialect>();
   }
 
   /// Walk views and insert alloc+copy where a zero-cost view is not possible:
@@ -150,8 +152,8 @@ struct CanonicalizeReshapePass
         }
       }
 
-      auto copyOp = builder.create<memref::CopyOp>(
-          loc, result, allocOp.getResult());
+      auto copyOp = builder.create<linalg::CopyOp>(
+          loc, ValueRange{result}, ValueRange{allocOp.getResult()});
       llvm::SmallPtrSet<Operation *, 2> exceptions;
       exceptions.insert(op);
       exceptions.insert(copyOp);

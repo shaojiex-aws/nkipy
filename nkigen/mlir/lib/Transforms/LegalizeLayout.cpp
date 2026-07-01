@@ -395,22 +395,40 @@ struct NkipyLegalizeLayoutPass
     return dyn_cast_or_null<SbufMapAttr>(memrefType.getLayout());
   }
 
+  /// Extract (source, target) from a memref.copy or linalg.copy. Returns
+  /// false if `op` is neither. (Interim: both copy kinds coexist until the
+  /// staging copies are tiled at emit time; this function is removed then.)
+  static bool getCopyOperands(Operation *op, Value &src, Value &dst) {
+    if (auto c = dyn_cast<memref::CopyOp>(op)) {
+      src = c.getSource();
+      dst = c.getTarget();
+      return true;
+    }
+    if (auto c = dyn_cast<linalg::CopyOp>(op)) {
+      src = c.getInputs()[0];
+      dst = c.getOutputs()[0];
+      return true;
+    }
+    return false;
+  }
+
   void tileCopyAndTranspose(func::FuncOp func, SmallVector<LayoutInfo> &layoutInfos) {
     OpBuilder builder(func.getContext());
 
-    SmallVector<memref::CopyOp> copiesToTile;
+    SmallVector<Operation *> copiesToTile;
     SmallVector<linalg::TransposeOp> transposesToTile;
 
     func.walk([&](Operation *op) {
-      if (auto copyOp = dyn_cast<memref::CopyOp>(op)) {
-        auto srcType = cast<MemRefType>(copyOp.getSource().getType());
-        auto dstType = cast<MemRefType>(copyOp.getTarget().getType());
+      Value copySrc, copyDst;
+      if (getCopyOperands(op, copySrc, copyDst)) {
+        auto srcType = cast<MemRefType>(copySrc.getType());
+        auto dstType = cast<MemRefType>(copyDst.getType());
         if (needsTiledTransfer(srcType, dstType)) {
           // Only tile if the SBUF side has sbuf_map
           Value sbufSide = isSbuf(srcType.getMemorySpace())
-              ? copyOp.getSource() : copyOp.getTarget();
+              ? copySrc : copyDst;
           if (getSbufMapFor(sbufSide))
-            copiesToTile.push_back(copyOp);
+            copiesToTile.push_back(op);
         }
       } else if (auto transposeOp = dyn_cast<linalg::TransposeOp>(op)) {
         Value input = transposeOp.getDpsInputs()[0];
@@ -439,10 +457,10 @@ struct NkipyLegalizeLayoutPass
     }
   }
 
-  void tileMemrefCopy(OpBuilder &builder, memref::CopyOp op,
+  void tileMemrefCopy(OpBuilder &builder, Operation *op,
                       SmallVector<LayoutInfo> &layoutInfos) {
-    Value src = op.getSource();
-    Value dst = op.getTarget();
+    Value src, dst;
+    getCopyOperands(op, src, dst);
     auto srcType = cast<MemRefType>(src.getType());
     auto dstType = cast<MemRefType>(dst.getType());
 
@@ -458,7 +476,7 @@ struct NkipyLegalizeLayoutPass
 
     int64_t R = info->rank();
     builder.setInsertionPoint(op);
-    Location loc = op.getLoc();
+    Location loc = op->getLoc();
 
     auto nest = createBlockLoopNest(builder, loc, info->numBlocks);
 
@@ -489,12 +507,14 @@ struct NkipyLegalizeLayoutPass
         loc, bufSBUF, offsetsSBUF, sizesSBUF, stridesSBUF);
 
     if (srcIsSbuf)
-      builder.create<memref::CopyOp>(loc, sbufTile, hbmTile);
+      builder.create<linalg::CopyOp>(loc, ValueRange{sbufTile},
+                                      ValueRange{hbmTile});
     else
-      builder.create<memref::CopyOp>(loc, hbmTile, sbufTile);
+      builder.create<linalg::CopyOp>(loc, ValueRange{hbmTile},
+                                      ValueRange{sbufTile});
 
     LLVM_DEBUG(llvm::dbgs() << " Tiled copy: " << srcType << " -> " << dstType << "\n");
-    op.erase();
+    op->erase();
   }
 
   void tileTranspose(OpBuilder &builder, linalg::TransposeOp op,
@@ -547,7 +567,8 @@ struct NkipyLegalizeLayoutPass
           : SmallVector<int64_t>{1, 0};
 
       if (perm2D[0] == 0 && perm2D[1] == 1)
-        builder.create<memref::CopyOp>(loc, inputBase, output);
+        builder.create<linalg::CopyOp>(loc, ValueRange{inputBase},
+                                        ValueRange{output});
       else
         builder.create<linalg::TransposeOp>(loc, inputBase, output, perm2D);
 
@@ -611,7 +632,8 @@ struct NkipyLegalizeLayoutPass
         : SmallVector<int64_t>{1, 0};
 
     if (perm2D[0] == 0 && perm2D[1] == 1)
-      builder.create<memref::CopyOp>(loc, inTile, outTile);
+      builder.create<linalg::CopyOp>(loc, ValueRange{inTile},
+                                      ValueRange{outTile});
     else
       builder.create<linalg::TransposeOp>(loc, inTile, outTile, perm2D);
 
@@ -680,7 +702,8 @@ struct NkipyLegalizeLayoutPass
       builder.create<linalg::FillOp>(loc, scalarValue, sbufAlloc.getResult());
 
       if (numBlocks == 1) {
-        builder.create<memref::CopyOp>(loc, sbufAlloc.getResult(), hbmBuf);
+        builder.create<linalg::CopyOp>(loc, ValueRange{sbufAlloc.getResult()},
+                                        ValueRange{hbmBuf});
       } else {
         int64_t freeDim = hbmShape[1];
 
@@ -723,7 +746,8 @@ struct NkipyLegalizeLayoutPass
         auto hbmTile = builder.create<memref::SubViewOp>(
             loc, hbmBuf, hbmOffsets, hbmSizes, hbmStrides);
 
-        builder.create<memref::CopyOp>(loc, sbufTile, hbmTile);
+        builder.create<linalg::CopyOp>(loc, ValueRange{sbufTile},
+                                        ValueRange{hbmTile});
         builder.setInsertionPointAfter(loop);
       }
 

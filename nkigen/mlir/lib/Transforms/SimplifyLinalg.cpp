@@ -206,17 +206,27 @@ static void prepareGatherForNisaLowering(func::FuncOp func) {
       if (!memrefType || !isSbuf(memrefType))
         continue;
 
-      // Find the memref.copy that writes HBM data into this SBUF alloc.
+      // Find the copy that writes HBM data into this SBUF alloc. Copies may
+      // be memref.copy (source, target) or linalg.copy (ins, outs).
       Value hbmSource = nullptr;
-      memref::CopyOp deadCopy = nullptr;
+      Operation *deadCopy = nullptr;
       for (auto *user : operand.getUsers()) {
-        auto copyOp = dyn_cast<memref::CopyOp>(user);
-        if (!copyOp || copyOp.getTarget() != operand)
+        Value copySrc, copyDst;
+        if (auto copyOp = dyn_cast<memref::CopyOp>(user)) {
+          copySrc = copyOp.getSource();
+          copyDst = copyOp.getTarget();
+        } else if (auto copyOp = dyn_cast<linalg::CopyOp>(user)) {
+          copySrc = copyOp.getInputs()[0];
+          copyDst = copyOp.getOutputs()[0];
+        } else {
           continue;
-        Value base = nkipy::getBaseMemRef(copyOp.getSource());
+        }
+        if (copyDst != operand)
+          continue;
+        Value base = nkipy::getBaseMemRef(copySrc);
         if (isHbm(cast<MemRefType>(base.getType()))) {
-          hbmSource = copyOp.getSource();
-          deadCopy = copyOp;
+          hbmSource = copySrc;
+          deadCopy = user;
           break;
         }
       }

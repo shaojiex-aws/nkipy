@@ -66,7 +66,7 @@ def test_add_tiling(shape, tile_size):
     check_patterns += f"    CHECK: memref.subview\n"
     check_patterns += f"    CHECK: memref.alloc() : memref<{tile_shape_x}xf32, #nkipy.mem<Sbuf>>\n"
     check_patterns += f"    CHECK: linalg.add {{{{.*}}}} memref<{tile_shape_x}xf32, #nkipy.mem<Sbuf>>\n"
-    check_patterns += f"    CHECK: memref.copy\n"
+    check_patterns += f"    CHECK: linalg.copy\n"
 
     run_kernel_test(
         add_kernel,
@@ -145,7 +145,7 @@ def test_add_simple():
     CHECK: memref.subview
     CHECK: memref.alloc() : memref<{tile0}x{tile1}xf32, #nkipy.mem<Sbuf>>
     CHECK: linalg.add {{{{.*}}}} memref<{tile0}x{tile1}xf32, #nkipy.mem<Sbuf>>
-    CHECK: memref.copy
+    CHECK: linalg.copy
     """
     run_kernel_test(
         add_kernel,
@@ -191,7 +191,7 @@ def test_tensor_add_scalar():
     CHECK: memref.subview
     CHECK: memref.alloc() : memref<{tile0}x{tile1}xf32, #nkipy.mem<Sbuf>>
     CHECK: linalg.generic
-    CHECK: memref.copy
+    CHECK: linalg.copy
     """
     run_kernel_test(
         kernel,
@@ -228,7 +228,7 @@ def test_scalar_minus_tensor():
     CHECK: memref.subview
     CHECK: memref.alloc() : memref<{tile0}x{tile1}xf32, #nkipy.mem<Sbuf>>
     CHECK: linalg.generic
-    CHECK: memref.copy
+    CHECK: linalg.copy
     """
     run_kernel_test(
         kernel,
@@ -264,7 +264,7 @@ def test_tensor_mul_scalar():
     CHECK: memref.subview
     CHECK: memref.alloc() : memref<{tile0}x{tile1}xf32, #nkipy.mem<Sbuf>>
     CHECK: linalg.generic
-    CHECK: memref.copy
+    CHECK: linalg.copy
     """
     run_kernel_test(
         kernel,
@@ -300,7 +300,7 @@ def test_tensor_div_scalar():
     CHECK: memref.subview
     CHECK: memref.alloc() : memref<{tile0}x{tile1}xf32, #nkipy.mem<Sbuf>>
     CHECK: linalg.generic
-    CHECK: memref.copy
+    CHECK: linalg.copy
     """
     run_kernel_test(
         kernel,
@@ -337,7 +337,7 @@ def test_scalar_div_tensor():
     CHECK: memref.subview
     CHECK: memref.alloc() : memref<{tile0}x{tile1}xf32, #nkipy.mem<Sbuf>>
     CHECK: linalg.reciprocal
-    CHECK: memref.copy
+    CHECK: linalg.copy
     """
     run_kernel_test(
         kernel,

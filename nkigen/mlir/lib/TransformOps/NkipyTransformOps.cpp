@@ -166,20 +166,20 @@ transform::PromoteTensorOp::apply(transform::TransformRewriter &rewriter,
     }
 
     if (needsCopyIn) {
-      auto copyOp = rewriter.create<memref::CopyOp>(
-          value.getLoc(), value, alloc.getResult());
+      auto copyOp = rewriter.create<linalg::CopyOp>(
+          value.getLoc(), ValueRange{value}, ValueRange{alloc.getResult()});
       preservedOps.insert(copyOp);
     }
 
     if (dpsConsumer) {
       rewriter.setInsertionPointAfter(dpsConsumer);
-      auto copyBack = rewriter.create<memref::CopyOp>(
-          value.getLoc(), alloc.getResult(), value);
+      auto copyBack = rewriter.create<linalg::CopyOp>(
+          value.getLoc(), ValueRange{alloc.getResult()}, ValueRange{value});
       preservedOps.insert(copyBack);
     } else if (!needsCopyIn) {
       rewriter.setInsertionPoint(value.getParentBlock()->getTerminator());
-      auto copyBack = rewriter.create<memref::CopyOp>(
-          value.getLoc(), alloc.getResult(), value);
+      auto copyBack = rewriter.create<linalg::CopyOp>(
+          value.getLoc(), ValueRange{alloc.getResult()}, ValueRange{value});
       preservedOps.insert(copyBack);
     }
 

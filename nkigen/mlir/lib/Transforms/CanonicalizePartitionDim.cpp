@@ -570,9 +570,15 @@ struct NkipyCanonicalizePartitionDimPass
             DenseI64ArrayAttr::get(builder.getContext(), expanded);
       }
 
-      // Clamp dim 0 to maxPartitionDim().
+      // Clamp the tile to this transpose's own output shape. The seed tile
+      // may come from a producer with a different iteration space (e.g. a
+      // reduction's [.., K] where the reduced dim is 1 here), so a per-dim
+      // clamp keeps the tile valid for the transpose's parallel output.
+      // Dim 0 is additionally capped at maxPartitionDim().
       if (outputTileSize) {
         SmallVector<int64_t> tileSizeVec(outputTileSize.asArrayRef());
+        for (int64_t i = 0; i < rank; ++i)
+          tileSizeVec[i] = std::min(tileSizeVec[i], origShape[i]);
         if (tileSizeVec[0] > maxPartitionDim()) {
           annotateOp.emitWarning("partition_dim=")
               << partDim << ": clamping boundary transpose tile_size[0] "

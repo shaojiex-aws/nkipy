@@ -388,7 +388,10 @@ std::map<std::string, std::vector<KnobInfo>> extractKnobsByOpType(
           }
 
           if (!validationError.empty()) {
-            errorMsg = validationError;
+            errorMsg = validationError + " (op=" + opName;
+            if (knobWithId.opId >= 0)
+              errorMsg += ", op_id=" + std::to_string(knobWithId.opId);
+            errorMsg += ")";
             return WalkResult::interrupt();
           }
 

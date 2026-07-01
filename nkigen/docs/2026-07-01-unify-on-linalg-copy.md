@@ -41,7 +41,7 @@ Emitter (3): `emit_memory.py` (`dispatch["memref.copy"]`),
 `nisa/emit.py:210`, `__init__.py` (`_dst_operand`). All must accept
 `linalg.copy`.
 
-## Gotchas
+## Caveats
 
 1. **Operand order.** `memref.copy(source, target)` vs
    `linalg.copy ins(source) outs(target)`. `_emit_copy` already swaps
@@ -61,11 +61,13 @@ Emitter (3): `emit_memory.py` (`dispatch["memref.copy"]`),
 
 ## Plan
 
-1. **Emitter first (accept both).** Add `linalg.copy` → same `_emit_copy`
-   body (delegate by mem_space), fix `_dst_operand`. Now IR with either
-   op lowers. No behavior change yet.
-2. **Flip producers.** Change the ≈8 non-legalize create sites to
-   `linalg::CopyOp`. Update `SimplifyLinalg` match. Run full suite.
+1. ✅ **Emitter first (accept both).** `linalg.copy` → same `_emit_copy`
+   body (both nisa + kernelbuilder emitters).
+2. ✅ **Flip producers.** All create sites now emit `linalg::CopyOp`
+   (transform ops, spill/reload, reshape, return, ref-impl, and the
+   interim legalize copies). `SimplifyLinalg` dead-copy match handles
+   both. Fixed two latent bad-tile bugs uncovered by validation (return
+   copy + boundary transpose — see below). Full suite back to baseline.
 3. **Do 3a/3b** (the other doc) on top: staging copies are now
    `linalg.copy`, tiled by the builtin `emitTile` — no hand-rolled loops.
 4. **Step 4** deletes `tileCopyAndTranspose` + the legalize copy sites.
@@ -81,3 +83,71 @@ asserts on copy text and will be updated.
 Do steps 1–2 here first (unify the op), then return to
 legalize-layout-high-rank-sbuf 3a/3b/4, which become trivial once every
 copy is a tileable `linalg.copy`.
+
+## Discovered issue during step 2: bad tile on a reduction's return path
+
+Flipping producers to `linalg.copy` broke `test_reduce.py` (3D
+`np.sum(axis=-1, keepdims)`, `8x128x64 → 8x128x1`). Investigation showed
+**one bug class with two instances** on the reduction's return path.
+
+### The shared root cause
+
+The failing attribute is `loop_tile_size` (`nkipy.tile_op`), not
+`sbuf_tile_size`. Key distinction:
+
+- A **reduction**'s `loop_tile_size` is **iterator-space**: one entry
+  per loop, including the reduced dim. The reduction here is `[1,128,64]`
+  — axis-2 = 64 is the reduction loop over K. This is **correct** and
+  must stay (dropping the 64 would drop the reduction loop).
+- A **pure-parallel** op (transpose, copy, elementwise) has no reduction
+  loop, so its `loop_tile_size` matches its **own shape**.
+
+The bug: two places propagate the reduction's `[1,128,64]` onto a
+downstream **pure-parallel** op whose shape is `...x1` (axis-2 = 1),
+where a `64` is invalid:
+
+1. **InferLayout `materializeReturnCopies`** copied the producer's
+   `tile_op` verbatim onto the return copy buffer.
+2. **CanonicalizePartitionDim `insertOutputTransposes`** seeds the
+   inserted return-orientation transpose's tile from the component's
+   `seedTileSizeAttr` (= the reduction knob `[1,128,64]`), not from the
+   transpose's own `8x128x1` output.
+
+Both yield a pure-parallel op with `tile[2]=64` vs `dim[2]=1`. When it's
+later validated, `tile[2]=64 > dim[2]=1` errors. (The failing op_id=5 is
+the return transpose `128x8x1 → 8x128x1`; nothing in it has a `64`.)
+
+### Why it was latent before this migration
+
+At HEAD, the final return-boundary op was a `memref.copy`, which has no
+`TilingInterface` — knob-driven-tiling **skips** it, so its bad tile was
+never validated. The `linalg.copy` migration reorganized the return path
+so the boundary op is now a `linalg.transpose` (validated) → the
+long-standing bad tile is finally exposed. It is *not* a classification
+bug: a user `np.copy` is legitimately a knobbable elementwise op
+(verified: `np.copy` + `.tile_op` lowers to `linalg.copy` and tiles
+fine).
+
+### Fix: a pure-parallel op derives its tile from its own shape
+
+Only the **pure-parallel** boundary ops are wrong; the reduction's
+iterator-space tile is untouched. For a pure-parallel op the loop tile
+= its own shape, so use the shape-based defaults `defaultTileOps`
+already uses:
+
+1. `materializeReturnCopies`: give the copy
+   `[min(shape[0],128), shape[1], ...]` (elementwise rule) from its own
+   shape instead of copying the producer's `tile_op`. ✅ done.
+2. `insertOutputTransposes`: clamp the boundary transpose's tile per-dim
+   to its own output shape (an inherited reduction dim of 64 becomes 1
+   on a size-1 axis), instead of using the reduction's `seedTileSizeAttr`
+   as-is. ✅ done.
+
+Both are always shape-valid, don't touch the reduction, and leave user
+`np.copy` / knobbed ops untouched.
+
+Rejected alternatives:
+- Remove `linalg.copy` from `isNamedUnaryElementwiseOp` — breaks user
+  `np.copy` knobs and papers over the bad tile.
+- Make `validateElementwiseTileSize` tolerate the mismatch — hides a
+  genuinely wrong tile.

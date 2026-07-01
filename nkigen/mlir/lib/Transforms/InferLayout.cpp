@@ -309,16 +309,21 @@ struct NkipyInferLayoutPass : public InferLayoutBase<NkipyInferLayoutPass> {
             val.getLoc(), hbmType);
         builder.create<nkipy::LayoutOp>(val.getLoc(), hbmAlloc,
             sharedHbm, /*partition_dim=*/nullptr, /*tile_size=*/nullptr);
-        builder.create<memref::CopyOp>(val.getLoc(), val, hbmAlloc);
+        builder.create<linalg::CopyOp>(val.getLoc(), ValueRange{val},
+                                        ValueRange{hbmAlloc});
 
-        // Copy the tile_op to the HBM alloc (for knob-driven-tiling).
-        for (Operation *user : val.getUsers()) {
-          if (auto tileOp = dyn_cast<nkipy::TileOp>(user)) {
-            builder.create<nkipy::TileOp>(val.getLoc(), hbmAlloc,
-                tileOp.getLoopTileSizeAttr());
-            break;
-          }
-        }
+        // Give the copy a tile derived from its own (elementwise) output
+        // shape, not the producer's tile_op. The producer may be a reduction
+        // whose tile_op is iterator-space (rank = input rank, includes the
+        // contracted dim) and does not describe this copy's output shape.
+        // The copy's shape always matches the returned value, so the
+        // elementwise rule [min(shape[0],128), shape[1], ...] is always valid.
+        SmallVector<int64_t> tile;
+        tile.push_back(std::min(memrefType.getShape()[0], maxPartition()));
+        for (int64_t i = 1; i < memrefType.getRank(); i++)
+          tile.push_back(memrefType.getShape()[i]);
+        builder.create<nkipy::TileOp>(val.getLoc(), hbmAlloc,
+            DenseI64ArrayAttr::get(ctx, tile));
 
         returnOp.setOperand(i, hbmAlloc);
       }

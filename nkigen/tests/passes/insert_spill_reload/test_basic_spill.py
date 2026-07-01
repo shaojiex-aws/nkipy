@@ -60,8 +60,8 @@ module {
     CHECK: memref.alloc() : memref<128x1x1x2048xf32, #nkipy.mem<Sbuf>>
     CHECK: memref.alloc() : memref<128x1x1x2048xf32, #nkipy.mem<Hbm>>
     CHECK: linalg.exp
-    CHECK: memref.copy {{.*}} #nkipy.mem<Sbuf>> to memref<128x1x1x2048xf32, #nkipy.mem<Hbm>>
-    CHECK: memref.copy {{.*}} #nkipy.mem<Hbm>> to memref<128x1x1x2048xf32, #nkipy.mem<Sbuf>>
+    CHECK: linalg.copy ins({{.*}}#nkipy.mem<Sbuf>>) outs({{.*}}memref<128x1x1x2048xf32, #nkipy.mem<Hbm>>)
+    CHECK: linalg.copy ins({{.*}}#nkipy.mem<Hbm>>) outs({{.*}}memref<128x1x1x2048xf32, #nkipy.mem<Sbuf>>)
     CHECK: return
     """
     run_filecheck(output_ir, check_patterns)
@@ -194,8 +194,8 @@ module {
     check_patterns = """
     CHECK: func.func @spill_with_loop_use
     CHECK: memref.alloc() : memref<128x1x1x2048xf32, #nkipy.mem<Hbm>>
-    CHECK: memref.copy {{.*}} #nkipy.mem<Sbuf>> to memref<128x1x1x2048xf32, #nkipy.mem<Hbm>>
-    CHECK: memref.copy {{.*}} #nkipy.mem<Hbm>> to memref<128x1x1x2048xf32, #nkipy.mem<Sbuf>>
+    CHECK: linalg.copy ins({{.*}}#nkipy.mem<Sbuf>>) outs({{.*}}memref<128x1x1x2048xf32, #nkipy.mem<Hbm>>)
+    CHECK: linalg.copy ins({{.*}}#nkipy.mem<Hbm>>) outs({{.*}}memref<128x1x1x2048xf32, #nkipy.mem<Sbuf>>)
     CHECK-NEXT: scf.for
     """
     run_filecheck(output_ir, check_patterns)
@@ -249,10 +249,10 @@ module {
     CHECK: func.func @two_peaks
     CHECK: memref.alloc() : memref<128x1x1x2048xf32, #nkipy.mem<Hbm>>
     CHECK: linalg.exp
-    CHECK: memref.copy {{.*}} #nkipy.mem<Sbuf>> to memref<128x1x1x2048xf32, #nkipy.mem<Hbm>>
+    CHECK: linalg.copy ins({{.*}}#nkipy.mem<Sbuf>>) outs({{.*}}memref<128x1x1x2048xf32, #nkipy.mem<Hbm>>)
     CHECK: memref.alloc() : memref<128x1x1x2048xf32, #nkipy.mem<Hbm>>
     CHECK: linalg.sqrt
-    CHECK: memref.copy {{.*}} #nkipy.mem<Sbuf>> to memref<128x1x1x2048xf32, #nkipy.mem<Hbm>>
+    CHECK: linalg.copy ins({{.*}}#nkipy.mem<Sbuf>>) outs({{.*}}memref<128x1x1x2048xf32, #nkipy.mem<Hbm>>)
     CHECK: return
     """
     run_filecheck(output_ir, check_patterns)

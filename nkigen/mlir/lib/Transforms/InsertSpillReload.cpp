@@ -328,8 +328,9 @@ static Value createSpillSlot(AllocationInfo &alloc, OpBuilder &builder) {
 static void insertSpill(AllocationInfo &alloc, Operation *insertAfter,
                         OpBuilder &builder) {
   builder.setInsertionPointAfter(insertAfter);
-  builder.create<memref::CopyOp>(insertAfter->getLoc(), alloc.value,
-                                  alloc.spillSlot);
+  builder.create<linalg::CopyOp>(insertAfter->getLoc(),
+                                  ValueRange{alloc.value},
+                                  ValueRange{alloc.spillSlot});
 
   LLVM_DEBUG(llvm::dbgs() << " Inserted spill (SBUF→HBM) after "
                << *insertAfter << "\n");
@@ -338,8 +339,9 @@ static void insertSpill(AllocationInfo &alloc, Operation *insertAfter,
 static void insertReload(AllocationInfo &alloc, Operation *insertBefore,
                          OpBuilder &builder) {
   builder.setInsertionPoint(insertBefore);
-  builder.create<memref::CopyOp>(insertBefore->getLoc(), alloc.spillSlot,
-                                  alloc.value);
+  builder.create<linalg::CopyOp>(insertBefore->getLoc(),
+                                  ValueRange{alloc.spillSlot},
+                                  ValueRange{alloc.value});
 
   LLVM_DEBUG(llvm::dbgs() << " Inserted reload (HBM→SBUF) before "
                << *insertBefore << "\n");

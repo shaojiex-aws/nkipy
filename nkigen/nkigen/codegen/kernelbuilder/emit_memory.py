@@ -101,3 +101,6 @@ def register(dispatch: dict) -> None:
     dispatch["memref.alloc"] = _emit_alloc
     dispatch["memref.dealloc"] = _emit_dealloc
     dispatch["memref.copy"] = _emit_copy
+    # linalg.copy is buffer-semantic here (ins=source, outs=target), same
+    # operand order as memref.copy; lower it identically.
+    dispatch["linalg.copy"] = _emit_copy

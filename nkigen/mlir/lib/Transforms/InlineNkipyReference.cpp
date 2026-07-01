@@ -5,6 +5,7 @@
 
 #include "mlir/Dialect/Bufferization/IR/Bufferization.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
+#include "mlir/Dialect/Linalg/IR/Linalg.h"
 #include "mlir/Dialect/MemRef/IR/MemRef.h"
 #include "mlir/Dialect/Tensor/IR/Tensor.h"
 #include "mlir/IR/IRMapping.h"
@@ -43,6 +44,7 @@ struct InlineNkipyReferencePass
 
   void getDependentDialects(DialectRegistry &registry) const override {
     registry.insert<memref::MemRefDialect>();
+    registry.insert<linalg::LinalgDialect>();
   }
 
   void runOnOperation() override {
@@ -120,7 +122,8 @@ struct InlineNkipyReferencePass
                                         tensorType.getElementType());
         auto buf = builder.create<bufferization::ToBufferOp>(
             nkipyOp->getLoc(), bufType, yieldValues[i]);
-        builder.create<memref::CopyOp>(nkipyOp->getLoc(), buf, inits[i]);
+        builder.create<linalg::CopyOp>(nkipyOp->getLoc(), ValueRange{buf},
+                                        ValueRange{inits[i]});
       }
     }
 
