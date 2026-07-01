@@ -1,7 +1,7 @@
 # Explicit SBUF tile on nkipy.layout (eliminate LegalizeLayout inference)
 
 **Date:** 2026-06-30
-**Status:** WIP (steps 0–3 done; steps 4–5 pending)
+**Status:** Implemented (steps 0–5 done)
 **Unblocks:** [legalize-layout-high-rank-sbuf](2026-06-28-legalize-layout-high-rank-sbuf.md), Problem 1 Step 2
 
 ## Problem
@@ -266,34 +266,59 @@ reads it. Re-introducing `traceToLinalgOperands` (even as a fallback)
 was rejected — it brings back the post-tiling trace and the
 "inconsistent tile sizes" failure mode this redesign exists to remove.
 
-### Step 4: Tile transposes/copies using the explicit tile
+### Step 4 ✅: Tile transposes/copies using the explicit tile
 
-`tileTranspose` and `tileMemrefCopy` read the tile from `nkipy.layout`
-instead of from sbuf_map inference. Since the tile is set once by the
-producer, it's always consistent.
+Already satisfied by step 3 — no code change needed.
 
-Eventually (after step 3 of the parent doc), `tileCopyAndTranspose`
-can be removed entirely.
+`tileTranspose` / `tileMemrefCopy` get their tile dims from
+`info->tileSize`, which phase 1 (`findSbufTensorsToLegalize`) reads
+directly from `nkipy.layout`'s `tile_size`. They never read tile dims
+out of `sbuf_map`: `getSbufMapFor` is used only as a presence gate
+(tile *whether*, not *how*), and `SbufMapAttr::getTileSize()` is never
+called in the pass. So once step 3 made every SBUF alloc carry an
+explicit, authoritative `tile_size`, these functions were already
+reading it.
 
-### Step 5: Matmul transpose when input is already SBUF
+These functions still need to exist: matmul promotion emits the LHS
+transpose and RHS staging copy at *block* granularity (outside the
+inner tile loops), so legalize-layout is what splits them into the
+per-block loops. They cannot be removed until those ops are generated
+tile-sized at promotion time (parent doc, step 3).
 
-If `%lhs` is already SBUF (user placed input there), the transpose
-inside the block-M loop is SBUF→SBUF:
+### Step 5 ✅: Matmul transpose when input is already SBUF
+
+Already satisfied by step 3 — no code change needed, and verified
+end to end.
+
+`NkipyTransposeMatmulOp` always allocates a fresh SBUF output `%alloc`
+and transposes the LHS *directly* into it — the LHS itself is never
+promoted, so its mem space is irrelevant to how `%alloc` is tiled:
 
 ```mlir
 scf.for %block_m = 0 to M step BLOCK_M {
-  %lhs_block = memref.subview %lhs[%block_m, 0] [BLOCK_M, K]  // SBUF
+  %lhs_block = memref.subview %lhs[%block_m, 0] [BLOCK_M, K]  // HBM or SBUF
   %alloc = memref.alloc() : memref<KxBLOCK_M, Sbuf>
-  linalg.transpose ins(%lhs_block) outs(%alloc) perm=[1,0]     // SBUF→SBUF
+  linalg.transpose ins(%lhs_block) outs(%alloc) perm=[1,0]     // →SBUF
   linalg.matmul_transpose_a ins(%alloc, ...) ...
 }
 ```
 
-The promotion sees `%alloc` is already SBUF → no-op. With this
-refactor, `NkipyTransposeMatmulOp` always attaches `sbuf_tile_size`
-to `%alloc` (the SBUF output). LegalizeLayout reads it and tiles
-the transpose correctly — whether the input is HBM or SBUF doesn't
-matter for how the output alloc is tiled.
+Two things make this work for either input mem space:
+- Step 3 attaches the explicit `[tileK, tileM]` tile to `%alloc`
+  irrespective of where `%lhs_block` lives.
+- `tileTranspose` in legalize-layout handles both HBM→SBUF and
+  SBUF→SBUF (`needsTiledTransfer(...) || (isSbuf(in) && isSbuf(out))`),
+  so the transpose is tiled correctly regardless.
+
+(The operand-0 promote of `%alloc` is a no-op via
+`findExistingMemSpace` since `%alloc` is already SBUF — but that holds
+in both cases and is unrelated to the input's mem space.)
+
+`test_feedforward_sbuf_compact_silu` exercises both cases in one
+kernel: the first matmul's LHS (`x`) is HBM → transpose is HBM→SBUF;
+the second matmul's LHS (`gated`) is an SBUF intermediate → transpose
+is SBUF→SBUF. Both transpose outputs get `tile_size = [128, 128]` and
+the test passes.
 
 ## Why this is cleaner
 
@@ -309,9 +334,10 @@ matter for how the output alloc is tiled.
 
 ```
 infer-layout       → assigns mem_space, partition_dim, tile_op
-knob-driven-tiling → generates loops, NkipyTransposeMatmulOp attaches
-                     sbuf_tile_size to transpose output
-[new pass or extension] → computes sbuf_tile_size for remaining allocs
-                          from tile_op + indexing maps
+infer-layout       → also computes sbuf_tile_size for SBUF allocs
+                     (computeSbufTileSizes, from tile_op + indexing maps)
+knob-driven-tiling → generates loops; promote_tensor /
+                     NkipyTransposeMatmulOp attach sbuf_tile_size to
+                     matmul operands (explicit [tileK, tileM]/[tileK, tileN])
 legalize-layout    → reads sbuf_tile_size, attaches sbuf_map, tiles copies
 ```
