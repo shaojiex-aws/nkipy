@@ -146,16 +146,104 @@ Also ✅: deleted the dead `isMemrefMode` flag and the tensor-only
 tracer always emits `memref` func args), so only the
 `nkipy.transpose_matmul` path was ever taken.
 
-**Step 3: `canonicalize-reshape` copies**
+**Step 3: Make all HBM↔SBUF copies/transposes reach LegalizeLayout
+already tiled**
 
-Move copy insertion to before knob-driven-tiling (after infer-layout,
-once mem_space is known). Attach tile_ops so knob-driven-tiling tiles
-them. (Deferred — not needed for head_deconcat fix.)
+Goal: nothing untiled reaches LegalizeLayout, so `tileCopyAndTranspose`
+becomes dead (step 4 deletes it).
+
+Instrumenting `tileCopyAndTranspose` across the whole suite shows it
+only ever tiles **two** kinds of op, both block-granularity staging
+buffers, both inside loops:
+
+1. **Matmul LHS transpose + RHS copy-in.** `buildMatmulBlockingTransforms`
+   promotes the LHS (transpose) at the block-M level and the RHS (copy)
+   at the block-N level — *outside* the inner tile loops. `TileUsingForOp`
+   only tiles the `matmul` op itself down to `[128,128]`; the staging
+   transpose/copy it inserts around the matmul stay at block size
+   (e.g. `256x256`, `sbuf_map blocks:[2,2]`). The matmul *compute* is
+   already tiled; only its staging ops are not.
+2. **Reshape copy-out.** `canonicalize-reshape` materializes a
+   `memref.copy` at a reshape/mem_space boundary (e.g. head_deconcat's
+   SBUF→HBM copy-out of the 4D transpose result). It is emitted late
+   and full-size, with no `tile_op`.
+
+Everything else (elementwise promote copies, the 4D tiled transpose)
+already arrives tile-sized and is skipped by `tileCopyAndTranspose`.
+
+A `256x256` SBUF buffer with `blocks:[2,2]` is physically
+`[128,2,2,128]` — 2 blocks in the *partition* dim. SBUF has only 128
+partitions, so this cannot be one DMA: it must be a per-block loop.
+So the work can't be deleted, only moved earlier (to where tile info
+already exists). Two sub-parts:
+
+- **3a — matmul staging (main case, every matmul kernel).**
+  Prerequisite: [unify-on-linalg-copy](2026-07-01-unify-on-linalg-copy.md)
+  (the RHS copy-in must be a `linalg.copy` so the builtin can tile it;
+  `memref.copy` has no `TilingInterface`). Once it is, tile the LHS
+  transpose and RHS copy-in with the builtin `emitTile` at leaf tile —
+  same path the transpose knob already uses — no hand-rolled loop.
+
+  Note: explicit-sbuf-tile already set the `tile_size=[128,128]`
+  *attribute* on these buffers; it did not split the ops. 3a splits the
+  ops — at exactly that annotated tile (must match, or the per-block
+  loop and the buffer's `sbuf_map` disagree). Both LHS and RHS need it.
+
+  What's untiled today (feedforward, first matmul), pre-legalize —
+  one full `256x256` transpose and one full `256x256` copy, no loop
+  over either (the buffers carry `tile_size=[128,128]`, but the ops
+  move all `256x256` at once):
+
+  ```mlir
+  scf.for %block_m ... {
+    %alloc_12 = memref.alloc() : memref<256x256xf32, Sbuf>
+    nkipy.layout(%alloc_12) {tile_size = [128, 128]}
+    linalg.transpose ins(%lhs_blk : 256x256, SharedHbm)
+                     outs(%alloc_12 : 256x256, Sbuf) perm=[1,0]   // ← untiled
+    scf.for %block_n ... {
+      %alloc_15 = memref.alloc() : memref<256x256xf32, Sbuf>
+      nkipy.layout(%alloc_15) {tile_size = [128, 128]}
+      memref.copy %rhs_blk, %alloc_15
+        : 256x256, SharedHbm to 256x256, Sbuf                     // ← untiled
+      scf.for %tile_m ... scf.for %tile_n ... scf.for %k ...
+        linalg.matmul_transpose_a ins(%a:128x128, %b:128x128) ... // compute IS tiled
+    }
+  }
+  ```
+
+  After 3a they should already be `[128,128]` inside block loops, so
+  LegalizeLayout has nothing to split.
+
+- **3b — reshape copy-out.** Materialize this copy before
+  knob-driven-tiling with a `tile_op` attached, so tiling splits it.
+  Home: a new `materializeBoundaryCopies` in InferLayout next to
+  `materializeReturnCopies` (which already does alloc + layout + copy +
+  copy-the-tile_op), porting `canonicalize-reshape`'s
+  `hasMemSpaceConflict` check. Don't move `canonicalize-reshape` wholesale
+  — its type-stamping must stay after tiling. (Covers only 3b.)
+
+  What's untiled today (head_deconcat), pre-legalize — the 4D
+  transpose result is `reinterpret_cast` to `256x256` and copied to
+  HBM in one shot. Unlike 3a there is **no `tile_op`/`tile_size`** on
+  this copy at all (it's materialized late by canonicalize-reshape):
+
+  ```mlir
+  %alloc = memref.alloc() : memref<2x128x2x128xf32, Sbuf>     // 4D transpose out
+  %rc = memref.reinterpret_cast %alloc to sizes: [256,256]
+          : ... to memref<256x256xf32, Sbuf>
+  %hbm = memref.alloc() : memref<256x256xf32, SharedHbm>
+  memref.copy %rc, %hbm : 256x256, Sbuf to 256x256, SharedHbm  // ← untiled, no tile_op
+  ```
+
+Do 3a first (highest impact, self-contained in `KnobDrivenTiling.cpp`),
+verify LegalizeLayout tiles nothing for a pure-matmul kernel, then 3b.
 
 **Step 4: Remove `tileCopyAndTranspose` from LegalizeLayout**
 
-After steps 1-3, no untiled transposes or copies reach LegalizeLayout.
-Remove `tileCopyAndTranspose`, `tileTranspose`, and `tileMemrefCopy`.
+After 3a+3b, no untiled transposes or copies reach LegalizeLayout.
+Remove `tileCopyAndTranspose`, `tileTranspose`, and `tileMemrefCopy`
+(and the now-unused `findLayoutForValue`/`getSbufMapFor` helpers if
+they have no other users).
 
 ## Problem 2: LegalizeLayout rank mismatch (qwen3)
 
