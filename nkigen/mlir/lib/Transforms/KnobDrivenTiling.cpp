@@ -505,8 +505,7 @@ bool buildMatmulBlockingTransforms(OpBuilder &builder, Location loc,
                                     Value moduleArg,
                                     const std::string &opName,
                                     const KnobInfo &knob,
-                                    DictionaryAttr opAttrs,
-                                    bool isMemrefMode = false) {
+                                    DictionaryAttr opAttrs) {
   // Matmul tile_size is iter-space form [..., M, N, K] — at least 3 dims.
   if (knob.tileSize.size() < 3) {
     llvm::errs() << "[KnobDrivenTiling] Matmul tile_size must be "
@@ -555,26 +554,14 @@ bool buildMatmulBlockingTransforms(OpBuilder &builder, Location loc,
   SmallVector<int64_t> lhsTile = {tileK, tileM};
   SmallVector<int64_t> rhsTile = {tileK, tileN};
 
-  Value afterBlockM;
-  if (!isMemrefMode) {
-    // Transpose matmul: matmul(A,B) → matmul_transpose_a(transpose(A), B)
-    auto transposeMatmul = builder.create<transform::TransposeMatmulOp>(
-        loc, anyOpType, blockMTiled,
-        transform::TransposeMatmulInput::lhs);
-    afterBlockM = transposeMatmul.getResult();
-
-    // Promote the transpose output to SBUF.
-    auto getTransposeOp = builder.create<transform::GetProducerOfOperand>(
-        loc, anyOpType, afterBlockM, /*operand_number=*/0);
-    emitPromoteOperand(builder, loc, getTransposeOp.getResult(), 1,
-                       sbufMemSpace, lhsTile);
-  } else {
-    // Memref: use custom nkipy.transpose_matmul (upstream doesn't support memref)
-    auto tileAttr = DenseI64ArrayAttr::get(builder.getContext(), lhsTile);
-    auto transposeMatmul = builder.create<transform::NkipyTransposeMatmulOp>(
-        loc, anyOpType, blockMTiled, tileAttr);
-    afterBlockM = transposeMatmul.getTransformed();
-  }
+  // Transpose matmul: matmul(A,B) → matmul_transpose_a(transpose(A), B).
+  // The pipeline is memref-native, so use nkipy.transpose_matmul (upstream's
+  // structured.transpose_matmul is tensor-only). It attaches lhsTile to the
+  // transpose output alloc, which matmul_transpose_a reads tile-sized.
+  auto tileAttr = DenseI64ArrayAttr::get(builder.getContext(), lhsTile);
+  auto transposeMatmul = builder.create<transform::NkipyTransposeMatmulOp>(
+      loc, anyOpType, blockMTiled, tileAttr);
+  Value afterBlockM = transposeMatmul.getTransformed();
 
   // Promote LHS at block-M level (reused across all N-blocks)
   emitPromoteOperand(builder, loc, afterBlockM, 0, sbufMemSpace, lhsTile);
@@ -633,18 +620,6 @@ struct NkipyKnobDrivenTilingPass
       return;
     }
     
-    // Detect memref mode: check if any func arg is memref-typed.
-    bool isMemrefMode = false;
-    module.walk([&](func::FuncOp func) {
-      for (auto argType : func.getArgumentTypes()) {
-        if (isa<MemRefType>(argType)) {
-          isMemrefMode = true;
-          return WalkResult::interrupt();
-        }
-      }
-      return WalkResult::advance();
-    });
-
     OpBuilder builder(ctx);
     Location loc = module.getLoc();
 
@@ -692,7 +667,7 @@ struct NkipyKnobDrivenTilingPass
         
         if (isMatmulOp(opName)) {
           // Matmul gets special 6-level blocking treatment
-          if (!buildMatmulBlockingTransforms(builder, loc, moduleArg, opName, knob, opAttrs, isMemrefMode)) {
+          if (!buildMatmulBlockingTransforms(builder, loc, moduleArg, opName, knob, opAttrs)) {
             llvm::errs() << "[KnobDrivenTiling] Failed to build matmul transforms\n";
             continue;
           }

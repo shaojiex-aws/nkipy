@@ -83,7 +83,7 @@ All tiling happens before it.
 `seedTileSizeAttr` was null with new infer-layout. Fixed: fall back
 to `findTileOp(target).getLoopTileSizeAttr()`.
 
-**Step 2: Matmul `transpose_a`**
+**Step 2 ✅: Matmul `transpose_a`**
 
 Tiling the transpose independently doesn't work. The transpose
 output alloc is shared with the matmul — the matmul reads the
@@ -136,9 +136,15 @@ pattern on the shared alloc.
 Fix: attach `sbuf_tile_size` explicitly to the alloc's `nkipy.layout`
 when creating it. LegalizeLayout reads this directly instead of
 inferring from consumers. See
-[explicit-sbuf-tile-on-layout](2026-06-30-explicit-sbuf-tile-on-layout.md).
+[explicit-sbuf-tile-on-layout](2026-06-30-explicit-sbuf-tile-on-layout.md)
+— done there (`NkipyTransposeMatmulOp` + `promote_tensor` attach the
+explicit `[tileK, tileM]` / `[tileK, tileN]` tile).
 
-Also: delete dead `isMemrefMode` flag and non-memref path.
+Also ✅: deleted the dead `isMemrefMode` flag and the tensor-only
+(`transform::TransposeMatmulOp`) path from
+`buildMatmulBlockingTransforms`. The pipeline is memref-native (the
+tracer always emits `memref` func args), so only the
+`nkipy.transpose_matmul` path was ever taken.
 
 **Step 3: `canonicalize-reshape` copies**
 
