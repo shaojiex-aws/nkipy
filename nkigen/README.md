@@ -44,28 +44,119 @@ nki_code = add_scalar.to_nki(target="trn2")
 
 ## The `knob` API
 
-`knob(tensor)` returns a chainable builder. Methods emit `nkipy.*` ops
-and return `self`:
+`knob(tensor)` returns a chainable builder; each method emits a `nkipy.*`
+marker op and returns `self`. All the verbs on one kernel:
 
 ```python
-knob(x).tile_op(tile_size=[64, 64]).layout(mem_space="Sbuf")
+@trace(input_specs=[((512, 256), "bf16"), ((256, 512), "bf16"), ((512, 512), "f32")])
+def fused_ops(a, b, c):
+    mm = a @ b
+    (knob(mm)
+        .tile_op(tile_size=[128, 128, 128])  # one entry per linalg iterator:
+                                             #   matmul [M_t, N_t, K_t]
+                                             #   elementwise: output rank
+                                             #   reduction: input rank
+        .cache(a, axis=[-1]))                # SBUF staging for an input;
+                                             # axis = post-tiling loop levels
+                                             # (needs the .tile_op before it)
+    d = c * 2.0
+    (knob(d)
+        .tile_op(tile_size=[128, 128])
+        .layout(mem_space="Sbuf",            # Hbm | Psum | Sbuf | SharedHbm
+                partition_dim=0))            # Sbuf-only (HBM has no partitions)
+
+    o = mm + d
+    knob(mm, d).fuse()                       # fuse the two scf.for loops
+                                             # (each needs a matching .tile_op)
+    return o
 ```
 
-- **`.tile_op(tile_size=[...])`** — loop tile for the producing op. One entry
-  per linalg iterator:
-  - Elementwise: matches output rank.
-  - Reduction: matches *input* rank (compiler knows which axis reduces).
-  - Matmul `A[M,K] @ B[K,N] -> C[M,N]`: `[M_t, N_t, K_t]`.
-- **`.layout(mem_space=..., partition_dim=...)`** — memory placement.
-  `mem_space` in `{"Hbm", "Psum", "Sbuf", "SharedHbm"}`. `partition_dim`
-  is only valid with `mem_space="Sbuf"` (HBM has no partition concept).
-- **`.cache(axis=[...])`** — SBUF staging hint (requires a preceding
-  `.tile_op()`). Lists post-tiling loop levels where a cache buffer is
-  allocated.
-- **`knob(a, b).fuse()`** — fuse sibling `scf.for` loops (each must have
-  a matching `.tile_op`).
-
 Unannotated intermediates get tiling/placement inferred by `infer-layout`.
+
+### `.use()`: offload subgraphs to tuners, agents, or hand-written kernels
+
+> **Status:** in development — see
+> [docs/2026-06-09-nki-autotune-backend-plan.md](docs/2026-06-09-nki-autotune-backend-plan.md).
+
+The verbs above steer nkigen's own pipeline. One more, `.use()`, carves out
+a subgraph and hands it to an external backend — and each subgraph of one
+program can go to a different one:
+
+```python
+@trace(input_specs=[((1024, 128), "bf16")] * 3
+                   + [((128, 512), "bf16"), ((512,), "f32")])
+def attn_block(q, k, v, w_o, bias):
+    # ===
+    # attention core → hand-written flash-attention IP, spliced verbatim
+    # ===
+    s = q @ k.T / np.sqrt(128.0)
+    p = np.exp(s - np.max(s, axis=-1, keepdims=True))
+    ctx = (p / np.sum(p, axis=-1, keepdims=True)) @ v
+    knob(q, k, v, ctx).use(flash_attn)
+
+    # ===
+    # output projection → a custom backend (e.g. HLO, Marlin) compiles
+    # this region itself — no tuning involved
+    # ===
+    proj = ctx @ w_o
+    knob(ctx, w_o, proj).use(MarlinBackend())
+
+    # ===
+    # epilogue → schedule searched offline by a tuner: NKI Gym,
+    # nki-autotune, or LLM agents
+    # ===
+    out = np.maximum(proj + bias, 0.0)
+    knob(proj, bias, out).use(AgenticTuner(), key="attn_epilogue")
+    return out
+
+# offline: run the tuners, record best kernel per region in the DB
+attn_block.tune(time_limit=3600, db="tune_db/")
+
+# fast + deterministic: splice tuned kernels from the DB, no searching
+nisa_ir = attn_block.to_nisa(target="trn2", tune_db="tune_db/")
+```
+
+`knob(...)` captures the subgraph by its boundary tensors — inputs and
+result — and everything between them joins the region: `knob(q, k, v, ctx)`
+grabs the whole softmax core, intermediates (`s`, `p`) included. Inputs
+become the spliced kernel's parameters, the result its return value. `impl`
+is a hand-written NKI kernel spliced verbatim, a custom backend that
+compiles the region itself, or any `Tuner` (`tune(region, deadline)`) —
+NKI Gym, nki-autotune, and LLM agents all plug into the same seam.
+
+Tuning is offline and searches; compilation only reads the DB, never
+searches (same input → same NEFF):
+
+```
+                       traced program (linalg MLIR)
+┌──────────────────────┬──────────────────────┬──────────────────────┐
+│ attention core       │ output projection    │ epilogue             │
+│ .use(flash_attn)     │ .use(MarlinBackend)  │ .use(AgenticTuner)   │
+└──────────┬───────────┴──────────┬───────────┴──────────┬───────────┘
+           │                      │                      │
+ (hand-    │           (backend   │     .tune(time_limit, db) — offline;
+  written  │            compiles  │     tuner regions search in parallel
+  kernel — │            the       │     across the Trn2 devices
+  no tuning│            region    │            ┌─────────▼─────────┐
+  needed)  │            itself —  │            │   AgenticTuner    │
+           │            no tuning │            │ LLM-guided search │
+           │            needed)   │            └─────────┬─────────┘
+           │                      │              ┌───────▼───────┐
+           │                      │              │   tuning DB   │ best kernel
+           │                      │              └───────┬───────┘ per region
+           │                      │                      │
+┌──────────▼──────────────────────▼──────────────────────▼───────────┐
+│ .to_nisa(target, tune_db) — fast, deterministic, never searches    │
+│ NKI kernel → splice · backend → compile · DB hit → splice,         │
+│ miss → warn+fallback · unmarked ops → normal nkigen knob pipeline  │
+└─────────────────────────────────┬──────────────────────────────────┘
+                                  ▼
+                                NEFF
+```
+
+Spliced regions bypass nkigen's tiling/layout passes (the backend owns its
+scheduling); shapes, dtypes, and numerics are validated against the region's
+NumPy reference for every payload.
 
 ## Compilation Pipeline
 
