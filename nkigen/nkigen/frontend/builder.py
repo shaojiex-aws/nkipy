@@ -396,6 +396,19 @@ def _unary_named(x: TensorHandle, named_cls, body_fn, loc) -> TensorHandle:
     return _make_handle(out, shape, elem)
 
 
+def _copy_into(src: ir.Value, dst: ir.Value, elem: ir.Type, loc) -> None:
+    """Emit `linalg.copy ins(src) outs(dst)` into an existing destination.
+
+    Used for copies that write a caller-provided buffer (concat slices,
+    insert-slice, loop-carried accumulators) — `linalg.copy` (not
+    `memref.copy`) so knob-driven-tiling can tile it via TilingInterface.
+    """
+    cp = linalg.CopyOp([], [src], [dst], loc=loc)
+    blk = cp.regions[0].blocks.append(elem, elem)
+    with ir.InsertionPoint(blk):
+        linalg.YieldOp([blk.arguments[0]], loc=loc)
+
+
 def _unary_generic(x: TensorHandle, body_fn, loc) -> TensorHandle:
     val, shape, elem = x._value, x.shape, x._elem_ty
     out = _make_output(loc, shape, elem)
@@ -1110,13 +1123,7 @@ def concatenate(arrays: list[TensorHandle], axis: int = 0, loc=None) -> TensorHa
             offsets, sizes, strides_list,
             loc=loc,
         ).result
-        # linalg.copy (not memref.copy) so knob-driven-tiling can tile this
-        # SBUF→HBM boundary copy via TilingInterface; it inherits the source's
-        # tile in infer-layout. memref.copy has no TilingInterface.
-        cp = linalg.CopyOp([], [a._value], [sv], loc=loc)
-        blk = cp.regions[0].blocks.append(elem, elem)
-        with ir.InsertionPoint(blk):
-            linalg.YieldOp([blk.arguments[0]], loc=loc)
+        _copy_into(a._value, sv, elem, loc)
         offset += a.shape[axis]
 
     return _make_handle(output, out_shape, elem)
@@ -1508,7 +1515,7 @@ def static_insert_slice(
     sv = memref.SubViewOp(
         dest._value, offsets, sizes, strides, loc=loc,
     ).result
-    memref.CopyOp(src._value, sv, loc=loc)
+    _copy_into(src._value, sv, src._elem_ty, loc)
     return dest
 
 
@@ -1528,7 +1535,7 @@ def dynamic_insert_slice(
         result_type, dest._value, dynamic_offsets, [], [],
         static_offsets, static_sizes, static_strides, loc=loc,
     ).result
-    memref.CopyOp(src._value, sv, loc=loc)
+    _copy_into(src._value, sv, src._elem_ty, loc)
     return dest
 
 
@@ -1599,7 +1606,7 @@ def fori_loop(
                 results = [results]
             for res, acc in zip(results, init_handles):
                 if res._value != acc._value:
-                    memref.CopyOp(res._value, acc._value, loc=loc)
+                    _copy_into(res._value, acc._value, acc._elem_ty, loc)
         scf.YieldOp([], loc=loc)
 
     return init_handles

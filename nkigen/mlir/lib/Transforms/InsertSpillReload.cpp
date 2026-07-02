@@ -11,7 +11,7 @@
 // 1. Collect all SBUF allocations and compute their sizes
 // 2. Perform liveness analysis to find peak memory pressure points
 // 3. At high-pressure points, select victims to spill using a heuristic
-// 4. Insert memref.copy operations for spill/reload
+// 4. Insert linalg.copy operations for spill/reload
 //
 // These copies are lowered to nisa.dma_copy in the LinalgToNisa pass.
 //
@@ -490,7 +490,7 @@ struct InsertSpillReloadPass
       // Collect uses that come after spillPoint, including uses inside nested
       // regions (e.g., loop bodies).  For each user, walk up the op-parent
       // chain until we reach spillPoint's block, then check ordering.
-      // Do this BEFORE inserting the spill so the new memref.copy is not
+      // Do this BEFORE inserting the spill so the new linalg.copy is not
       // counted as a "use after spill".
       SmallVector<Operation *> usesAfterSpill;
       for (Operation *user : victim->value.getUsers()) {

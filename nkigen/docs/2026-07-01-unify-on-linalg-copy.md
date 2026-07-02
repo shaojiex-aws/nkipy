@@ -1,7 +1,7 @@
 # Unify all copies on `linalg.copy` (retire `memref.copy`)
 
 **Date:** 2026-07-01
-**Status:** Proposed
+**Status:** Done — all 5 plan steps complete; `memref.copy` retired from source.
 **Blocks:** step 3a/3b of
 [legalize-layout-high-rank-sbuf](2026-06-28-legalize-layout-high-rank-sbuf.md)
 
@@ -68,11 +68,17 @@ Emitter (3): `emit_memory.py` (`dispatch["memref.copy"]`),
    interim legalize copies). `SimplifyLinalg` dead-copy match handles
    both. Fixed two latent bad-tile bugs uncovered by validation (return
    copy + boundary transpose — see below). Full suite back to baseline.
-3. **Do 3a/3b** (the other doc) on top: staging copies are now
+3. ✅ **Do 3a/3b** (the other doc) on top: staging copies are now
    `linalg.copy`, tiled by the builtin `emitTile` — no hand-rolled loops.
-4. **Step 4** deletes `tileCopyAndTranspose` + the legalize copy sites.
-5. **Retire `memref.copy`** from our code paths; drop the emitter's
-   `memref.copy` case once no pass emits it.
+4. ✅ **Step 4** deletes `tileCopyAndTranspose` + the legalize copy sites.
+5. ✅ **Retire `memref.copy`.** By the time steps 3/4 landed, every C++
+   producer already emitted `linalg.copy`; the last `memref.copy` sites were
+   three frontend `builder.py` copies (static/dynamic `insert_slice`,
+   loop-carried accumulator) — flipped via a shared `_copy_into` helper.
+   Dropped the `memref.copy` handling from both emitters (`nisa/emit.py`,
+   `emit_memory.py`), `_dst_operand`, and `SimplifyLinalg`'s dead-copy match;
+   `memref.copy` no longer appears in any source path. Suite at baseline
+   (315 passed, same 13 pre-existing failures).
 
 Breaking changes are acceptable: golden `.mlir` dumps under
 `tests/e2e/outputs/` will show `linalg.copy`; only `test_elementwise.py`

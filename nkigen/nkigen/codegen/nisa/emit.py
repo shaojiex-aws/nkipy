@@ -207,7 +207,7 @@ class NisaEmitter:
             for r in op.results:
                 if r not in self._names:
                     self._names[r] = None
-        elif name in ("memref.copy", "linalg.copy"):
+        elif name == "linalg.copy":
             self._emit_copy(op)
         elif name in _LINALG_TO_ARITH_OP:
             self._emit_elementwise(op)

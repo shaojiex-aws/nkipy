@@ -173,7 +173,7 @@ def InsertSpillReload : Pass<"insert-spill-reload", "func::FuncOp"> {
     2. Perform liveness analysis to find peak memory pressure points
     3. At high-pressure points, select victims to spill using a heuristic
        (size-based, LRU, or Belady's MIN)
-    4. Insert memref.copy operations for spill/reload
+    4. Insert linalg.copy operations for spill/reload
 
     These copies are later lowered to nisa.dma_copy in the linalg-to-nisa pass.
 
@@ -192,7 +192,7 @@ def InsertSpillReload : Pass<"insert-spill-reload", "func::FuncOp"> {
         %b = memref.alloc() : memref<512x512xf32, #sbuf>
         %c = memref.alloc() : memref<512x512xf32, #sbuf>
         linalg.copy ins(%arg0) outs(%a)
-        memref.copy %a, %a_spill  // SPILL: %a to HBM
+        linalg.copy ins(%a) outs(%a_spill)  // SPILL: %a to HBM
         linalg.exp ins(%a) outs(%b)
         linalg.mul ins(%b, %b) outs(%c)  // Peak now 2MB (only %b, %c)
 

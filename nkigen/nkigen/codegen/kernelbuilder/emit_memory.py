@@ -50,10 +50,10 @@ def _emit_dealloc(gen, op) -> bool:
 
 
 def _emit_copy(gen, op) -> bool:
-    """``memref.copy src, dst`` -> a DMA or on-chip tensor copy.
+    """``linalg.copy ins(src) outs(dst)`` -> a DMA or on-chip tensor copy.
 
-    MLIR's ``memref.copy`` is ``(source, target)``; the kb calls take
-    ``(dst, src)``, so the operands are swapped. The engine is chosen by
+    Operands are ``(source, target)`` positionally; the kb calls take
+    ``(dst, src)``, so they are swapped. The engine is chosen by
     memory space, mirroring the NISA backend:
 
     - HBM on either side  -> ``nisa.dma_copy`` (DMA engine).
@@ -100,7 +100,5 @@ def _emit_copy(gen, op) -> bool:
 def register(dispatch: dict) -> None:
     dispatch["memref.alloc"] = _emit_alloc
     dispatch["memref.dealloc"] = _emit_dealloc
-    dispatch["memref.copy"] = _emit_copy
-    # linalg.copy is buffer-semantic here (ins=source, outs=target), same
-    # operand order as memref.copy; lower it identically.
+    # linalg.copy is buffer-semantic here (ins=source, outs=target).
     dispatch["linalg.copy"] = _emit_copy

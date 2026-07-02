@@ -152,7 +152,7 @@ struct NkipyLegalizeLayoutPass
     //   linalg.fill(scalar, hbm_buf)
     //     → alloc sbuf_tile
     //     → linalg.fill(scalar, sbuf_tile)
-    //     → loop { memref.copy sbuf_tile[block] → hbm_buf[block] }
+    //     → loop { linalg.copy sbuf_tile[block] → hbm_buf[block] }
     decomposeHbmFills(func);
 
     if (hasError) {

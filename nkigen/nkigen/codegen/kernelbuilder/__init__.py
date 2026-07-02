@@ -327,17 +327,12 @@ def _writer_role(op) -> str | None:
 def _dst_operand(op):
     """The destination (written) operand of a destination-passing op.
 
-    For the linalg/memref ops we name, the output buffer is the trailing
-    operand (``outs`` for linalg named/generic ops; the target for memref.copy
-    is operand 1). Returns the SSA value, or None if it can't be determined.
+    For the linalg ops we name, the output buffer is the trailing operand
+    (``outs``). Returns the SSA value, or None if it can't be determined.
     """
     operands = list(op.operation.operands)
     if not operands:
         return None
-    name = op.operation.name
-    if name == "memref.copy":
-        return operands[1] if len(operands) > 1 else None
-    # linalg destination-passing ops: outs is the last operand.
     return operands[-1]
 
 
