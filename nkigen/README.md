@@ -51,19 +51,18 @@ marker op and returns `self`. All the verbs on one kernel:
 @trace(input_specs=[((512, 256), "bf16"), ((256, 512), "bf16"), ((512, 512), "f32")])
 def fused_ops(a, b, c):
     mm = a @ b
-    (knob(mm)
-        .tile_op(tile_size=[128, 128, 128])  # one entry per linalg iterator:
+    knob(mm).tile_op(
+        tile_size=[128, 128, 128]            # one entry per linalg iterator:
                                              #   matmul [M_t, N_t, K_t]
                                              #   elementwise: output rank
                                              #   reduction: input rank
-        .cache(a, axis=[-1]))                # SBUF staging for an input;
+    ).cache(a, axis=[-1])                    # SBUF staging for an input;
                                              # axis = post-tiling loop levels
                                              # (needs the .tile_op before it)
     d = c * 2.0
-    (knob(d)
-        .tile_op(tile_size=[128, 128])
-        .layout(mem_space="Sbuf",            # Hbm | Psum | Sbuf | SharedHbm
-                partition_dim=0))            # Sbuf-only (HBM has no partitions)
+    knob(d).tile_op(tile_size=[128, 128]).layout(
+        mem_space="Sbuf",                    # Hbm | Psum | Sbuf | SharedHbm
+        partition_dim=0)                     # Sbuf-only (HBM has no partitions)
 
     o = mm + d
     knob(mm, d).fuse()                       # fuse the two scf.for loops
