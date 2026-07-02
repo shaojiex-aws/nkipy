@@ -1,7 +1,7 @@
 # High-rank SBUF: LegalizeLayout + NISA emitter fixes
 
 **Date:** 2026-06-28
-**Status:** Open
+**Status:** Problem 1 done (Steps 1–4). Problems 2–5 open.
 **Affects:** test_head_deconcat, test_qwen3_layer
 
 ## The IR these tests produce (after knob-driven-tiling)
@@ -152,42 +152,85 @@ already tiled**
 Goal: nothing untiled reaches LegalizeLayout, so `tileCopyAndTranspose`
 becomes dead (step 4 deletes it).
 
-Instrumenting `tileCopyAndTranspose` across the whole suite shows it
-only ever tiles **two** kinds of op, both block-granularity staging
-buffers, both inside loops:
+Instrumenting `tileCopyAndTranspose` across the suite shows it only ever
+tiles **two** kinds of untiled op, both inside loops:
 
 1. **Matmul LHS transpose + RHS copy-in.** `buildMatmulBlockingTransforms`
    promotes the LHS (transpose) at the block-M level and the RHS (copy)
    at the block-N level — *outside* the inner tile loops. `TileUsingForOp`
    only tiles the `matmul` op itself down to `[128,128]`; the staging
-   transpose/copy it inserts around the matmul stay at block size
-   (e.g. `256x256`, `sbuf_map blocks:[2,2]`). The matmul *compute* is
-   already tiled; only its staging ops are not.
-2. **Reshape copy-out.** `canonicalize-reshape` materializes a
-   `memref.copy` at a reshape/mem_space boundary (e.g. head_deconcat's
-   SBUF→HBM copy-out of the 4D transpose result). It is emitted late
-   and full-size, with no `tile_op`.
+   transpose/copy stay at block size (e.g. `256x256`, `blocks:[2,2]`).
+2. **Concat / boundary copy-out.** `builder.concatenate` lowers each
+   input to a full-size SBUF→HBM copy of a slice of the result.
 
 Everything else (elementwise promote copies, the 4D tiled transpose)
 already arrives tile-sized and is skipped by `tileCopyAndTranspose`.
 
-A `256x256` SBUF buffer with `blocks:[2,2]` is physically
-`[128,2,2,128]` — 2 blocks in the *partition* dim. SBUF has only 128
-partitions, so this cannot be one DMA: it must be a per-block loop.
-So the work can't be deleted, only moved earlier (to where tile info
-already exists). Two sub-parts:
+**The tiling principle (it's about contiguity, not the op kind).** The
+emitter turns an N-D tile into a 2D `partition x free` DMA by folding the
+non-partition dims into one `free` span. That fold is only valid if those
+dims are **contiguous** in the buffer: `stride[i] == size[i+1]*stride[i+1]`.
+A tile that folds a dim which has a stride gap makes the DMA walk the wrong
+addresses and read garbage. This is true for *any* op, not just copies — a
+copy is only where it bites, because a copy is the op we insert writing into
+a strided slice.
 
-- **3a — matmul staging (main case, every matmul kernel).**
-  Prerequisite: [unify-on-linalg-copy](2026-07-01-unify-on-linalg-copy.md)
-  (the RHS copy-in must be a `linalg.copy` so the builtin can tile it;
-  `memref.copy` has no `TilingInterface`). Once it is, tile the LHS
-  transpose and RHS copy-in with the builtin `emitTile` at leaf tile —
-  same path the transpose knob already uses — no hand-rolled loop.
+Concrete: concatenating two `128x4x64` halves along the last axis into a
+`128x4x128` result. Each half is a strided slice — `stride = [512,128,1]`,
+so dim1 steps by 128 but the half is only 64 wide (a 64-element gap where
+the other half interleaves):
 
-  Note: explicit-sbuf-tile already set the `tile_size=[128,128]`
-  *attribute* on these buffers; it did not split the ops. 3a splits the
-  ops — at exactly that annotated tile (must match, or the per-block
-  loop and the buffer's `sbuf_map` disagree). Both LHS and RHS need it.
+```mlir
+%half0 = memref.subview %out[0,0,0] [128,4,64] : ... to strided<[512,128,1]>
+
+// WRONG — folds dim1(4)·dim2(64) into free=256, but dim1 is NOT contiguous
+// (128 != 64), so the DMA strides across the gap into the other half:
+linalg.copy ins(%src) outs(%half0)  {loop_tile_size = [128,4,64]}
+// RIGHT — tile the non-contiguous dim to 1, loop over it; each step folds
+// only the contiguous tail (dim2=64):
+linalg.copy ins(%src) outs(%half0)  {loop_tile_size = [128,1,64]}
+```
+
+Concat on an *earlier* axis keeps the tail contiguous (e.g. axis-1 gives
+`stride=[256,64,1]`, dim1·dim2 packed) — there the full `[128,4,64]` tile is
+correct. So the rule is per-buffer, driven by strides; the last-axis concat
+is just the case that breaks contiguity.
+
+The staging/boundary copies below are where untiled full copies still reach
+legalize. Their tiling can't be deleted, only moved earlier. Two sub-parts:
+
+- **3a — matmul staging (main case, every matmul kernel). ✅**
+  Prerequisite ✅: [unify-on-linalg-copy](2026-07-01-unify-on-linalg-copy.md)
+  (the RHS copy-in is now a `linalg.copy`, which has `TilingInterface`;
+  `memref.copy` does not). Tile the LHS transpose and RHS copy-in via the
+  **transform dialect** — emit `transform.structured.tile_using_for` on
+  each in the generated sequence in `buildMatmulBlockingTransforms`, right
+  after promoting that operand. This is the same `emitTile` helper the
+  elementwise/transpose knobs already use — no hand-rolled loop.
+
+  **Where the handle comes from — NOT `get_producer_of_operand`.** That was
+  the original plan, but it fails in the memref pipeline: the producer of a
+  matmul operand is the `memref.alloc`, not the copy/transpose that writes
+  into it (a `linalg.copy` on memrefs has no result, so it is never an
+  operand's defining op). Instead the ops that *create* the staging ops
+  return handles to them — `NkipyTransposeMatmulOp` returns the inserted
+  `linalg.transpose`, `PromoteTensorOp` returns the stage-in `linalg.copy`
+  (empty if the value was already in SBUF). `buildMatmulBlockingTransforms`
+  then `emitTile`s each.
+
+  **Do NOT tile inside `PromoteTensorOp::apply`.** Tried it; it corrupts
+  the IR (a nested `scf::tileUsingSCF` + `replaceOp` run *during* transform
+  interpretation, while the outer driver holds handles to the same IR,
+  produced a malformed subview — impossible stride, dropped mem_space).
+  The tiler itself is fine: tiling a `linalg.copy` standalone (strided
+  source, contiguous SBUF dest, with/without mem_space) works and
+  preserves mem_space. The fix is to tile as a **first-class transform
+  step**, not a nested rewrite.
+
+  Tile sizes: `[tileK, tileM]` (transpose out / LHS), `[tileK, tileN]`
+  (RHS) — the same `tile_size` attr explicit-sbuf-tile already stamped on
+  these buffers. Must match the buffer's `sbuf_map` or the per-block loop
+  and the map disagree.
 
   What's untiled today (feedforward, first matmul), pre-legalize —
   one full `256x256` transpose and one full `256x256` copy, no loop
@@ -214,36 +257,52 @@ already exists). Two sub-parts:
   After 3a they should already be `[128,128]` inside block loops, so
   LegalizeLayout has nothing to split.
 
-- **3b — reshape copy-out.** Materialize this copy before
-  knob-driven-tiling with a `tile_op` attached, so tiling splits it.
-  Home: a new `materializeBoundaryCopies` in InferLayout next to
-  `materializeReturnCopies` (which already does alloc + layout + copy +
-  copy-the-tile_op), porting `canonicalize-reshape`'s
-  `hasMemSpaceConflict` check. Don't move `canonicalize-reshape` wholesale
-  — its type-stamping must stay after tiling. (Covers only 3b.)
+- **3b — concat / boundary copy-out. ✅** The SBUF→HBM copies that lower a
+  `np.concatenate` are the other thing legalize tiled. Let
+  knob-driven-tiling tile them like any elementwise op — no new pass. A
+  copy is just an elementwise op that needs no SBUF staging (it lowers to a
+  DMA, which addresses HBM/SBUF directly). Three coordinated changes:
 
-  What's untiled today (head_deconcat), pre-legalize — the 4D
-  transpose result is `reinterpret_cast` to `256x256` and copied to
-  HBM in one shot. Unlike 3a there is **no `tile_op`/`tile_size`** on
-  this copy at all (it's materialized late by canonicalize-reshape):
+  1. `builder.concatenate` emits `linalg.copy` (tileable) instead of
+     `memref.copy` (no `TilingInterface`).
+  2. `InferLayout::defaultTileOps` gives a copy a **contiguity-safe tile**:
+     start from the shape default, then set any output dim that is *not*
+     contiguous with its successor (`stride[i] != size[i+1]*stride[i+1]`) to
+     1. This tiles exactly the dims the fold can't cross and leaves the
+     contiguous tail folded — correct for last-axis concat, earlier-axis
+     concat, and plain contiguous copies alike, regardless of any knob.
+  3. `buildElementwiseTiling`: a copy is **tiled but not promoted** — DMA
+     needs no staging buffer; promoting the HBM side would add a spurious
+     `SBUF→SBUF→HBM` hop.
+
+  What's untiled today (rope_3d concat), pre-tiling — each concat half is a
+  full-size `memref.copy` into a strided slice of the result, with no tile:
 
   ```mlir
-  %alloc = memref.alloc() : memref<2x128x2x128xf32, Sbuf>     // 4D transpose out
-  %rc = memref.reinterpret_cast %alloc to sizes: [256,256]
-          : ... to memref<256x256xf32, Sbuf>
-  %hbm = memref.alloc() : memref<256x256xf32, SharedHbm>
-  memref.copy %rc, %hbm : 256x256, Sbuf to 256x256, SharedHbm  // ← untiled, no tile_op
+  %out   = memref.alloc() : memref<128x4x128xf32, SharedHbm>
+  %half0 = memref.subview %out[0,0,0] [128,4,64] : ... to strided<[512,128,1]>
+  memref.copy %q_rot0, %half0                   // ← untiled memref.copy
   ```
+
+  After the three changes it is a `linalg.copy` with a contiguity-safe tile
+  (`[128,1,64]` here — dim1 stride 128 ≠ 64, so dim1 → 1), which the
+  elementwise knob path splits into per-tile loops — no staging alloc.
+
+  head_deconcat's reshape copy-out (a `reinterpret_cast` copy materialized
+  late by canonicalize-reshape) is a *different* case, still blocked on
+  Problems 2–5 below — out of scope here.
 
 Do 3a first (highest impact, self-contained in `KnobDrivenTiling.cpp`),
 verify LegalizeLayout tiles nothing for a pure-matmul kernel, then 3b.
 
-**Step 4: Remove `tileCopyAndTranspose` from LegalizeLayout**
+**Step 4: Remove `tileCopyAndTranspose` from LegalizeLayout ✅**
 
 After 3a+3b, no untiled transposes or copies reach LegalizeLayout.
-Remove `tileCopyAndTranspose`, `tileTranspose`, and `tileMemrefCopy`
-(and the now-unused `findLayoutForValue`/`getSbufMapFor` helpers if
-they have no other users).
+Remove `tileCopyAndTranspose`, `tileTranspose`, `tileMemrefCopy`, and the
+helpers that only they used (`findLayoutForValue`, `getSbufMapFor`,
+`getCopyOperands`, `needsTiledTransfer`, `lookThroughCast`,
+`createBlockLoopNest`). Legalize keeps only phases 1–2 (attach `sbuf_map`)
+and the HBM-fill decomposition.
 
 ## Problem 2: LegalizeLayout rank mismatch (qwen3)
 

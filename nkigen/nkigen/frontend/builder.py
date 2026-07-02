@@ -1110,7 +1110,13 @@ def concatenate(arrays: list[TensorHandle], axis: int = 0, loc=None) -> TensorHa
             offsets, sizes, strides_list,
             loc=loc,
         ).result
-        memref.CopyOp(a._value, sv, loc=loc)
+        # linalg.copy (not memref.copy) so knob-driven-tiling can tile this
+        # SBUF→HBM boundary copy via TilingInterface; it inherits the source's
+        # tile in infer-layout. memref.copy has no TilingInterface.
+        cp = linalg.CopyOp([], [a._value], [sv], loc=loc)
+        blk = cp.regions[0].blocks.append(elem, elem)
+        with ir.InsertionPoint(blk):
+            linalg.YieldOp([blk.arguments[0]], loc=loc)
         offset += a.shape[axis]
 
     return _make_handle(output, out_shape, elem)

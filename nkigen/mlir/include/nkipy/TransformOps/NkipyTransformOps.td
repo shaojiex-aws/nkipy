@@ -40,15 +40,22 @@ def Nkipy_PromoteTensorOp : Op<Transform_Dialect, "nkipy.promote_tensor",
       tensor-typed values.
     - Succeeds otherwise and returns a handle to the promoted value(s), i.e.,
       the result of materialization if present and the allocation otherwise.
+
+    The second result, `copy_in`, is an op handle to the stage-in copies
+    created while promoting (one per promoted value that is read). It is empty
+    when nothing needs a copy-in (e.g. the value already lives in the target
+    memory space). Callers tile it as a first-class step; copy-back stores are
+    not included.
   }];
 
   let arguments = (ins TransformValueHandleTypeInterface:$tensor,
       OptionalAttr<AnyAttr>:$memory_space,
       OptionalAttr<DenseI64ArrayAttr>:$tile_size);
-  let results = (outs TransformValueHandleTypeInterface:$promoted);
+  let results = (outs TransformValueHandleTypeInterface:$promoted,
+      TransformHandleTypeInterface:$copy_in);
 
   let assemblyFormat =
-      "(`to` $memory_space^)? $tensor attr-dict `:` functional-type($tensor, $promoted)";
+      "(`to` $memory_space^)? $tensor attr-dict `:` functional-type($tensor, results)";
 }
 
 //===----------------------------------------------------------------------===//
@@ -67,15 +74,19 @@ def NkipyTransposeMatmulOp : Op<Transform_Dialect, "nkipy.transpose_matmul",
     For tensor operands: creates `tensor.empty` for the transpose output.
     For memref operands: creates `memref.alloc` for the transpose output.
 
-    Returns a handle to the new `linalg.matmul_transpose_a` op.
+    Returns two handles: `transformed` points to the new
+    `linalg.matmul_transpose_a` op, and `transpose` points to the inserted
+    LHS `linalg.transpose` op (so the caller can tile it as a first-class
+    step).
   }];
 
   let arguments = (ins TransformHandleTypeInterface:$target,
       OptionalAttr<DenseI64ArrayAttr>:$tile_size);
-  let results = (outs TransformHandleTypeInterface:$transformed);
+  let results = (outs TransformHandleTypeInterface:$transformed,
+      TransformHandleTypeInterface:$transpose);
 
   let assemblyFormat =
-      "$target attr-dict `:` functional-type($target, $transformed)";
+      "$target attr-dict `:` functional-type($target, results)";
 }
 
 #endif // NKIPY_TRANSFORM_OPS

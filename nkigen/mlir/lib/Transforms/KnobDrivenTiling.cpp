@@ -120,10 +120,15 @@ Value emitTile(OpBuilder &builder, Location loc, Value target,
 /// non-empty it is attached as the physical SBUF tile (used for matmul
 /// operands, which are promoted block-sized but read tile-sized); otherwise
 /// PromoteTensorOp falls back to its leaf-sized default.
-void emitPromoteOperand(OpBuilder &builder, Location loc, Value tiledOp,
-                        int64_t operandIdx, Attribute memSpace,
-                        ArrayRef<int64_t> tile = {}) {
+///
+/// Returns the `copy_in` op handle (points to the stage-in linalg.copy, or is
+/// empty when the value already lived in the target space and no copy was
+/// inserted) so the caller can tile it as a first-class transform step.
+Value emitPromoteOperand(OpBuilder &builder, Location loc, Value tiledOp,
+                         int64_t operandIdx, Attribute memSpace,
+                         ArrayRef<int64_t> tile = {}) {
   auto anyValueType = transform::AnyValueType::get(builder.getContext());
+  auto anyOpType = transform::AnyOpType::get(builder.getContext());
   SmallVector<int64_t> position = {operandIdx};
   auto getOp = builder.create<transform::GetOperandOp>(
       loc, anyValueType, tiledOp, ArrayRef<int64_t>(position),
@@ -131,9 +136,10 @@ void emitPromoteOperand(OpBuilder &builder, Location loc, Value tiledOp,
   auto tileAttr = tile.empty()
       ? DenseI64ArrayAttr{}
       : DenseI64ArrayAttr::get(builder.getContext(), tile);
-  builder.create<transform::PromoteTensorOp>(
-      loc, anyValueType, getOp.getResult(), /*memory_space=*/memSpace,
-      /*tile_size=*/tileAttr);
+  auto promote = builder.create<transform::PromoteTensorOp>(
+      loc, anyValueType, anyOpType, getOp.getResult(),
+      /*memory_space=*/memSpace, /*tile_size=*/tileAttr);
+  return promote.getCopyIn();
 }
 
 /// Promote all DPS inputs and the output to SBUF.
@@ -447,6 +453,14 @@ void buildElementwiseTiling(OpBuilder &builder, Location loc,
   Value matched = emitMatch(builder, loc, moduleArg, opName, opAttrs);
   Value tiledOp = emitTile(builder, loc, matched, knob.tileSize);
 
+  // A linalg.copy is an elementwise op that needs no SBUF staging: it lowers
+  // to a DMA, which reads/writes HBM directly, so neither operand is promoted.
+  // (Promoting the HBM side would insert a spurious SBUF→SBUF→HBM double-hop.)
+  // Every other elementwise op runs on a compute engine that can only touch
+  // on-chip memory, so its operands must be staged into SBUF.
+  if (opName == "linalg.copy")
+    return;
+
   int numInputs = knob.numDpsInputs >= 0 ? knob.numDpsInputs
       : (isNamedUnaryElementwiseOp(opName) ? 1 : 2);
   emitCacheAwarePromotion(builder, loc, tiledOp, numInputs, knob.caches);
@@ -563,17 +577,28 @@ bool buildMatmulBlockingTransforms(OpBuilder &builder, Location loc,
   // transpose output alloc, which matmul_transpose_a reads tile-sized.
   auto tileAttr = DenseI64ArrayAttr::get(builder.getContext(), lhsTile);
   auto transposeMatmul = builder.create<transform::NkipyTransposeMatmulOp>(
-      loc, anyOpType, blockMTiled, tileAttr);
+      loc, anyOpType, anyOpType, blockMTiled, tileAttr);
   Value afterBlockM = transposeMatmul.getTransformed();
 
-  // Promote LHS at block-M level (reused across all N-blocks)
+  // Tile the block-level LHS transpose into per-tile loops. It writes the
+  // [K, blockM] transpose output alloc but is read tile-sized [tileK, tileM]
+  // by matmul_transpose_a; legalize-layout used to split it, but tiling here
+  // keeps the block-granularity staging out of legalize entirely.
+  emitTile(builder, loc, transposeMatmul.getTranspose(), lhsTile);
+
+  // Promote LHS at block-M level (reused across all N-blocks). The transpose
+  // output alloc is already SBUF, so this is a no-op (no copy-in to tile).
   emitPromoteOperand(builder, loc, afterBlockM, 0, sbufMemSpace, lhsTile);
 
   // Tile N blocks
   Value blockNTiled = emitTile(builder, loc, afterBlockM, {0, blockN, 0});
 
-  // Promote RHS at block-N level (reused within this N-block)
-  emitPromoteOperand(builder, loc, blockNTiled, 1, sbufMemSpace, rhsTile);
+  // Promote RHS at block-N level (reused within this N-block). This stages the
+  // [K, blockN] RHS block into SBUF via a linalg.copy; tile that copy into
+  // per-tile loops [tileK, tileN] so it too arrives at legalize already tiled.
+  Value rhsCopyIn =
+      emitPromoteOperand(builder, loc, blockNTiled, 1, sbufMemSpace, rhsTile);
+  emitTile(builder, loc, rhsCopyIn, rhsTile);
 
   // --- Level 2: Tile-level tiling (within blocks) ---
 

@@ -90,6 +90,7 @@ transform::PromoteTensorOp::apply(transform::TransformRewriter &rewriter,
                                   transform::TransformResults &results,
                                   transform::TransformState &state) {
   SmallVector<Value> promoted;
+  SmallVector<Operation *> copyIns;
   std::optional<nkipy::MemSpaceEnum> targetMs;
   if (auto msAttr = getMemorySpaceAttr())
     if (auto nkipyMs = dyn_cast<nkipy::MemSpaceAttr>(msAttr))
@@ -169,6 +170,7 @@ transform::PromoteTensorOp::apply(transform::TransformRewriter &rewriter,
       auto copyOp = rewriter.create<linalg::CopyOp>(
           value.getLoc(), ValueRange{value}, ValueRange{alloc.getResult()});
       preservedOps.insert(copyOp);
+      copyIns.push_back(copyOp);
     }
 
     if (dpsConsumer) {
@@ -187,6 +189,7 @@ transform::PromoteTensorOp::apply(transform::TransformRewriter &rewriter,
     rewriter.replaceAllUsesExcept(value, promoted.back(), preservedOps);
   }
   results.setValues(cast<OpResult>(getPromoted()), promoted);
+  results.set(cast<OpResult>(getCopyIn()), copyIns);
   return DiagnosedSilenceableFailure::success();
 }
 
@@ -206,6 +209,7 @@ transform::NkipyTransposeMatmulOp::apply(transform::TransformRewriter &rewriter,
                                           transform::TransformResults &results,
                                           transform::TransformState &state) {
   SmallVector<Operation *> transformed;
+  SmallVector<Operation *> transposes;
 
   for (Operation *op : state.getPayloadOps(getTarget())) {
     auto matmulOp = dyn_cast<linalg::MatmulOp>(op);
@@ -247,7 +251,7 @@ transform::NkipyTransposeMatmulOp::apply(transform::TransformRewriter &rewriter,
           loc, transposedInit, sbufAttr, pdim0, tileAttr);
     }
 
-    rewriter.create<linalg::TransposeOp>(
+    auto transposeOp = rewriter.create<linalg::TransposeOp>(
         loc, lhs, transposedInit, ArrayRef<int64_t>{1, 0});
 
     auto newMatmul = rewriter.create<linalg::MatmulTransposeAOp>(
@@ -256,9 +260,11 @@ transform::NkipyTransposeMatmulOp::apply(transform::TransformRewriter &rewriter,
 
     rewriter.replaceOp(matmulOp, newMatmul.getResults());
     transformed.push_back(newMatmul);
+    transposes.push_back(transposeOp);
   }
 
   results.set(cast<OpResult>(getTransformed()), transformed);
+  results.set(cast<OpResult>(getTranspose()), transposes);
   return DiagnosedSilenceableFailure::success();
 }
 

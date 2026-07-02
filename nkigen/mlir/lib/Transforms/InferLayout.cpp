@@ -117,6 +117,62 @@ struct NkipyInferLayoutPass : public InferLayoutBase<NkipyInferLayoutPass> {
     return 512;
   }
 
+  /// Contiguity-safe loop tile for a copy. Starts from the shape default
+  /// ([min(dim0,128), dim1, ..., dimN]) and sets any dim that is not
+  /// contiguous with its successor — in EITHER operand — to 1, so the free
+  /// fold never strides across a gap. Returns null (fall through to the
+  /// generic path) if the copy is fully contiguous on both sides, so
+  /// contiguous copies keep the full tile exactly like elementwise ops.
+  DenseI64ArrayAttr contiguitySafeCopyTile(linalg::LinalgOp copyOp,
+                                           Value outVal, int64_t partCap) {
+    auto outType = dyn_cast<MemRefType>(outVal.getType());
+    if (!outType || !outType.hasStaticShape() || outType.getRank() < 2)
+      return nullptr;  // rank <2: no non-partition dims to fold
+    int64_t R = outType.getRank();
+    ArrayRef<int64_t> shape = outType.getShape();
+
+    // contig[i] = dim i is contiguous with dim i+1 (stride[i] ==
+    // size[i+1]*stride[i+1]) in every operand with a decodable strided layout.
+    // A gap in any operand makes the dim non-contiguous.
+    SmallVector<bool> contig(R, true);
+    for (Value operand : copyOp->getOperands()) {
+      auto mt = dyn_cast<MemRefType>(operand.getType());
+      if (!mt || mt.getRank() != R)
+        continue;
+      SmallVector<int64_t> strides;
+      int64_t offset;
+      if (failed(mt.getStridesAndOffset(strides, offset)))
+        continue;
+      ArrayRef<int64_t> sh = mt.getShape();
+      for (int64_t i = 0; i + 1 < R; i++) {
+        if (ShapedType::isDynamic(strides[i]) ||
+            ShapedType::isDynamic(strides[i + 1]) ||
+            ShapedType::isDynamic(sh[i + 1]))
+          continue;  // can't prove a gap → assume contiguous
+        if (strides[i] != sh[i + 1] * strides[i + 1])
+          contig[i] = false;
+      }
+    }
+
+    // The free span folds a contiguous suffix: dim R-1 (free base) is always
+    // full, and dim i folds only if it is contiguous with i+1 AND i+1 folds.
+    // A dim that can't fold is looped (tile 1); dim 0 is the partition dim.
+    // Build the tile in one backward pass, tracking whether the suffix folds.
+    SmallVector<int64_t> tile(R, 1);
+    tile[0] = std::min(shape[0], partCap);
+    bool foldsSuffix = true, anyGap = false;
+    for (int64_t i = R - 1; i >= 1; i--) {
+      if (foldsSuffix)
+        tile[i] = shape[i];
+      else
+        anyGap = true;
+      foldsSuffix = foldsSuffix && contig[i - 1];
+    }
+    if (!anyGap)
+      return nullptr;  // fully contiguous → use the generic default
+    return DenseI64ArrayAttr::get(copyOp.getContext(), tile);
+  }
+
   /// Step 1: emit default tile_op for ops that lack one.
   void defaultTileOps(func::FuncOp func) {
     int64_t partCap = maxPartition();
@@ -129,6 +185,25 @@ struct NkipyInferLayoutPass : public InferLayoutBase<NkipyInferLayoutPass> {
       if (!outVal || hasTileOp(outVal)) return;
 
       SmallVector<int64_t> tile;
+
+      // A copy lowers to a 2D partition x free DMA: the emitter folds the
+      // non-partition dims into one free span. That fold is only valid when
+      // those dims are contiguous in the copied buffer. A boundary copy (e.g.
+      // last-axis concat) writes a strided slice where a dim has a stride gap;
+      // folding it would stride across the gap into neighbouring data. So a
+      // copy starts from the shape default, then sets any dim that is NOT
+      // contiguous with its successor to 1 — tiling exactly the dims the fold
+      // can't cross, leaving the contiguous tail folded. A fully contiguous
+      // copy keeps the full tile (same as elementwise); only strided slices
+      // are affected.
+      if (isa<linalg::CopyOp>(linalgOp.getOperation())) {
+        if (auto t = contiguitySafeCopyTile(linalgOp, outVal, partCap)) {
+          OpBuilder builder(linalgOp);
+          builder.setInsertionPointAfter(linalgOp);
+          builder.create<nkipy::TileOp>(outVal.getLoc(), outVal, t);
+          return;
+        }
+      }
 
       if (isMatmulOp(linalgOp)) {
         // Matmul C[M,N] = A[M,K] * B[K,N]: tile = [M_t, N_t, K_t]

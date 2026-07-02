@@ -199,18 +199,18 @@ def test_3d_sbuf_full_copy():
     """
     3D SBUF alloc (256x2x64) with full-buffer copy from 3D HBM.
 
-    No reshape involved — HBM and SBUF have the same rank (3).
-    The alloc gets #nkipy.sbuf_map and the full-buffer copy is tiled into block loops.
+    No reshape involved — HBM and SBUF have the same rank (3). legalize-layout
+    attaches #nkipy.sbuf_map to the alloc (logical shape preserved). It no
+    longer tiles the copies itself — as of the 3a/3b redesign all copies reach
+    legalize already tiled (knob-driven-tiling), so the full-size copy here
+    passes through unchanged; only the sbuf_map is added.
     """
     result = run_legalize_layout(MLIR_3D_SBUF_COPY)
 
     check_patterns = '''
 CHECK: func.func @test_3d_copy
 CHECK: memref.alloc(){{.*}}: memref<256x2x64xf32, #nkipy.sbuf_map<tile: [128, 1, 64], blocks: [2, 2, 1]>, #nkipy.mem<Sbuf>>
-CHECK: scf.for
-CHECK: scf.for
-CHECK: scf.for
-CHECK: memref.copy{{.*}}#nkipy.mem<SharedHbm>>{{.*}}to{{.*}}#nkipy.mem<Sbuf>>
+CHECK: memref.copy{{.*}}#nkipy.mem<SharedHbm>>{{.*}}to{{.*}}#nkipy.sbuf_map<tile: [128, 1, 64], blocks: [2, 2, 1]>, #nkipy.mem<Sbuf>>
 CHECK: linalg.add
 CHECK: return{{.*}}#nkipy.mem<SharedHbm>
 '''
