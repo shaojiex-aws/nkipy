@@ -94,6 +94,28 @@ static bool isReturnValue(Value val) {
   return false;
 }
 
+/// Find an explicit mem_space annotation on `val` or on any reinterpret_cast
+/// view of it. A reinterpret_cast is a pure reinterpretation of the same
+/// storage — it cannot move data between memory spaces — so a mem_space the
+/// user attached to a *view* of an alloc is really a constraint on the alloc.
+/// Returns the annotated space, or nullptr if no view carries one.
+static MemSpaceAttr getViewMemSpace(Value val) {
+  llvm::SmallPtrSet<Value, 8> visited;
+  SmallVector<Value> worklist = {val};
+  while (!worklist.empty()) {
+    Value v = worklist.pop_back_val();
+    if (!visited.insert(v).second) continue;
+    for (Operation *user : v.getUsers()) {
+      if (auto layout = dyn_cast<nkipy::LayoutOp>(user))
+        if (layout.getTarget() == v && layout.getMemSpace())
+          return *layout.getMemSpace();
+      if (auto cast = dyn_cast<memref::ReinterpretCastOp>(user))
+        worklist.push_back(cast.getResult());
+    }
+  }
+  return nullptr;
+}
+
 //===----------------------------------------------------------------------===//
 // Pass
 //===----------------------------------------------------------------------===//
@@ -340,8 +362,16 @@ struct NkipyInferLayoutPass : public InferLayoutBase<NkipyInferLayoutPass> {
       OpBuilder builder(allocOp);
       builder.setInsertionPointAfter(allocOp);
 
-      // Return values → SharedHbm; everything else → Sbuf.
-      if (isReturnValue(alloc)) {
+      // A reinterpret_cast view of this alloc may carry an explicit
+      // mem_space (e.g. a user knob on a reshaped boundary value). Since a
+      // cast can't change memory space, that constraint belongs to the
+      // alloc — honor it so the alloc and its views agree. partition_dim is
+      // left unset: the space may be off-chip, and only SBUF needs it.
+      if (auto viewSpace = getViewMemSpace(alloc)) {
+        builder.create<nkipy::LayoutOp>(alloc.getLoc(), alloc,
+            viewSpace, /*partition_dim=*/nullptr, /*tile_size=*/nullptr);
+      } else if (isReturnValue(alloc)) {
+        // Return values → SharedHbm; everything else → Sbuf.
         builder.create<nkipy::LayoutOp>(alloc.getLoc(), alloc,
             sharedHbm, /*partition_dim=*/nullptr, /*tile_size=*/nullptr);
       } else {

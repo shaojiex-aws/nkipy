@@ -316,7 +316,16 @@ class NisaEmitter:
             op_name = getattr(op, "name", None)
 
             if op_name in ("memref.reinterpret_cast", "memref.cast"):
-                base = op.operation.operands[0]
+                # Only follow through casts that preserve the coordinate frame.
+                # A rank-changing reinterpret_cast is a reshape: the offsets we
+                # collected are defined in *this* view's frame, and folding them
+                # onto the lower-rank base would desync them from base_shape.
+                # Stop here — this view is the coordinate system the DMA refs.
+                source = op.operation.operands[0]
+                if up_ir.MemRefType(source.type).rank != \
+                        up_ir.MemRefType(base.type).rank:
+                    break
+                base = source
                 continue
 
             if op_name in ("memref.collapse_shape", "memref.expand_shape"):
@@ -368,15 +377,47 @@ class NisaEmitter:
 
             break
 
-        base_name = self._name(base)
         base_type = base.type
         tile_shape = list(up_ir.MemRefType(val.type).shape)
+
+        # `base` may be a rank-changing reinterpret_cast that _trace_access
+        # stopped at (it is the coordinate frame the offsets live in), but a
+        # cast is not materialized as a NISA value. Resolve the name through
+        # the cast chain to a materialized ancestor (alloc/arg): every cast
+        # in the chain aliases the same storage at offset 0, so naming the
+        # ancestor and viewing it in this frame is equivalent. view_type is
+        # the ancestor's real type (for view()'s source annotation); base_type
+        # stays the frame the offsets are computed in.
+        base_name, view_type = self._resolve_materialized(base)
 
         if offsets is None:
             base_ty = up_ir.MemRefType(base_type)
             offsets = [self._emit_const_index(0) for _ in range(base_ty.rank)]
 
-        return base_name, offsets, tile_shape, base_type
+        return base_name, offsets, tile_shape, base_type, view_type
+
+    def _resolve_materialized(self, val: up_ir.Value) -> tuple[str, up_ir.Type]:
+        """Follow the view-op chain to a value with a materialized NISA name.
+
+        subview/cast/reinterpret_cast results are not emitted (name is None);
+        they alias their source's storage. Walk to the first named ancestor
+        and return (name, its_type). Returns (None, val.type) if none exists.
+        """
+        cur = val
+        while True:
+            name = self._names.get(cur)
+            if name is not None:
+                return name, cur.type
+            owner = getattr(cur, "owner", None)
+            if owner is None:
+                return name, cur.type
+            op = owner.opview if hasattr(owner, "opview") else owner
+            if getattr(op, "name", None) in (
+                    "memref.reinterpret_cast", "memref.cast", "memref.subview",
+                    "memref.collapse_shape", "memref.expand_shape"):
+                cur = op.operation.operands[0]
+                continue
+            return name, cur.type
 
     def _emit_const_index(self, val: int) -> str:
         name = self._fresh(f"c{val}")
@@ -406,15 +447,22 @@ class NisaEmitter:
         - SBUF/PSUM: emitted type is already 2D, no view() needed
         - HBM: uses view() to reinterpret the >2D memref as 2D
         """
-        base_name, offsets, tile_shape, base_type = self._trace_access(val)
+        base_name, offsets, tile_shape, base_type, view_type = \
+            self._trace_access(val)
         ms = irutils.memref_memspace(base_type)
         is_onchip = ms in (irutils.MEMSPACE_SBUF, irutils.MEMSPACE_PSUM)
         base_shape = list(up_ir.MemRefType(base_type).shape)
         base_rank = len(base_shape)
 
+        # A rank-changing reinterpret_cast was crossed: base_type is the
+        # coordinate frame the offsets live in, but the DMA must name the
+        # materialized ancestor (view_type) it aliases. This needs view()
+        # even when the frame is 2D (e.g. a 4D SBUF alloc viewed as 2D HBM).
+        crossed_reshape = list(up_ir.MemRefType(view_type).shape) != base_shape
+
         # HBM with >2D base memref needs view() regardless of tile rank.
         # A rank-reducing subview gives a 2D tile but the memref is still >2D.
-        needs_view = not is_onchip and base_rank > 2
+        needs_view = not is_onchip and (base_rank > 2 or crossed_reshape)
 
         if needs_view:
             # Determine which base dim the DMA tile row starts at.
@@ -452,9 +500,13 @@ class NisaEmitter:
                     offsets[first_accessed + 1:], base_shape[first_accessed + 1:])
             else:
                 col_offset = self._emit_const_index(0)
+
             dims = [f"{row_offset} + d0", f"{col_offset} + d1"]
 
-            orig_ty = self._memref_type_str_nisa(base_type)
+            # view()'s source type must be the materialized ancestor's real
+            # type (view_type), since base_name names that ancestor. The [r, c]
+            # shape is the flattened frame the offsets index into.
+            orig_ty = self._memref_type_str_nisa(view_type)
             elem = str(up_ir.MemRefType(base_type).element_type)
             memloc_ref = (
                 f"view({orig_ty} {base_name}, {elem}, [{view_r}, {view_c}])"
@@ -516,7 +568,7 @@ class NisaEmitter:
         Used for HBM↔HBM copies where both sides keep their native rank.
         NISA computes correct strides from the memref type directly.
         """
-        base_name, offsets, tile_shape, base_type = self._trace_access(val)
+        base_name, offsets, tile_shape, base_type, _ = self._trace_access(val)
         par = tile_shape[0]
         free_dims = ", ".join(str(d) for d in tile_shape[1:])
         tile_str = f"{par}| {free_dims}"
@@ -784,7 +836,7 @@ class NisaEmitter:
         stat_str = self._operand_str(mat_a, "stationary")
         mov_str = self._operand_str(mat_b, "moving")
 
-        _, stat_offsets, _, stat_base_type = self._trace_access(mat_a)
+        _, stat_offsets, _, stat_base_type, _ = self._trace_access(mat_a)
         ms = irutils.memref_memspace(stat_base_type)
         if ms in (irutils.MEMSPACE_SBUF, irutils.MEMSPACE_PSUM) and \
                 self._has_sbuf_map(stat_base_type):

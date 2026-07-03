@@ -304,110 +304,136 @@ helpers that only they used (`findLayoutForValue`, `getSbufMapFor`,
 `createBlockLoopNest`). Legalize keeps only phases 1–2 (attach `sbuf_map`)
 and the HBM-fill decomposition.
 
-## Problem 2: LegalizeLayout rank mismatch (qwen3)
+## Problem 2: HBM→HBM transpose cannot use the DMA transpose engine
 
-A rank-3 alloc `memref<4x128x128>` is accessed via rank-reducing
-subviews (tiling loop iterates over dim 0). `traceToLinalgOperands`
-follows through the subview and records the consumer's operand type
-shape `[128,128]` (rank 2) as the tile. But the alloc is rank 3.
+Problems 2–5 in the original analysis were symptoms of one root cause:
+`buildTransposeTiling` unconditionally promotes the transpose output
+to SBUF and routes it through the DMA transpose engine. This is wrong
+for the head_deconcat case, where the transpose is HBM→HBM.
 
-### Fix
+### Why the transpose engine doesn't work here
 
-In `traceToLinalgOperands`, when following a `SubViewOp`, record the
-subview's **static sizes** (at source rank) instead of following
-through and recording the result type shape:
+The DMA transpose engine swaps partition and free lanes — a hardware
+operation that requires the two swapped axes to be **contiguous in
+memory** (they form the 2D tile the engine flips). In head_deconcat:
+
+```
+Input:  memref<2x2x128x128xf32, SharedHbm>
+Output: memref<2x128x2x128xf32, SharedHbm>
+Permutation: [0, 2, 1, 3]   (swap dims 1 and 2)
+```
+
+After tiling, each tile is `[1, 2, 128, 1]` with permutation
+`[0, 2, 1, 3]`. The swapped axes have sizes 2 and 128, but they are
+NOT the partition/free axes of a 2D view — the engine sees them as
+(W, X) and rejects: `transposing dimensions (WX) should be continuous`.
+
+This is fundamental. No amount of emitter hacking can fix it — the
+hardware path physically cannot execute this permutation.
+
+### What `buildTransposeTiling` does today (wrong for HBM→HBM)
 
 ```cpp
-if (auto subviewOp = dyn_cast<memref::SubViewOp>(user)) {
-    auto staticSizes = subviewOp.getStaticSizes();
-    if (llvm::none_of(staticSizes, [](int64_t s) {
-          return s == ShapedType::kDynamic; })) {
-        SmallVector<int64_t> tileShape(staticSizes.begin(), staticSizes.end());
-        results.push_back({linalg::LinalgOp(nullptr), 0, tileShape});
-    } else {
-        workList.push(subviewOp.getResult());
-    }
-    continue;
+// KnobDrivenTiling.cpp:471-486
+void buildTransposeTiling(...) {
+  Value matched = emitMatch(...);
+  Value tiledOp = emitTile(...);
+  emitPromoteOperand(builder, loc, tiledOp, numInputs, sbufMemSpace);
+  //                                                   ^^^^^^^^^^^^
+  // Always promotes OUTPUT to SBUF — forces the transpose engine path
 }
 ```
 
-## Problem 3: NISA emitter `_trace_access` rank mismatch
-
-After fixing problems 1-2, the 4D `linalg.transpose` reaches the
-NISA emitter. `_emit_copy` is called for the HBM→SBUF load
-(`memref.copy %subview, %tmp`). `_operand_str` on `%subview` calls
-`_trace_access` which walks:
-
-```
-%subview (rank 4) → %reinterpret_cast (rank 4) → %arg0 (rank 3)
+Compare with `buildElementwiseTiling` (line 461):
+```cpp
+if (opName == "linalg.copy")
+  return;  // skips SBUF promotion — DMA copy addresses HBM directly
 ```
 
-Now `offsets` has 4 elements (from rank-4 subview) but `base_shape`
-is rank 3 (from `%arg0`). `_linearize_offsets` crashes.
+The copy path is already proven: tiled `linalg.copy` emits
+`nisa.dma_copy` with strided addressing (arbitrary access patterns,
+no contiguity constraint). The transpose engine is only needed when
+you want to physically reorder data **within SBUF** as a staging step
+before compute (e.g., matmul `transpose_a`).
 
-### Fix
+### The clean fix: lower HBM→HBM transpose to permuted-view + copy
 
-`_trace_access` should stop at a rank-changing `reinterpret_cast`.
-The `reinterpret_cast` result IS the coordinate system where offsets
-are defined — the DMA references this view, not the underlying base.
+When both source and destination are in HBM, the transpose doesn't
+need to physically move data through the engine. It just needs to
+read elements in permuted order and write them contiguously (or
+vice-versa). The DMA copy engine handles this via strided addressing.
 
-```python
-if op_name == "memref.reinterpret_cast":
-    source = op.operation.operands[0]
-    if up_ir.MemRefType(source.type).rank != up_ir.MemRefType(base.type).rank:
-        break
-    base = source
-    continue
+**Lowering:**
+```
+linalg.transpose ins(%src: HBM) outs(%dst: HBM) perm=[0,2,1,3]
+```
+becomes:
+```
+%permuted_view = memref.transpose %src by perm [0,2,1,3]
+    : memref<2x2x128x128, HBM> → memref<2x128x2x128, strided, HBM>
+linalg.copy ins(%permuted_view) outs(%dst)
 ```
 
-## Problem 4: NISA emitter permutation rank mismatch
+`memref.transpose` is a zero-cost op — same memory, permuted strides.
+`linalg.copy` from a strided source to a contiguous destination is
+exactly what `nisa.dma_copy` does: it reads via the strided pattern
+and writes contiguously.
 
-After fixing problem 3, `_emit_transpose` emits the 4D permutation
-`[0,2,1,3]` but `_operand_str` projected operands to 2D. NISA
-requires permutation rank = tile rank.
+**Where to implement:** A new pattern in `KnobDrivenTiling.cpp` (or
+a small pre-pass) that rewrites `linalg.transpose` whose **output is
+HBM** into `memref.transpose` + `linalg.copy`. The resulting copy
+then flows through `buildElementwiseTiling` (which skips SBUF
+promotion for copies) and the existing emitter handles it.
 
-### Fix
+`buildTransposeTiling` remains for the SBUF-output case (matmul LHS
+staging), where the engine IS correct.
 
-In `_emit_transpose`, reduce 4D permutation to 2D when only 2
-non-unit dims are swapped:
+### What this deletes from emit.py
 
-```python
-src_shape = list(up_ir.MemRefType(src.type).shape)
-if len(permutation) > 2:
-    non_unit = [i for i, s in enumerate(src_shape) if s != 1]
-    if len(non_unit) == 2:
-        i0, i1 = non_unit
-        permutation = [1, 0] if permutation[i0] == i1 else [0, 1]
-    else:
-        raise ValueError(...)
-```
+All the hacky emitter workarounds for the "4D transpose through
+engine" path go away:
 
-If result is `[0,1]` (identity after stripping units), emit
-`dma_copy` instead of `dma_transpose`.
+- `_reduce_permutation_2d` — only served the engine path
+- `_free_dim_stride` / `128*d1` stride hack — only served the engine
+- Modified `_emit_transpose` logic for high-rank — unnecessary when
+  HBM→HBM never reaches the transpose emitter
 
-## Problem 5: NISA emitter sbuf_map tile_str inconsistency
+What STAYS (these fix real, independent bugs):
+- `_trace_access` stopping at rank-changing `reinterpret_cast` —
+  correct invariant for any high-rank DMA (the copy path uses this)
+- `_resolve_materialized` — correct for any view-op chain
+- 5-tuple return + `crossed_reshape` / view logic — needed whenever
+  the emitter sees a `reinterpret_cast` it didn't materialize
 
-`_operand_str` has two paths for on-chip >2D operands:
-- **sbuf_map path**: `par = tile_shape[0]`, `free = product(rest)`
-- **non-sbuf_map path**: skip leading 1s, `par = first non-unit`
+### Implementation plan
 
-For the transpose, src (no sbuf_map) gets `2|128` and dst (sbuf_map)
-gets `1|256`. They should be consistent — both should skip leading 1s.
+1. **Detect HBM→HBM transpose:** In `KnobDrivenTiling`, before
+   dispatch (line 703), check if the matched transpose has its output
+   in HBM (not SBUF). This is exactly the case where InferLayout
+   assigned SharedHbm via `getViewMemSpace` (Problem 1 fix).
 
-### Fix
+2. **Lower to permuted-view + copy:** Emit a transform sequence:
+   - Match the `linalg.transpose`
+   - Rewrite to `memref.transpose %src` + `linalg.copy`
+   - The copy inherits the knob's tile_size
+   - Route through `buildElementwiseTiling` (skip promotion)
 
-In the sbuf_map path, skip leading unit dims before computing
-`par|free` (same logic as non-sbuf_map path):
+3. **Delete emitter hacks:** Remove `_reduce_permutation_2d`,
+   `_free_dim_stride`, and the high-rank engine path from
+   `_emit_transpose`.
 
-```python
-elif is_onchip and self._has_sbuf_map(base_type):
-    sbuf_map = self._get_sbuf_map(base_type)
-    skip = 0
-    while skip < len(tile_shape) - 2 and tile_shape[skip] == 1:
-        skip += 1
-    par = tile_shape[skip]
-    free = 1
-    for d in tile_shape[skip + 1:]:
-        free *= d
-    tile_str = f"{par}| {free}"
-```
+4. **InferLayout fix stays:** `getViewMemSpace` correctly assigns
+   SharedHbm to the 4D output alloc, which is what triggers the
+   HBM→HBM detection in step 1.
+
+### Why this is clean
+
+- **One principle:** transpose engine for SBUF staging (compute
+  prep), DMA copy for bulk data movement (HBM↔HBM).
+- **No emitter hacks:** the copy emitter already handles arbitrary
+  strided patterns.
+- **Correct by construction:** `memref.transpose` is a view (no
+  codegen), `linalg.copy` is proven.
+- **Breaking change is fine:** `buildTransposeTiling` only routes
+  SBUF-output cases to the engine; all other transposes become copies.
+  This matches hardware capability exactly.
