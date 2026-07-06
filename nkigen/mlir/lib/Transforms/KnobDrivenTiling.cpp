@@ -466,8 +466,10 @@ void buildElementwiseTiling(OpBuilder &builder, Location loc,
   emitCacheAwarePromotion(builder, loc, tiledOp, numInputs, knob.caches);
 }
 
-/// Build tiling + output-only SBUF promotion for transpose operations.
-/// Input stays in its original mem_space (dma_transpose reads HBM directly).
+/// Build tiling + SBUF promotion for transpose operations.
+/// Both input and output are promoted to SBUF: the DMA copy stages the
+/// (possibly non-contiguous) source into contiguous SBUF, and the transpose
+/// engine operates entirely within SBUF.
 void buildTransposeTiling(OpBuilder &builder, Location loc,
                           Value moduleArg,
                           const std::string &opName,
@@ -482,6 +484,8 @@ void buildTransposeTiling(OpBuilder &builder, Location loc,
   Value tiledOp = emitTile(builder, loc, matched, knob.tileSize);
 
   int numInputs = knob.numDpsInputs >= 0 ? knob.numDpsInputs : 1;
+  for (int i = 0; i < numInputs; ++i)
+    emitPromoteOperand(builder, loc, tiledOp, i, sbufMemSpace);
   emitPromoteOperand(builder, loc, tiledOp, numInputs, sbufMemSpace);
 }
 

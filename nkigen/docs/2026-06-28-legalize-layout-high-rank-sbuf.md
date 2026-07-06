@@ -1,8 +1,10 @@
 # High-rank SBUF: LegalizeLayout + NISA emitter fixes
 
 **Date:** 2026-06-28
-**Status:** Problem 1 done (Steps 1–4). Problems 2–5 open.
-**Affects:** test_head_deconcat, test_qwen3_layer
+**Status:** Problem 1 done (Steps 1–4). Problem 2 reimplemented
+(2026-07-06) with explicit pack/split + 2D transpose lowering. Problems 3–5
+open (block test_qwen3_layer).
+**Affects:** test_head_deconcat (green), test_qwen3_layer (still blocked on 3–5)
 
 ## The IR these tests produce (after knob-driven-tiling)
 
@@ -304,136 +306,323 @@ helpers that only they used (`findLayoutForValue`, `getSbufMapFor`,
 `createBlockLoopNest`). Legalize keeps only phases 1–2 (attach `sbuf_map`)
 and the HBM-fill decomposition.
 
-## Problem 2: HBM→HBM transpose cannot use the DMA transpose engine
+## Problem 2: High-rank transpose is being forced through the 2D transpose engine
 
-Problems 2–5 in the original analysis were symptoms of one root cause:
-`buildTransposeTiling` unconditionally promotes the transpose output
-to SBUF and routes it through the DMA transpose engine. This is wrong
-for the head_deconcat case, where the transpose is HBM→HBM.
+The emitter's `_emit_transpose` currently lowers every `linalg.transpose` to
+`nisa.dma_transpose`. That is only a clean lowering for a true 2D tile. The
+head_deconcat transpose is rank 4:
 
-### Why the transpose engine doesn't work here
-
-The DMA transpose engine swaps partition and free lanes — a hardware
-operation that requires the two swapped axes to be **contiguous in
-memory** (they form the 2D tile the engine flips). In head_deconcat:
-
-```
-Input:  memref<2x2x128x128xf32, SharedHbm>
-Output: memref<2x128x2x128xf32, SharedHbm>
-Permutation: [0, 2, 1, 3]   (swap dims 1 and 2)
+```mlir
+linalg.transpose ins(%src: memref<2x2x128x128xf32>)
+                 outs(%dst: memref<2x128x2x128xf32>)
+                 permutation = [0, 2, 1, 3]
 ```
 
-After tiling, each tile is `[1, 2, 128, 1]` with permutation
-`[0, 2, 1, 3]`. The swapped axes have sizes 2 and 128, but they are
-NOT the partition/free axes of a 2D view — the engine sees them as
-(W, X) and rejects: `transposing dimensions (WX) should be continuous`.
+Trying to make this look like a 2D transpose by picking two surviving dims is
+the wrong abstraction. It makes one test green, but the rule depends on which
+logical dims happen to be last in the output and does not generalize to other
+permutations.
 
-This is fundamental. No amount of emitter hacking can fix it — the
-hardware path physically cannot execute this permutation.
+### Rejected 2026-07-04 attempt
 
-### What `buildTransposeTiling` does today (wrong for HBM→HBM)
+The 2026-07-04 uncommitted fix made `test_head_deconcat` green by combining:
 
-```cpp
-// KnobDrivenTiling.cpp:471-486
-void buildTransposeTiling(...) {
-  Value matched = emitMatch(...);
-  Value tiledOp = emitTile(...);
-  emitPromoteOperand(builder, loc, tiledOp, numInputs, sbufMemSpace);
-  //                                                   ^^^^^^^^^^^^
-  // Always promotes OUTPUT to SBUF — forces the transpose engine path
+1. `SimplifyLinalg::collapseUnitDimTransposes`, which rank-reduced tiled
+   high-rank transposes with unit dims.
+2. `KnobDrivenTiling::buildTransposeTiling` input promotion, so transpose input
+   tiles are staged into SBUF before the engine reads them.
+3. `InferLayout::defaultTileOps` high-rank heuristic: keep the output last dim
+   and one swapped dim, tile the rest to 1.
+
+Do **not** commit this as-is. The heuristic is output-oriented, while the
+copy-in hazard is source-oriented. For example, `perm=[2,0,1]` can infer an
+output tile `[1,2,4]`, which maps to an input tile `[2,4,1]`: the source
+stride-1 dim is tiled to 1, so the HBM copy-in is exactly the kind of strided
+middle-dim access the heuristic claimed to avoid. For `perm=[2,1,0]`, the
+heuristic can keep only one surviving dim and still let a high-rank transpose
+reach NISA as a 3D permutation over 2D operand strings.
+
+### Clean direction
+
+Do not add `collapseUnitDimTransposes` to `simplify-linalg`. That pass is the
+wrong ownership boundary for this issue, and the long-term goal is to remove or
+shrink it. Shape/view/index interpretation already belongs to the emitter.
+
+The cleaner invariant is:
+
+1. **`nisa.dma_transpose` is only for proven rank-2 transpose.** The emitter
+   should assert/reject anything else before producing NISA.
+2. **Rank >2 transpose lowers to loops around an effective-rank-2 inner op.**
+   Pick two logical output dims to keep live (prefer the dimensions actually
+   moved by the permutation), tile all other dims to 1, and loop over them.
+3. **The effective-rank-2 inner op is either copy or transpose.** If the reduced
+   permutation is identity, emit a copy. If it is `[1,0]`, stage into 2D SBUF
+   and emit `nisa.dma_transpose`.
+4. **Staging must be legal, not heuristic.** If the HBM/SBUF view cannot be
+   represented by the current 2D `view()` syntax, lower through an explicit
+   pack/unpack sequence or fail clearly. Do not silently flatten a strided
+   middle dimension as if it were contiguous.
+
+For head_deconcat, the intuitive target tile is the actual swapped pair:
+`[1,128,2,1]` on the output. The matching source tile is `[1,2,128,1]`.
+After dropping unit dims, this is a real 2D transpose:
+
+```
+source live shape: [2, 128]    // head, seq
+dest live shape:   [128, 2]    // seq, head
+reduced perm:      [1, 0]
+```
+
+That is the clean logical model. The important catch is physical staging:
+`[1,2,128,1]` reads source dims `head` and `seq` while `head_dim` is fixed, so
+the `seq` lane has stride 128 in HBM. The current emitter's 2D `view()` syntax
+cannot express a column stride of 128; it would incorrectly read contiguous
+`head_dim` elements. Therefore Option B is clean only if the implementation also
+adds a correct pack step for this strided HBM source tile.
+
+### Mental model: loop + copy vs loop + transpose
+
+A high-rank transpose is a loop nest around smaller data movements. The inner
+movement can be either a copy or a true 2D transpose, depending on how many dims
+are still live inside the tile.
+
+**Case A: effective-rank 1 tile -> copy.** This is legal and useful, but it is
+not the complete target if we want a real high-rank transpose lowering.
+
+```mlir
+// Logical op:
+//   out[b, s, h, d] = in[b, h, s, d]
+//   perm = [0, 2, 1, 3]
+
+// Pick an output tile with one live dim: [1, 128, 1, 1].
+// The matching source tile is [1, 1, 128, 1].
+scf.for %b = 0 to 2 {
+  scf.for %h = 0 to 2 {
+    scf.for %d = 0 to 128 {
+      %src = memref.subview %in[%b, %h, 0, %d]
+             [1, 1, 128, 1] [1, 1, 1, 1]
+      %tmp_in = memref.alloc() : memref<1x1x128x1xf32, Sbuf>
+      linalg.copy ins(%src) outs(%tmp_in)        // HBM -> SBUF
+
+      %tmp_out = memref.alloc() : memref<1x128x1x1xf32, Sbuf>
+      linalg.transpose ins(%tmp_in) outs(%tmp_out)
+          permutation = [0, 2, 1, 3]
+
+      // Emitter sees only one non-unit dim in tmp_in/tmp_out, so this
+      // "transpose" is just a tensor_copy, not nisa.dma_transpose.
+
+      %dst = memref.subview %out[%b, 0, %h, %d]
+             [1, 128, 1, 1] [1, 1, 1, 1]
+      linalg.copy ins(%tmp_out) outs(%dst)       // SBUF -> HBM
+    }
+  }
 }
 ```
 
-Compare with `buildElementwiseTiling` (line 461):
-```cpp
-if (opName == "linalg.copy")
-  return;  // skips SBUF promotion — DMA copy addresses HBM directly
+Only `%s` varies inside the tile. There is no pair of dimensions to swap, so
+using the transpose engine would be unnecessary. This is simple and robust, but
+it gives up the natural 2D transpose over `seq x head`.
+
+**Case B: effective-rank 2 tile -> 2D transpose.** This is the clean complete
+target, provided pack/unpack preserves the real source and destination strides.
+
+```mlir
+// Pick output tile [1, 128, 2, 1].
+// Matching source tile is [1, 2, 128, 1].
+%src = memref.subview %in[%b, 0, 0, %d] [1, 2, 128, 1] [1, 1, 1, 1]
+%dst = memref.subview %out[%b, 0, 0, %d] [1, 128, 2, 1] [1, 1, 1, 1]
+
+// After ignoring unit dims, this is a real 2D transpose:
+//   source live shape: [2, 128]
+//   dest live shape:   [128, 2]
+//   reduced perm:      [1, 0]
+linalg.transpose ins(%src_2d) outs(%dst_2d) permutation = [1, 0]
 ```
 
-The copy path is already proven: tiled `linalg.copy` emits
-`nisa.dma_copy` with strided addressing (arbitrary access patterns,
-no contiguity constraint). The transpose engine is only needed when
-you want to physically reorder data **within SBUF** as a staging step
-before compute (e.g., matmul `transpose_a`).
-
-### The clean fix: lower HBM→HBM transpose to permuted-view + copy
-
-When both source and destination are in HBM, the transpose doesn't
-need to physically move data through the engine. It just needs to
-read elements in permuted order and write them contiguously (or
-vice-versa). The DMA copy engine handles this via strided addressing.
-
-**Lowering:**
-```
-linalg.transpose ins(%src: HBM) outs(%dst: HBM) perm=[0,2,1,3]
-```
-becomes:
-```
-%permuted_view = memref.transpose %src by perm [0,2,1,3]
-    : memref<2x2x128x128, HBM> → memref<2x128x2x128, strided, HBM>
-linalg.copy ins(%permuted_view) outs(%dst)
-```
-
-`memref.transpose` is a zero-cost op — same memory, permuted strides.
-`linalg.copy` from a strided source to a contiguous destination is
-exactly what `nisa.dma_copy` does: it reads via the strided pattern
-and writes contiguously.
-
-**Where to implement:** A new pattern in `KnobDrivenTiling.cpp` (or
-a small pre-pass) that rewrites `linalg.transpose` whose **output is
-HBM** into `memref.transpose` + `linalg.copy`. The resulting copy
-then flows through `buildElementwiseTiling` (which skips SBUF
-promotion for copies) and the existing emitter handles it.
-
-`buildTransposeTiling` remains for the SBUF-output case (matmul LHS
-staging), where the engine IS correct.
-
-### What this deletes from emit.py
-
-All the hacky emitter workarounds for the "4D transpose through
-engine" path go away:
-
-- `_reduce_permutation_2d` — only served the engine path
-- `_free_dim_stride` / `128*d1` stride hack — only served the engine
-- Modified `_emit_transpose` logic for high-rank — unnecessary when
-  HBM→HBM never reaches the transpose emitter
-
-What STAYS (these fix real, independent bugs):
-- `_trace_access` stopping at rank-changing `reinterpret_cast` —
-  correct invariant for any high-rank DMA (the copy path uses this)
-- `_resolve_materialized` — correct for any view-op chain
-- 5-tuple return + `crossed_reshape` / view logic — needed whenever
-  the emitter sees a `reinterpret_cast` it didn't materialize
+This requires careful staging and reduced-rank indexing. The rejected
+2026-07-04 patch tried to get here through heuristic tile selection, but it did
+not implement the missing strided pack correctly. The complete fix should make
+this path explicit: pack the strided high-rank source tile into contiguous 2D
+SBUF, run the 2D transpose, then unpack/copy to the high-rank destination tile.
 
 ### Implementation plan
 
-1. **Detect HBM→HBM transpose:** In `KnobDrivenTiling`, before
-   dispatch (line 703), check if the matched transpose has its output
-   in HBM (not SBUF). This is exactly the case where InferLayout
-   assigned SharedHbm via `getViewMemSpace` (Problem 1 fix).
+1. **Back out/rework the 2026-07-04 code changes**:
+   - replace the output-last-dim heuristic in `InferLayout.cpp`.
+   - keep `KnobDrivenTiling.cpp` input staging; it provides the pack buffer.
+   - remove `SimplifyLinalg.cpp::collapseUnitDimTransposes`.
 
-2. **Lower to permuted-view + copy:** Emit a transform sequence:
-   - Match the `linalg.transpose`
-   - Rewrite to `memref.transpose %src` + `linalg.copy`
-   - The copy inherits the knob's tile_size
-   - Route through `buildElementwiseTiling` (skip promotion)
+2. **Change high-rank transpose default tiling** in `InferLayout::defaultTileOps`:
+   - rank <= 2: keep the existing 2D tile behavior.
+   - rank > 2: choose two live output dims from the permutation's moved dims,
+     capped by the target limits, and set all other dims to 1.
+   - For head_deconcat `[0,2,1,3]`, this should pick output dims 1 and 2,
+     producing `[1,128,2,1]`.
 
-3. **Delete emitter hacks:** Remove `_reduce_permutation_2d`,
-   `_free_dim_stride`, and the high-rank engine path from
-   `_emit_transpose`.
+3. **Lower high-rank transpose explicitly as pack -> 2D op -> unpack.**
+   - Pack reads the high-rank source tile with correct strides into contiguous
+     2D SBUF. In the current implementation this is the promoted input
+     `linalg.copy`, and the NISA emitter recursively splits unsafe HBM `view()`
+     copies into safe 1D DMA slices.
+   - The inner 2D op is `dma_transpose` for reduced perm `[1,0]`, or copy for
+     reduced identity.
+   - Unpack writes the contiguous 2D result to the high-rank destination tile
+     with correct strides, using the same recursive copy splitting.
 
-4. **InferLayout fix stays:** `getViewMemSpace` correctly assigns
-   SharedHbm to the 4D output alloc, which is what triggers the
-   HBM→HBM detection in step 1.
+4. **Make `_emit_transpose` strict.**
+   - Raw `nisa.dma_transpose` emission accepts only rank-2 operands.
+   - Any high-rank transpose that was not lowered through the explicit pack path
+     is a compile error.
 
-### Why this is clean
+5. **Keep `simplify-linalg` out of this.** Do not add
+   `collapseUnitDimTransposes`; the lowering belongs either in the tiling/DMA
+   canonicalization path or in the emitter where physical indexing is known.
 
-- **One principle:** transpose engine for SBUF staging (compute
-  prep), DMA copy for bulk data movement (HBM↔HBM).
-- **No emitter hacks:** the copy emitter already handles arbitrary
-  strided patterns.
-- **Correct by construction:** `memref.transpose` is a view (no
-  codegen), `linalg.copy` is proven.
-- **Breaking change is fine:** `buildTransposeTiling` only routes
-  SBUF-output cases to the engine; all other transposes become copies.
-  This matches hardware capability exactly.
+6. **Add focused tests before re-running e2e**:
+   - head_deconcat infers `[1,128,2,1]`.
+   - head_deconcat emits pack + 2D `dma_transpose` + unpack, not a raw high-rank
+     `dma_transpose`.
+   - a rank-3 cycle such as `perm=[2,0,1]` also lowers via the same explicit
+     pack path or fails clearly if no legal two-dim tile is selected.
+
+**Implemented 2026-07-06.** The current lowering for head_deconcat is shown
+below. Important: `nkipy.tile_op` is a top-level annotation. The
+`knob-driven-tiling` and `linalg-to-nisa` snippets are the body of one tiled
+iteration; the real IR has outer `scf.for` loops around them.
+
+```mlir
+// infer-layout: top-level annotation, not executable loop-body IR.
+nkipy.tile_op(%transpose_out) {loop_tile_size = array<i64: 1, 128, 2, 1>}
+
+// knob-driven-tiling: outer tile loops are generated from the tile_op.
+scf.for %b = 0 to 2 step 1 {
+  scf.for %s0 = 0 to 128 step 128 {
+    scf.for %h0 = 0 to 2 step 2 {
+      scf.for %d = 0 to 128 step 1 {
+        // This is the tile-loop body.
+        %src_tile = subview %in[%b, %h0, %s0, %d] [1,2,128,1]
+        %pack = memref.alloc() : memref<1x2x128x1xf32, Sbuf>
+        linalg.copy ins(%src_tile) outs(%pack)
+
+        %transposed = memref.alloc() : memref<1x128x2x1xf32, Sbuf>
+        linalg.transpose ins(%pack) outs(%transposed) perm=[0,2,1,3]
+
+        %dst_tile = subview %out[%b, %s0, %h0, %d] [1,128,2,1]
+        linalg.copy ins(%transposed) outs(%dst_tile)
+      }
+    }
+  }
+}
+
+// linalg-to-nisa emitter: same tile-loop body after lowering.
+scf.for %b = ... {
+  ...
+    // pack copy is split because source seq has HBM stride 128.
+    scf.for %seq = ... {
+      nisa.dma_copy(...)        // safe [2,1] slice
+    }
+
+    nisa.dma_transpose(..., permutation=[1, 0])
+
+    // unpack copy is split because destination head has HBM stride 128.
+    scf.for %head = ... {
+      nisa.dma_copy(...)        // safe [128,1] slice
+    }
+  ...
+}
+```
+
+Validation:
+- `pytest tests/passes/infer_layout`
+- `pytest tests/passes/linalg_to_nisa`
+- `pytest tests/passes/knob_driven_tiling`
+- `pytest tests/e2e/test_head_deconcat.py::test_head_deconcat`
+
+**Rejected: the LegalizeLayout "default-tile fallback."** An earlier attempt made
+`legalize-layout` invent a default tile (`[min(d0,128), d1, ...]`) for an SBUF
+alloc missing `tile_size`, instead of erroring. This was backed out: it does not
+fix anything and is actively harmful. Its only effect was to shove
+`test_qwen3_layer` past legalize-layout, where it then produced silently-wrong
+output (see below) instead of a clear compile error. Legalize keeps its honest
+`missing tile_size` error.
+
+### What remains for test_qwen3_layer (Problems 3–5, not Problem 2)
+
+qwen3 does **not** fail on the transpose-emitter issue; Problem 2 is not its
+blocker. Two separate, pre-existing issues remain, both independent of the work
+above:
+
+1. **Genuine high-rank SBUF alloc that legalize can't tile.** The K-reshape
+   staging buffer lowers to `%alloc = memref<4x128x128xf32, Sbuf>` with **dim0 =
+   4** (batch·heads, *not* a 128 partition) and no `tile_size`. `legalize-layout`
+   correctly errors (`missing tile_size on nkipy.layout`). This is the exact
+   class of bug Problems 3–5 are about: a rank-3+ SBUF buffer whose leading dim
+   is not the partition dim. It needs a real layout decision (fold dim0 into the
+   partition/free map), not a papered-over default tile.
+
+2. **A pre-existing numerical divergence upstream of legalize.** Even before the
+   alloc above is reached, qwen3 diverges from the NumPy reference. Confirmed by
+   running the kernel through the LLVM-JIT at every pass boundary (fixed seed),
+   on the **clean HEAD** with none of the Problem 2 changes applied:
+
+   ```
+   canonicalize-compute        max_rel 0.0000  PASS
+   infer-layout                max_rel 0.0000  PASS
+   canonicalize-partition-dim  max_rel 0.5091  FAIL   <-- divergence starts here
+   …
+   canonicalize-reshape        max_rel 0.9996  FAIL   <-- and worsens here
+   legalize-layout             (clean: compile error; identical garbage otherwise)
+   ```
+
+   Both diverging passes (`canonicalize-partition-dim`, `canonicalize-reshape`)
+   are **untouched** by the Problem 2 work, and the numbers are bit-identical
+   with and without it. The reason this never showed before is that qwen3's
+   `stop_after="insert-memref-dealloc"` LLVM check was unreachable — compilation
+   died earlier at legalize. So this is a *latent* pre-existing bug, now visible
+   only if issue (1) is bypassed. It belongs to whoever fixes the multi-head
+   reshape/transpose layout (Problems 3–5), not to Problem 2.
+
+**Repro for the numerical bisection:** run the traced qwen3 kernel through
+`compile_knob_pipeline(traced, stop_after=<pass>)` + `LLVMModule` for each pass in
+`nkigen/driver/pipeline.py`, comparing to `traced.__wrapped__(*inputs)` under a
+fixed `np.random.seed`. Divergence localizes to the two passes above.
+
+---
+
+## Follow-up refactor: group DMA-related rewrites into `canonicalize-dma`
+
+After Problem 2 is fixed, `canonicalize-dma` should become the home
+for all DMA/data-movement canonicalization. Move into it:
+
+```
+canonicalize-dma:
+  1. decomposeHbmFills       — fill on HBM → fill SBUF tile + copy (from legalize-layout)
+  2. materializeCopies       — alloc+copy for cross-space views (from canonicalize-reshape)
+  3. materializeReturnCopies — SBUF return value → insert SBUF→HBM copy (from infer-layout)
+```
+
+Then delete `canonicalize-reshape` (empty after moving
+`materializeCopies`). Move `applyMemSpaceAnnotations` from
+`canonicalize-reshape` to `legalize-layout`.
+
+Final shapes:
+
+```
+infer-layout (Phase 1, pure annotation):
+  1. propagateAnnotations  — propagate tile_size/mem_space from knobs
+  2. defaultTileOps        — auto-annotate unannotated ops
+  3. defaultLayouts        — assign mem_space to allocs
+
+canonicalize-dma (Phase 1, after infer-layout):
+  1. decomposeHbmFills
+  2. materializeCopies
+  3. materializeReturnCopies
+
+legalize-layout (Phase 4, after fusion):
+  1. applyMemSpaceAnnotations  — stamp nkipy.layout mem_space onto memref types
+  2. attachSbufMapAttrs        — physical SBUF tile layout (#nkipy.sbuf_map)
+  3. eraseAllLayoutOps         — consume annotation markers
+```
+
+This is a pure refactor — no behavior change, just code motion.
+Do it after Problem 2 is verified green.

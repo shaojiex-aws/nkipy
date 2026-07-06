@@ -47,6 +47,15 @@ _ARITH_BODY_TO_OP = {
     "arith.minimumf": "min",
 }
 
+_AccessTrace = tuple[str, list[str], list[int], up_ir.Type, up_ir.Type]
+
+
+def _first_non_unit_dim(shape: list[int]) -> int:
+    for i, size in enumerate(shape):
+        if size > 1:
+            return i
+    return 0
+
 
 class NisaEmitter:
     """Walks nkipy IR top-down and emits NISA MLIR text."""
@@ -300,10 +309,10 @@ class NisaEmitter:
 
     # -- access tracing --
 
-    def _trace_access(self, val: up_ir.Value) -> tuple[str, list[str], list[int], up_ir.Type]:
+    def _trace_access(self, val: up_ir.Value) -> _AccessTrace:
         """Trace a memref value back to its base, collecting offsets.
 
-        Returns (base_name, offset_exprs, tile_shape, base_type).
+        Returns (base_name, offset_exprs, tile_shape, base_type, view_type).
         """
         base = val
         offsets: list[str | None] = None
@@ -440,6 +449,13 @@ class NisaEmitter:
         return result
 
     def _operand_str(self, val: up_ir.Value, prefix: str) -> str:
+        return self._operand_str_from_trace(self._trace_access(val), prefix)
+
+    def _operand_str_from_trace(
+        self,
+        trace: _AccessTrace,
+        prefix: str,
+    ) -> str:
         """Build operand string: prefix<tile_shape>=memloc_ref[subscripts]
 
         BIR requires dma_copy src/dst to have matching rank. Since SBUF is
@@ -447,8 +463,7 @@ class NisaEmitter:
         - SBUF/PSUM: emitted type is already 2D, no view() needed
         - HBM: uses view() to reinterpret the >2D memref as 2D
         """
-        base_name, offsets, tile_shape, base_type, view_type = \
-            self._trace_access(val)
+        base_name, offsets, tile_shape, base_type, view_type = trace
         ms = irutils.memref_memspace(base_type)
         is_onchip = ms in (irutils.MEMSPACE_SBUF, irutils.MEMSPACE_PSUM)
         base_shape = list(up_ir.MemRefType(base_type).shape)
@@ -471,11 +486,7 @@ class NisaEmitter:
                 first_accessed = len(offsets) - len(tile_shape)
             else:
                 # Same rank — find first tile dim > 1 (skip unit dims).
-                first_accessed = 0
-                for i, t in enumerate(tile_shape):
-                    if t > 1:
-                        first_accessed = i
-                        break
+                first_accessed = _first_non_unit_dim(tile_shape)
 
             # Tile row/col dims: when rank-reduced, tile[0] is the row.
             # When same rank, first_accessed skips leading unit dims.
@@ -583,6 +594,110 @@ class NisaEmitter:
         memloc_ref = f"{self._memref_type_str_nisa(base_type)} {base_name}"
         return f"{prefix}<{tile_str}>={memloc_ref}[{', '.join(dims)}]"
 
+    def _copy_split_dim(
+        self,
+        trace: _AccessTrace,
+    ) -> int | None:
+        """Return a tile dim to split before using the 2D HBM view() path.
+
+        The view() path flattens all dimensions after the row dimension into one
+        free span. That is valid only when the varying free dims form a
+        contiguous suffix of the source view. If a middle free dim varies while a
+        later physical dim is fixed, split that middle dim and recurse.
+        """
+        _, offsets, tile_shape, base_type, view_type = trace
+        if not irutils.is_hbm(base_type):
+            return None
+
+        base_shape = list(up_ir.MemRefType(base_type).shape)
+        crossed_reshape = list(up_ir.MemRefType(view_type).shape) != base_shape
+        if len(base_shape) <= 2 and not crossed_reshape:
+            return None
+        if len(offsets) != len(tile_shape) or len(base_shape) != len(tile_shape):
+            return None
+
+        first_accessed = _first_non_unit_dim(tile_shape)
+
+        suffix_full = True
+        for dim in range(len(tile_shape) - 1, first_accessed, -1):
+            if tile_shape[dim] > 1 and not suffix_full:
+                return dim
+            if tile_shape[dim] != base_shape[dim]:
+                suffix_full = False
+        return None
+
+    def _trace_with(
+        self,
+        trace: _AccessTrace,
+        offsets: list[str],
+        tile_shape: list[int],
+    ) -> _AccessTrace:
+        base_name, _, _, base_type, view_type = trace
+        return base_name, offsets, tile_shape, base_type, view_type
+
+    def _emit_copy_from_traces(
+        self,
+        src_trace: _AccessTrace,
+        dst_trace: _AccessTrace,
+    ) -> None:
+        src_shape = list(src_trace[2])
+        dst_shape = list(dst_trace[2])
+        split_dim = self._copy_split_dim(src_trace)
+        if split_dim is None:
+            split_dim = self._copy_split_dim(dst_trace)
+
+        if split_dim is not None and split_dim < len(src_shape):
+            extent = src_shape[split_dim]
+            if extent > 1:
+                zero = self._emit_const_index(0)
+                upper = self._emit_const_index(extent)
+                one = self._emit_const_index(1)
+                iv = self._fresh("iv")
+                self._line(f"scf.for {iv} = {zero} to {upper} step {one} {{")
+                self._indent += 1
+
+                next_src_offsets = list(src_trace[1])
+                next_dst_offsets = list(dst_trace[1])
+                next_src_offsets[split_dim] = self._emit_addi(
+                    next_src_offsets[split_dim], iv)
+                next_dst_offsets[split_dim] = self._emit_addi(
+                    next_dst_offsets[split_dim], iv)
+
+                next_src_shape = list(src_shape)
+                next_dst_shape = list(dst_shape)
+                next_src_shape[split_dim] = 1
+                next_dst_shape[split_dim] = 1
+
+                self._emit_copy_from_traces(
+                    self._trace_with(src_trace, next_src_offsets, next_src_shape),
+                    self._trace_with(dst_trace, next_dst_offsets, next_dst_shape),
+                )
+
+                self._indent -= 1
+                self._line("}")
+                return
+
+        dst_str = self._operand_str_from_trace(dst_trace, "dst")
+        src_str = self._operand_str_from_trace(src_trace, "src")
+        src_is_hbm = irutils.is_hbm(src_trace[3])
+        dst_is_hbm = irutils.is_hbm(dst_trace[3])
+
+        if src_is_hbm or dst_is_hbm:
+            self._line(
+                f"nisa.dma_copy({dst_str}, {src_str}, "
+                f"dge_mode=unassigned, oob_is_err=true) engine=dma"
+            )
+        else:
+            self._line(
+                f"nisa.tensor_copy({dst_str}, {src_str}) engine=vector"
+            )
+
+    def _emit_copy_values(self, src: up_ir.Value, dst: up_ir.Value) -> None:
+        self._emit_copy_from_traces(
+            self._trace_access(src),
+            self._trace_access(dst),
+        )
+
     def _linearize_offsets(self, offsets: list[str],
                            dim_sizes: list[int]) -> str:
         """Linearize N free-dim offsets into one: off[0]*stride[0] + ... + off[N-1].
@@ -666,9 +781,8 @@ class NisaEmitter:
         dst = op.operands[1]
         src_ms = irutils.memref_memspace(src.type)
         dst_ms = irutils.memref_memspace(dst.type)
-
-        src_is_hbm = src_ms in (irutils.MEMSPACE_HBM, irutils.MEMSPACE_SHARED_HBM)
-        dst_is_hbm = dst_ms in (irutils.MEMSPACE_HBM, irutils.MEMSPACE_SHARED_HBM)
+        src_is_hbm = irutils.is_hbm(src.type)
+        dst_is_hbm = irutils.is_hbm(dst.type)
 
         if dst_ms == irutils.MEMSPACE_PSUM and src_is_hbm:
             # HBM -> psum: stage through sbuf
@@ -683,19 +797,13 @@ class NisaEmitter:
         if both_hbm:
             dst_str = self._operand_str_multidim(dst, "dst")
             src_str = self._operand_str_multidim(src, "src")
-        else:
-            dst_str = self._operand_str(dst, "dst")
-            src_str = self._operand_str(src, "src")
-
-        if src_is_hbm or dst_is_hbm:
             self._line(
                 f"nisa.dma_copy({dst_str}, {src_str}, "
                 f"dge_mode=unassigned, oob_is_err=true) engine=dma"
             )
-        else:
-            self._line(
-                f"nisa.tensor_copy({dst_str}, {src_str}) engine=vector"
-            )
+            return
+
+        self._emit_copy_values(src, dst)
 
     def _emit_staged_copy(self, src, dst, direction: str) -> None:
         """Stage a copy through an sbuf intermediate (psum<->HBM)."""
@@ -745,18 +853,81 @@ class NisaEmitter:
             )
         self._line(f"nisa.release {tmp} : {sbuf_ty}")
 
+    def _reduced_transpose_permutation(
+        self,
+        src_shape: list[int],
+        dst_shape: list[int],
+        permutation: list[int],
+    ) -> list[int]:
+        src_live = [i for i, size in enumerate(src_shape) if size != 1]
+        dst_live = [i for i, size in enumerate(dst_shape) if size != 1]
+        if len(src_live) != len(dst_live):
+            raise RuntimeError(
+                "Cannot lower transpose with different live source/dest ranks: "
+                f"src={src_shape}, dst={dst_shape}, perm={permutation}"
+            )
+
+        reduced = []
+        for dst_dim in dst_live:
+            src_dim = permutation[dst_dim]
+            if src_dim not in src_live:
+                raise RuntimeError(
+                    "Cannot lower transpose whose live output dim maps to a "
+                    f"unit source dim: src={src_shape}, dst={dst_shape}, "
+                    f"perm={permutation}"
+                )
+            reduced.append(src_live.index(src_dim))
+        return reduced
+
     def _emit_transpose(self, op: up_ir.Operation) -> None:
         src = op.operands[0]
         dst = op.operands[1]
         permutation = [int(x) for x in op.attributes["permutation"]]
+        src_shape = list(up_ir.MemRefType(src.type).shape)
+        dst_shape = list(up_ir.MemRefType(dst.type).shape)
+
+        high_rank = len(src_shape) > 2 or len(dst_shape) > 2
+        if high_rank:
+            if (not irutils.is_on_chip(src.type) or
+                    not irutils.is_on_chip(dst.type)):
+                raise RuntimeError(
+                    "High-rank transpose must be staged through on-chip buffers "
+                    f"before NISA lowering: src={src_shape}, dst={dst_shape}, "
+                    f"perm={permutation}"
+                )
+            reduced = self._reduced_transpose_permutation(
+                src_shape, dst_shape, permutation)
+            if len(reduced) > 2:
+                raise RuntimeError(
+                    "High-rank transpose must be tiled to effective rank <= 2 "
+                    f"before NISA lowering: src={src_shape}, dst={dst_shape}, "
+                    f"perm={permutation}, reduced={reduced}"
+                )
+            if reduced == list(range(len(reduced))):
+                self._emit_copy_values(src, dst)
+                return
+            if reduced != [1, 0]:
+                raise RuntimeError(
+                    "NISA dma_transpose only supports reduced permutation [1,0]: "
+                    f"src={src_shape}, dst={dst_shape}, perm={permutation}, "
+                    f"reduced={reduced}"
+                )
+            permutation = reduced
+        elif permutation == [0, 1]:
+            self._emit_copy_values(src, dst)
+            return
+
+        if len(permutation) != 2 or permutation != [1, 0]:
+            raise RuntimeError(
+                "NISA dma_transpose only supports rank-2 permutation [1,0]: "
+                f"src={src_shape}, dst={dst_shape}, perm={permutation}"
+            )
 
         dst_str = self._operand_str(dst, "dst")
         src_str = self._operand_str(src, "src")
-
-        perm_str = ", ".join(str(p) for p in permutation)
         self._line(
             f"nisa.dma_transpose({dst_str}, {src_str}, "
-            f"permutation=[{perm_str}], dge_mode=no_dge, oob_is_err=true) engine=dma"
+            "permutation=[1, 0], dge_mode=no_dge, oob_is_err=true) engine=dma"
         )
 
     # -- compute: elementwise --

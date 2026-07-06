@@ -252,16 +252,38 @@ struct NkipyInferLayoutPass : public InferLayoutBase<NkipyInferLayoutPass> {
         for (int64_t i = 1; i < inType.getRank(); i++)
           tile.push_back(shape[i]);
       } else if (isa<linalg::TransposeOp>(linalgOp.getOperation())) {
-        // Transpose: tile identity dims to 1, keep swapped dims full.
+        // Transpose: 2D transposes stay 2D. Higher-rank transposes are
+        // lowered as loops around an effective 2D inner op, so keep two
+        // moved output dims live and tile the rest to 1.
         auto outType = cast<MemRefType>(outVal.getType());
         auto shape = outType.getShape();
         auto transposeOp = cast<linalg::TransposeOp>(linalgOp.getOperation());
         auto perm = transposeOp.getPermutation();
-        for (int64_t i = 0; i < outType.getRank(); i++) {
-          if (perm[i] == i)
-            tile.push_back(1);  // identity dim → tile to 1
-          else
-            tile.push_back(shape[i]);  // swapped dim → full
+
+        if (outType.getRank() <= 2) {
+          for (int64_t i = 0; i < outType.getRank(); i++)
+            tile.push_back(std::min(shape[i], partCap));
+        } else {
+          SmallVector<unsigned> movedDims;
+          for (unsigned i = 0; i < (unsigned)outType.getRank(); i++)
+            if (perm[i] != i)
+              movedDims.push_back(i);
+
+          // Keep the two largest moved output dims. For head_deconcat
+          // perm=[0,2,1,3], this keeps seq and head: [1,128,2,1].
+          SmallVector<bool> keep(outType.getRank(), false);
+          for (unsigned selected = 0; selected < 2 && !movedDims.empty();
+               selected++) {
+            unsigned bestPos = 0;
+            for (unsigned pos = 1; pos < movedDims.size(); pos++)
+              if (shape[movedDims[pos]] > shape[movedDims[bestPos]])
+                bestPos = pos;
+            keep[movedDims[bestPos]] = true;
+            movedDims.erase(movedDims.begin() + bestPos);
+          }
+
+          for (int64_t i = 0; i < outType.getRank(); i++)
+            tile.push_back(keep[i] ? std::min(shape[i], partCap) : 1);
         }
       }
 

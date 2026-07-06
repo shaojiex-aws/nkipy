@@ -280,8 +280,6 @@ struct SimplifyLinalgPass
     func::FuncOp func = getOperation();
 
     canonicalizeTrivialBroadcastGenerics(func);
-
-    // Replace SBUF gather operands with HBM originals for dma_copy_indirect
     prepareGatherForNisaLowering(func);
   }
 };
