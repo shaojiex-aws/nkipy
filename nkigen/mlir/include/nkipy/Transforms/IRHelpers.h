@@ -7,10 +7,12 @@
 #ifndef NKIPY_TRANSFORMS_IRHELPERS_H
 #define NKIPY_TRANSFORMS_IRHELPERS_H
 
+#include "mlir/IR/Block.h"
 #include "mlir/IR/Dialect.h"
 #include "mlir/IR/Operation.h"
 #include "mlir/IR/Value.h"
 #include "nkipy/Dialect/NkipyAttrs.h"
+#include "llvm/ADT/SetVector.h"
 #include <optional>
 
 namespace mlir {
@@ -36,6 +38,14 @@ std::optional<int64_t> getConstantInt(Value v);
 /// Walk through view chains (subview, collapse_shape, expand_shape, etc.)
 /// to find the base memref allocation. Uses ViewLikeOpInterface.
 Value getBaseMemRef(Value v);
+
+/// Collect `base` and all memref values derived from it via view-like ops.
+void collectMemRefAliases(Value base, llvm::SetVector<Value> &aliases);
+
+/// Find the last operation in `buffer`'s definition block after which all
+/// nested DPS writes to `buffer` or any of its view aliases have completed.
+/// Returns nullptr if no writer is found.
+Operation *findWriteCompletionOp(Value buffer);
 
 /// Extract the nkipy memory space kind from a memref type, if present.
 /// Returns std::nullopt if the type is not a memref or has no nkipy mem space.

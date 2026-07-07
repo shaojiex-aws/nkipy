@@ -23,6 +23,7 @@
 #include "PassGen.h"
 #include "nkipy/Transforms/Passes.h"
 #include "nkipy/Transforms/HardwareConstants.h"
+#include "nkipy/Transforms/IRHelpers.h"
 #include "nkipy/Transforms/OpClassification.h"
 #include "nkipy/Dialect/NkipyAttrs.h"
 #include "nkipy/Dialect/NkipyDialect.h"
@@ -391,10 +392,12 @@ struct NkipyCanonicalizePartitionDimPass
       SmallVector<int64_t> newShape =
           permuteVector<int64_t>(inputType.getShape(), perm);
 
-      // Insert the transpose just before the first component op that reads
-      // `input`, so the source buffer is already populated.
-      if (linalg::LinalgOp producer = findProducerLinalgOp(input))
-        builder.setInsertionPointAfter(producer.getOperation());
+      // Insert the transpose after the source buffer is fully populated.
+      // A boundary input may be written through subviews inside loop nests
+      // (e.g. batch_matmul decomposition), so the completion point can be an
+      // enclosing scf.for rather than a direct linalg producer.
+      if (Operation *writer = findWriteCompletionOp(input))
+        builder.setInsertionPointAfter(writer);
       else if (input.getDefiningOp())
         builder.setInsertionPointAfter(input.getDefiningOp());
       else

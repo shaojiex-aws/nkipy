@@ -319,6 +319,38 @@ static LogicalResult decomposeOneBatchMatmul(linalg::BatchMatmulOp bmmOp) {
                                     lay.getPartitionDimAttr(), innerTs);
   }
 
+  // Re-annotate the base output alloc so downstream passes (infer-layout,
+  // legalize-layout) see it with the correct mem_space and tile_size.
+  // Derive tile from layout's tile_size or from tile_op's loop_tile_size.
+  DenseI64ArrayAttr baseTileSize;
+  for (auto lay : layoutOps) {
+    if (auto ts = lay.getTileSizeAttr()) {
+      auto arr = ts.asArrayRef();
+      int64_t take = std::min((int64_t)arr.size(), (int64_t)initType.getRank());
+      baseTileSize = DenseI64ArrayAttr::get(bmmOp.getContext(),
+          SmallVector<int64_t>(arr.begin(), arr.begin() + take));
+      break;
+    }
+  }
+  if (!baseTileSize) {
+    for (auto t : tileOps) {
+      if (auto ts = t.getLoopTileSizeAttr()) {
+        auto arr = ts.asArrayRef();
+        int64_t take = std::min((int64_t)arr.size(), (int64_t)initType.getRank());
+        baseTileSize = DenseI64ArrayAttr::get(bmmOp.getContext(),
+            SmallVector<int64_t>(arr.begin(), arr.begin() + take));
+        break;
+      }
+    }
+  }
+
+  builder.setInsertionPointAfter(forOp);
+  for (auto lay : layoutOps) {
+    builder.create<nkipy::LayoutOp>(lay.getLoc(), init,
+                                    lay.getMemSpaceAttr(),
+                                    lay.getPartitionDimAttr(), baseTileSize);
+  }
+
   // Erase old annotations and the batch_matmul op.
   for (auto lay : layoutOps) lay.erase();
   for (auto t : tileOps) t.erase();

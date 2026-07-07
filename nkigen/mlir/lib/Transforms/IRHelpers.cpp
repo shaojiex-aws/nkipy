@@ -2,6 +2,7 @@
 
 #include "nkipy/Transforms/IRHelpers.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
+#include "mlir/Dialect/Linalg/IR/Linalg.h"
 #include "mlir/Dialect/MemRef/IR/MemRef.h"
 #include "mlir/Interfaces/ViewLikeInterface.h"
 
@@ -26,6 +27,49 @@ Value getBaseMemRef(Value v) {
     break;
   }
   return v;
+}
+
+void collectMemRefAliases(Value base, llvm::SetVector<Value> &aliases) {
+  if (!aliases.insert(base))
+    return;
+  for (Operation *user : base.getUsers()) {
+    auto view = dyn_cast<ViewLikeOpInterface>(user);
+    if (!view || user->getNumResults() == 0 || view.getViewSource() != base)
+      continue;
+    collectMemRefAliases(user->getResult(0), aliases);
+  }
+}
+
+Operation *findWriteCompletionOp(Value buffer) {
+  Block *defBlock = nullptr;
+  if (Operation *defOp = buffer.getDefiningOp())
+    defBlock = defOp->getBlock();
+  else
+    defBlock = buffer.getParentBlock();
+  if (!defBlock)
+    return nullptr;
+
+  llvm::SetVector<Value> aliases;
+  collectMemRefAliases(buffer, aliases);
+
+  Operation *last = nullptr;
+  for (Value alias : aliases) {
+    for (Operation *user : alias.getUsers()) {
+      auto linalgOp = dyn_cast<linalg::LinalgOp>(user);
+      if (!linalgOp)
+        continue;
+      bool writesAlias = llvm::any_of(linalgOp.getDpsInits(),
+                                      [&](Value init) { return init == alias; });
+      if (!writesAlias)
+        continue;
+      Operation *completion = getAncestorInBlock(user, defBlock);
+      if (!completion)
+        continue;
+      if (!last || last->isBeforeInBlock(completion))
+        last = completion;
+    }
+  }
+  return last;
 }
 
 std::optional<nkipy::MemSpaceEnum> getNkipyMemSpace(Type type) {

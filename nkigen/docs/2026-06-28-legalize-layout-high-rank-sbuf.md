@@ -1,10 +1,11 @@
 # High-rank SBUF: LegalizeLayout + NISA emitter fixes
 
 **Date:** 2026-06-28
-**Status:** Problem 1 done (Steps 1–4). Problem 2 reimplemented
-(2026-07-06) with explicit pack/split + 2D transpose lowering. Problems 3–5
-open (block test_qwen3_layer).
-**Affects:** test_head_deconcat (green), test_qwen3_layer (still blocked on 3–5)
+**Status:** Problems 1, 3, 4 done ✅. Problem 2 reimplemented (2026-07-06) with
+explicit pack/split + 2D transpose lowering — one emitter follow-up remains
+(rank-changing SBUF alias `view()`). Problem 5 not needed (resolved by 3+4).
+**Affects:** test_head_deconcat (green), test_qwen3_layer (passes through all
+C++ passes; blocked on linalg-to-nisa emitter for rank-changing SBUF aliases)
 
 ## The IR these tests produce (after knob-driven-tiling)
 
@@ -546,46 +547,120 @@ fix anything and is actively harmful. Its only effect was to shove
 output (see below) instead of a clear compile error. Legalize keeps its honest
 `missing tile_size` error.
 
-### What remains for test_qwen3_layer (Problems 3–5, not Problem 2)
+### What remains for test_qwen3_layer (Problems 3–5)
 
 qwen3 does **not** fail on the transpose-emitter issue; Problem 2 is not its
-blocker. Two separate, pre-existing issues remain, both independent of the work
-above:
+blocker. Three bugs remain, all triggered by the interaction between
+`batch_matmul` decomposition (in `canonicalize-compute`) and downstream passes.
 
-1. **Genuine high-rank SBUF alloc that legalize can't tile.** The K-reshape
-   staging buffer lowers to `%alloc = memref<4x128x128xf32, Sbuf>` with **dim0 =
-   4** (batch·heads, *not* a 128 partition) and no `tile_size`. `legalize-layout`
-   correctly errors (`missing tile_size on nkipy.layout`). This is the exact
-   class of bug Problems 3–5 are about: a rank-3+ SBUF buffer whose leading dim
-   is not the partition dim. It needs a real layout decision (fold dim0 into the
-   partition/free map), not a papered-over default tile.
+**Pass bisection (2026-07-07, clean HEAD):**
 
-2. **A pre-existing numerical divergence upstream of legalize.** Even before the
-   alloc above is reached, qwen3 diverges from the NumPy reference. Confirmed by
-   running the kernel through the LLVM-JIT at every pass boundary (fixed seed),
-   on the **clean HEAD** with none of the Problem 2 changes applied:
+```
+canonicalize-compute        max_rel 0.0000  PASS
+infer-layout                max_rel 0.0000  PASS
+canonicalize-partition-dim  max_rel 0.5033  FAIL   <-- numerical divergence
+…
+legalize-layout             ERROR: missing tile_size on nkipy.layout
+```
 
-   ```
-   canonicalize-compute        max_rel 0.0000  PASS
-   infer-layout                max_rel 0.0000  PASS
-   canonicalize-partition-dim  max_rel 0.5091  FAIL   <-- divergence starts here
-   …
-   canonicalize-reshape        max_rel 0.9996  FAIL   <-- and worsens here
-   legalize-layout             (clean: compile error; identical garbage otherwise)
-   ```
+**Repro:** run the qwen3 kernel through
+`compile_knob_pipeline(traced, stop_after=<pass>)` + `LLVMModule` for each pass,
+comparing to `traced.__wrapped__(*inputs)` under `np.random.seed(42)`.
 
-   Both diverging passes (`canonicalize-partition-dim`, `canonicalize-reshape`)
-   are **untouched** by the Problem 2 work, and the numbers are bit-identical
-   with and without it. The reason this never showed before is that qwen3's
-   `stop_after="insert-memref-dealloc"` LLVM check was unreachable — compilation
-   died earlier at legalize. So this is a *latent* pre-existing bug, now visible
-   only if issue (1) is bypassed. It belongs to whoever fixes the multi-head
-   reshape/transpose layout (Problems 3–5), not to Problem 2.
+---
 
-**Repro for the numerical bisection:** run the traced qwen3 kernel through
-`compile_knob_pipeline(traced, stop_after=<pass>)` + `LLVMModule` for each pass in
-`nkigen/driver/pipeline.py`, comparing to `traced.__wrapped__(*inputs)` under a
-fixed `np.random.seed`. Divergence localizes to the two passes above.
+#### Problem 3 ✅: `canonicalize-partition-dim` — transpose inserted before producer loop
+
+**Root cause:** `findProducerLinalgOp(input)` only finds direct DPS writers to a
+buffer. When `input` is written through subviews inside an `scf.for` loop (from
+`batch_matmul` decomposition), no direct linalg writer is found. The fallback
+places the boundary transpose after `input.getDefiningOp()` (the alloc), which
+is **before** the loop populates the buffer — transposing stale/zero data.
+
+**Concrete scenario:** In qwen3, the attention-scores matmul (Q×K^T) is a
+`batch_matmul` decomposed into:
+
+```mlir
+%alloc_45 = memref.alloc() : memref<4x128x128xf32>
+scf.for %i = 0 to 4 {
+  %sv = memref.subview %alloc_45[%i, 0, 0] [1,128,128] ...
+  linalg.matmul ... outs(%sv)           // writes per-batch results
+}
+// softmax reads %alloc_45 with partition_dim=1
+linalg.generic ins(%alloc_45) ...       // scale
+```
+
+The softmax component has `partition_dim=1`. Its boundary input is `alloc_45`.
+`findProducerLinalgOp(alloc_45)` returns null (writes are to subviews, not to
+`alloc_45` directly). So the pass inserts:
+
+```mlir
+%alloc_45 = memref.alloc() ...
+%transposed = memref.alloc() : memref<128x4x128xf32>
+linalg.transpose ins(%alloc_45) outs(%transposed)  // STALE DATA!
+scf.for %i = 0 to 4 { ... writes into alloc_45 ... }
+// softmax now reads %transposed (zeros/garbage)
+```
+
+**Fix:** Replace `findProducerLinalgOp` with a utility that traces through
+view-like aliases (subview, reinterpret_cast) and returns the last
+write-completion op in the buffer's definition block — typically the enclosing
+`scf.for` when writes happen through subviews inside a loop.
+
+---
+
+#### Problem 4 ✅: `canonicalize-compute` — base alloc loses layout annotation
+
+**Root cause:** `decomposeOneBatchMatmul` transfers layout/tile annotations from
+the base output `init` to the per-batch `initSlice` subviews, then **erases all
+annotations on `init`**. After decomposition, `init` has no layout. Then
+`infer-layout` sees the unannotated 3D alloc, defaults it to `Sbuf` without
+`tile_size`:
+
+```mlir
+%alloc = memref.alloc() : memref<4x128x128xf32>
+nkipy.layout(%alloc) {mem_space = Sbuf, partition_dim = 0}  // NO tile_size!
+scf.for ... { linalg.matmul ... outs(subview of %alloc) }
+```
+
+`legalize-layout` correctly errors: `missing tile_size on nkipy.layout`.
+
+**Fix:** After the for-loop, re-attach a `LayoutOp` to the base `init` alloc
+preserving the original `mem_space`. Derive `tile_size` from the per-batch tile
+(prepend batch dim = 1). Example: user annotated
+`tile_size=[1, 128, 128, 128]` (including reduction) → base alloc gets
+`tile_size=[1, 128, 128]` (output dims only).
+
+---
+
+#### Fix order and dependencies
+
+```
+Problem 4 (canonicalize-compute)  — independent, fix first
+Problem 3 (canonicalize-partition-dim) — independent, fix second
+```
+
+Both fixes share a common infrastructure need: **a write-completion finder
+that traces through view aliases**. Implemented as a shared utility in
+`IRHelpers.h/.cpp`:
+
+```cpp
+/// Collect `base` and all memref view values derived from it.
+void collectMemRefAliases(Value base, SetVector<Value> &aliases);
+
+/// Find the last op in `buffer`'s definition block after which all nested DPS
+/// writes to `buffer` or any of its view aliases have completed.
+Operation *findWriteCompletionOp(Value buffer);
+```
+
+#### NISA emitter fix (Problem 2 follow-up)
+
+The NISA emitter also needs an update for rank-changing SBUF aliases produced by
+the canonicalize passes. When a high-rank transpose materializes a physical 2D
+SBUF alloc and later reads it through a rank-changing reshape alias, the emitter
+must use `view(...)` to keep the SSA value's allocation type stable while
+expressing offsets in the alias frame. This is independent of Problems 3–5 but
+required for the full qwen3 pipeline to produce valid NISA assembly.
 
 ---
 
