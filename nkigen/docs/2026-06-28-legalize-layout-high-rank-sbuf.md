@@ -1,11 +1,12 @@
 # High-rank SBUF: LegalizeLayout + NISA emitter fixes
 
 **Date:** 2026-06-28
-**Status:** Problems 1, 3, 4 done ✅. Problem 2 reimplemented (2026-07-06) with
-explicit pack/split + 2D transpose lowering — one emitter follow-up remains
-(rank-changing SBUF alias `view()`). Problem 5 not needed (resolved by 3+4).
-**Affects:** test_head_deconcat (green), test_qwen3_layer (passes through all
-C++ passes; blocked on linalg-to-nisa emitter for rank-changing SBUF aliases)
+**Status:** Problems 1, 3, 4, 6 done ✅. Problem 2 reimplemented (2026-07-06)
+with explicit pack/split + 2D transpose lowering. Problem 5 not needed (resolved
+by 3+4). test_qwen3_layer emits valid NISA; blocked on backend SBUF OOM during
+register allocation.
+**Affects:** test_head_deconcat (green), test_qwen3_layer (full pipeline green
+through linalg-to-nisa; backend SBUF register pressure too high for neuronx-cc)
 
 ## The IR these tests produce (after knob-driven-tiling)
 
@@ -653,14 +654,36 @@ void collectMemRefAliases(Value base, SetVector<Value> &aliases);
 Operation *findWriteCompletionOp(Value buffer);
 ```
 
-#### NISA emitter fix (Problem 2 follow-up)
+#### Problem 6: `linalg-to-nisa` emitter — rank-changing SBUF alias
 
-The NISA emitter also needs an update for rank-changing SBUF aliases produced by
-the canonicalize passes. When a high-rank transpose materializes a physical 2D
-SBUF alloc and later reads it through a rank-changing reshape alias, the emitter
-must use `view(...)` to keep the SSA value's allocation type stable while
-expressing offsets in the alias frame. This is independent of Problems 3–5 but
-required for the full qwen3 pipeline to produce valid NISA assembly.
+**Root cause:** The NISA emitter assumes every SBUF value keeps the same rank as
+its allocation. After canonicalize passes, a physical 2D SBUF alloc
+(`memref<128x128xf32, Sbuf>`) can be read through a rank-changing alias
+(`memref.reinterpret_cast` / `memref.expand_shape` → 3D or 4D). The emitter
+tries to index the value with the alias's rank and produces invalid NISA — type
+mismatches or wrong offset calculations.
+
+**Concrete scenario:** In qwen3, the attention-scores output is a 3D batch alloc
+that legalize-layout tiles into a 2D physical SBUF. A downstream reshape reads
+it as 4D (head deconcat). The emitter sees a 4D memref backed by a 2D
+allocation and doesn't know how to express the access.
+
+**Fix:** Two changes in `_operand_str_from_trace`:
+
+1. **On-chip crossed_reshape:** When the access coordinate frame (from a
+   `reinterpret_cast`) differs from the physical alloc, linearize all offsets in
+   the alias frame into a flat element index, then split into physical par/free
+   using the alloc's sbuf_map projection. Use the physical alloc's NISA type for
+   `memloc_ref` so the SSA name's type stays consistent.
+
+2. **sbuf_map leading-unit-dim strip:** The sbuf_map path now strips leading unit
+   dims from the tile_shape (matching what the non-sbuf_map `>2D` path does).
+   Without this, a non-rank-reducing `[1, 128, 128]` subview would emit
+   `par=1, free=16384` instead of the correct `par=128, free=128`.
+
+**Status:** ✅ Done. NISA emits valid, well-typed assembly. Remaining blocker is
+backend SBUF OOM during neuronx-cc register allocation (too many live SBUF
+buffers in the attention section).
 
 ---
 

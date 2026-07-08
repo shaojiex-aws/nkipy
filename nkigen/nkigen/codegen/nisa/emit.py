@@ -475,8 +475,10 @@ class NisaEmitter:
         # even when the frame is 2D (e.g. a 4D SBUF alloc viewed as 2D HBM).
         crossed_reshape = list(up_ir.MemRefType(view_type).shape) != base_shape
 
-        # HBM with >2D base memref needs view() regardless of tile rank.
-        # A rank-reducing subview gives a 2D tile but the memref is still >2D.
+        # view() is needed for HBM when the access coordinate frame doesn't
+        # match the physical alloc's type.
+        # For on-chip crossed_reshape, we use the physical alloc's type for
+        # memloc_ref and remap offsets from the alias frame to physical 2D.
         needs_view = not is_onchip and (base_rank > 2 or crossed_reshape)
 
         if needs_view:
@@ -522,16 +524,78 @@ class NisaEmitter:
             memloc_ref = (
                 f"view({orig_ty} {base_name}, {elem}, [{view_r}, {view_c}])"
             )
-        elif is_onchip and self._has_sbuf_map(base_type):
-            # Multi-block SBUF: remap logical offsets to physical 2D
-            sbuf_map = self._get_sbuf_map(base_type)
-            par = tile_shape[0]
+        elif is_onchip and crossed_reshape:
+            # On-chip buffer accessed through a rank-changing reinterpret_cast.
+            # Offsets are in the alias frame (base_type) but memloc_ref must use
+            # the physical alloc's type (view_type). Linearize alias-frame
+            # offsets into a flat element index, then split into physical 2D.
+            phys_type = view_type
+            phys_shape = list(up_ir.MemRefType(phys_type).shape)
+
+            skip = 0
+            while skip < len(tile_shape) - 2 and tile_shape[skip] == 1:
+                skip += 1
+            par = tile_shape[skip]
             free = 1
-            for d in tile_shape[1:]:
+            for d in tile_shape[skip + 1:]:
                 free *= d
             tile_str = f"{par}| {free}"
 
-            par_offset, free_offset = self._remap_sbuf_offsets(offsets, sbuf_map)
+            if self._has_sbuf_map(phys_type):
+                # Physical alloc has sbuf_map: linearize alias offsets into flat
+                # index, then compute par/free from the physical projection.
+                sbuf_map = self._get_sbuf_map(phys_type)
+                phys_par = sbuf_map.tile_size(0) * sbuf_map.num_blocks(0)
+                phys_free = 1
+                for i in range(1, sbuf_map.rank):
+                    phys_free *= sbuf_map.tile_size(i) * sbuf_map.num_blocks(i)
+
+                # Linearize offsets in alias frame (skip leading unit tile dims)
+                alias_offsets = offsets[skip:] if skip < len(offsets) else offsets
+                alias_shape = base_shape[skip:] if skip < len(base_shape) else base_shape
+                flat_offset = self._linearize_offsets(alias_offsets, alias_shape)
+
+                # Split flat offset into physical par and free
+                if phys_par <= 128:
+                    c_phys_free = self._emit_const_index(phys_free)
+                    par_offset = self._emit_divui(flat_offset, c_phys_free)
+                    free_offset = self._fresh()
+                    self._line(f"{free_offset} = arith.remui {flat_offset}, {c_phys_free} : index")
+                else:
+                    par_offset = self._emit_const_index(0)
+                    free_offset = flat_offset
+            else:
+                # No sbuf_map: linearize into flat, split at first non-unit dim
+                alias_offsets = offsets[skip:] if skip < len(offsets) else offsets
+                alias_shape = base_shape[skip:] if skip < len(base_shape) else base_shape
+                flat_offset = self._linearize_offsets(alias_offsets, alias_shape)
+                total_free = 1
+                for d in phys_shape[1:]:
+                    total_free *= d
+                c_total_free = self._emit_const_index(total_free)
+                par_offset = self._emit_divui(flat_offset, c_total_free)
+                free_offset = self._fresh()
+                self._line(f"{free_offset} = arith.remui {flat_offset}, {c_total_free} : index")
+
+            dims = [f"{par_offset} + d0", f"{free_offset} + d1"]
+            memloc_ref = f"{self._memref_type_str_nisa(phys_type)} {base_name}"
+        elif is_onchip and self._has_sbuf_map(base_type):
+            # Multi-block SBUF: remap logical offsets to physical 2D.
+            # The tile_shape may have leading unit dims from a non-rank-reducing
+            # subview (e.g. [1, 128, 128] from a 3D alloc accessed per-batch).
+            # Strip them to align with the base alloc's rank.
+            sbuf_map = self._get_sbuf_map(base_type)
+            skip = 0
+            while skip < len(tile_shape) - 2 and tile_shape[skip] == 1:
+                skip += 1
+            par = tile_shape[skip]
+            free = 1
+            for d in tile_shape[skip + 1:]:
+                free *= d
+            tile_str = f"{par}| {free}"
+
+            remap_offsets = offsets[skip:] if skip < len(offsets) else offsets
+            par_offset, free_offset = self._remap_sbuf_offsets(remap_offsets, sbuf_map)
             dims = [f"{par_offset} + d0", f"{free_offset} + d1"]
             memloc_ref = f"{self._memref_type_str_nisa(base_type)} {base_name}"
         elif is_onchip and len(tile_shape) > 2:
