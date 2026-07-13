@@ -35,8 +35,12 @@ struct NkipyAssignLinalgOpIdsPass
   
   void runOnOperation() override {
     func::FuncOp func = getOperation();
-    
-    llvm::errs() << "[AssignLinalgOpIds] Processing function: " 
+
+    // Body-less custom-op declarations have no linalg ops to number.
+    if (func.isDeclaration())
+      return;
+
+    llvm::errs() << "[AssignLinalgOpIds] Processing function: "
                  << func.getName() << "\n";
     
     // Counter for unique op_id

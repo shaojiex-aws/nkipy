@@ -150,7 +150,16 @@ class NisaEmitter:
     # -- top-level --
 
     def emit_module(self, module: up_ir.Module, target: str = "trn2") -> str:
-        self._line(f'module attributes {{nisa.target = #nisa.target<{target}>}} {{')
+        # Carry the stashed custom-op NISA bodies through to the emitted text
+        # verbatim. resolve-custom-ops (run after re-parsing this output) reads
+        # this module attribute to inline each body at its func.call site.
+        module_attrs = [f"nisa.target = #nisa.target<{target}>"]
+        bodies = module.operation.attributes
+        if "nkipy.custom_op_bodies" in bodies:
+            bodies_attr = bodies["nkipy.custom_op_bodies"]
+            module_attrs.append(f"nkipy.custom_op_bodies = {bodies_attr}")
+
+        self._line(f'module attributes {{{", ".join(module_attrs)}}} {{')
         self._indent += 1
         for op in module.body.operations:
             if op.operation.name == "func.func":
@@ -166,7 +175,15 @@ class NisaEmitter:
         sym_name = up_ir.StringAttr(op.attributes["sym_name"]).value
         func_ty = up_ir.FunctionType(up_ir.TypeAttr(op.attributes["function_type"]).value)
 
-        block = list(op.regions[0].blocks)[0]
+        # Body-less custom-op declaration: emit the private decl unchanged so
+        # the func.call remains well-typed. resolve-custom-ops inlines the
+        # stashed body and erases this decl after re-parsing.
+        blocks = list(op.regions[0].blocks) if list(op.regions) else []
+        if not blocks:
+            self._emit_func_declaration(op, sym_name, func_ty)
+            return
+
+        block = blocks[0]
         params = []
         for i, arg in enumerate(block.arguments):
             name = f"%arg{i}"
@@ -189,6 +206,22 @@ class NisaEmitter:
         self._indent -= 1
         self._line("}")
 
+    def _emit_func_declaration(self, op, sym_name: str, func_ty) -> None:
+        """Emit a body-less custom-op declaration, preserving its private
+        visibility and the nkipy.custom_op marker resolve-custom-ops keys on."""
+        inputs = [self._memref_type_str_nisa(t) for t in func_ty.inputs]
+        results = [self._memref_type_str_nisa(t) for t in func_ty.results]
+        if len(results) == 1:
+            ret_str = f" -> {results[0]}"
+        elif len(results) > 1:
+            ret_str = f' -> ({", ".join(results)})'
+        else:
+            ret_str = ""
+        self._line(
+            f'func.func private @{sym_name}({", ".join(inputs)}){ret_str} '
+            f'attributes {{nkipy.custom_op}}'
+        )
+
     def _emit_block(self, block) -> None:
         for op in block.operations:
             self._emit_op(op.operation)
@@ -206,6 +239,8 @@ class NisaEmitter:
             self._emit_scf_yield(op)
         elif name == "func.return":
             self._emit_return(op)
+        elif name == "func.call":
+            self._emit_call(op)
         elif name == "memref.alloc":
             self._emit_alloc(op)
         elif name == "memref.dealloc":
@@ -288,6 +323,60 @@ class NisaEmitter:
             self._line(f"return {vals} : {types}")
         else:
             self._line("return")
+
+    def _emit_call(self, op: up_ir.Operation) -> None:
+        """Emit a func.call to a custom-op declaration. resolve-custom-ops
+        (run after re-parsing this text) inlines the stashed body here."""
+        callee = up_ir.FlatSymbolRefAttr(op.attributes["callee"]).value
+
+        # Resolve each operand to a materialized NISA value. View ops
+        # (subview/reshape/cast) are folded into access-pattern attributes
+        # rather than emitted as SSA values, so their names are None; walk to
+        # the first named ancestor. If that ancestor's type differs from the
+        # operand type, the operand is a genuine slice/reshape — the callee
+        # signature expects the operand type, so the base can't stand in.
+        # Materializing such views is not supported yet (the whole-tensor path
+        # is; that is the common case), so fail with an actionable message
+        # instead of emitting `None` into the text.
+        names = []
+        for o in op.operands:
+            name, base_ty = self._resolve_materialized(o)
+            if name is None:
+                raise RuntimeError(
+                    f"custom-op call @{callee}: operand {o} has no "
+                    f"materialized NISA value to reference."
+                )
+            if str(base_ty) != str(o.type):
+                raise NotImplementedError(
+                    f"custom-op call @{callee} is fed a sliced/reshaped input "
+                    f"(operand type {o.type} differs from its materialized "
+                    f"source {base_ty}). Passing a view into a custom op is not "
+                    f"supported yet — pass the whole tensor."
+                )
+            names.append(name)
+        arg_names = ", ".join(names)
+        arg_types = ", ".join(
+            self._memref_type_str_nisa(o.type) for o in op.operands
+        )
+        res_types = [self._memref_type_str_nisa(r.type) for r in op.results]
+        if len(res_types) == 1:
+            res_str = res_types[0]
+        else:
+            res_str = f'({", ".join(res_types)})'
+
+        results = list(op.results)
+        if results:
+            out_names = []
+            for r in results:
+                nm = self._fresh("call")
+                self._set_name(r, nm)
+                out_names.append(nm)
+            lhs = ", ".join(out_names) + " = "
+        else:
+            lhs = ""
+        self._line(
+            f"{lhs}call @{callee}({arg_names}) : ({arg_types}) -> {res_str}"
+        )
 
     # -- memory --
 

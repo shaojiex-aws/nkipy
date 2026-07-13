@@ -110,6 +110,10 @@ struct NkipyLegalizeLayoutPass
     func::FuncOp func = getOperation();
     hasError = false;
 
+    // Body-less custom-op declarations have no SBUF tensors to legalize.
+    if (func.isDeclaration())
+      return;
+
     LLVM_DEBUG(llvm::dbgs() << "[LegalizeLayout] Processing function: "
                  << func.getName() << "\n");
 

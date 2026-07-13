@@ -378,6 +378,10 @@ struct InsertSpillReloadPass
   void runOnOperation() override {
     func::FuncOp func = getOperation();
 
+    // Body-less custom-op declarations have no SBUF traffic to spill.
+    if (func.isDeclaration())
+      return;
+
     // Resolve SBUF capacity
     auto capacityOpt = resolveSbufCapacity(func);
     if (!capacityOpt)

@@ -154,6 +154,10 @@ struct NkipyKnobDrivenFusionPass
   void runOnOperation() override {
     func::FuncOp func = getOperation();
 
+    // Body-less custom-op declarations have no fuse ops to process.
+    if (func.isDeclaration())
+      return;
+
     SmallVector<nkipy::FuseOp> fuseOps;
     func.walk([&](nkipy::FuseOp op) { fuseOps.push_back(op); });
 

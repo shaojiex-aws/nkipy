@@ -309,5 +309,67 @@ def test_kernel_builder_silu():
     )
 
 
+# ============================================================================
+# Test: chained custom op calls (result of one feeds the next)
+# ============================================================================
+
+
+def _make_relu_kernel_builder_op(M=128, N=128):
+    """A single-tile ReLU custom op via kernel_builder."""
+
+    def relu_kernel(x_hbm, out_hbm):
+        x_sbuf = nb.ndarray((M, N), x_hbm.dtype, nb.sbuf)
+        nb.isa.dma_copy(dst=x_sbuf, src=x_hbm[0:M, 0:N])
+        o_sbuf = nb.ndarray((M, N), x_hbm.dtype, nb.sbuf)
+        bias = nb.ndarray((M, 1), x_hbm.dtype, nb.sbuf)
+        nb.isa.memset(dst=bias, value=0.0)
+        scale = nb.ndarray((M, 1), x_hbm.dtype, nb.sbuf)
+        nb.isa.memset(dst=scale, value=1.0)
+        nb.isa.activation(
+            dst=o_sbuf, src=x_sbuf, bias=bias, scale=scale,
+            op=nb.isa.activation_function.relu,
+        )
+        nb.isa.dma_copy(dst=out_hbm[0:M, 0:N], src=o_sbuf)
+
+    return CustomOp.from_kernel_builder(
+        kernel_func=relu_kernel,
+        input_specs={"x_hbm": nb.Tensor((M, N), nb.float32, nb.shared_hbm)},
+        output_specs={"out_hbm": nb.Tensor((M, N), nb.float32, nb.shared_hbm)},
+        reference_fn=lambda x: np.maximum(x, 0),
+    )
+
+
+def test_chained_custom_op_calls():
+    """Two calls to the same custom op where the first result feeds the second.
+
+    Exercises mem_space propagation across a custom-op call boundary: the inner
+    call's result must be stamped SharedHbm so the outer call operand and the
+    (deduplicated, single) declaration stay type-consistent.  Both bodies are
+    inlined — the final IR has two nisa.activation ops and no residual call.
+    """
+    relu = _make_relu_kernel_builder_op(128, 128)
+
+    @trace(input_specs=[((128, 128), "f32")])
+    def chained_kernel(x):
+        return relu(relu(x))
+
+    run_kernel_test(
+        chained_kernel,
+        check_ir_contains=[
+            "nisa.activation",
+            "nisa.dma_copy",
+            "nisa.target",
+        ],
+        check_ir_not_contains=[
+            "nkipy.custom_op_bodies",
+            "nkipy.custom_op",
+            "__custom_op__relu_kernel",
+        ],
+        rtol=1e-3,
+        atol=1e-3,
+        modes=Mode.HW | Mode.STRING_CHECK | Mode.CODEGEN,
+    )
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

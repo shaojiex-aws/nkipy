@@ -532,6 +532,11 @@ struct NkipyInferLayoutPass : public InferLayoutBase<NkipyInferLayoutPass> {
 
   void runOnOperation() override {
     func::FuncOp func = getOperation();
+
+    // Body-less custom-op declarations carry no layout to infer.
+    if (func.isDeclaration())
+      return;
+
     propagateTileAndLayout(func);
     defaultTileOps(func);
     defaultLayouts(func);

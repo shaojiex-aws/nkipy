@@ -667,6 +667,12 @@ struct NkipyCanonicalizePartitionDimPass
   void runOnOperation() override {
     func::FuncOp func = getOperation();
 
+    // Body-less custom-op declarations have no body to canonicalize; their
+    // NISA bodies are inlined later by resolve-custom-ops. Bail before any
+    // walk that would deref a nonexistent block terminator.
+    if (func.isDeclaration())
+      return;
+
     llvm::errs() << "[CanonicalizePartitionDim] Processing function: "
                  << func.getName() << "\n";
 

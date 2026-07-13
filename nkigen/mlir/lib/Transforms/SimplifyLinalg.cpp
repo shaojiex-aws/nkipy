@@ -279,6 +279,10 @@ struct SimplifyLinalgPass
   void runOnOperation() override {
     func::FuncOp func = getOperation();
 
+    // Body-less custom-op declarations have no linalg ops to simplify.
+    if (func.isDeclaration())
+      return;
+
     canonicalizeTrivialBroadcastGenerics(func);
     prepareGatherForNisaLowering(func);
   }

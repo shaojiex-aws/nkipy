@@ -15,6 +15,7 @@
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/Linalg/IR/Linalg.h"
 #include "mlir/Dialect/MemRef/IR/MemRef.h"
+#include "mlir/IR/SymbolTable.h"
 #include "mlir/Pass/Pass.h"
 #include "mlir/Transforms/GreedyPatternRewriteDriver.h"
 #include "llvm/ADT/SmallVector.h"
@@ -68,8 +69,7 @@ static bool hasMemSpaceConflict(Operation *viewOp) {
 }
 
 struct CanonicalizeReshapePass
-    : public PassWrapper<CanonicalizeReshapePass,
-                         OperationPass<func::FuncOp>> {
+    : public PassWrapper<CanonicalizeReshapePass, OperationPass<ModuleOp>> {
   MLIR_DEFINE_EXPLICIT_INTERNAL_INLINE_TYPE_ID(CanonicalizeReshapePass)
 
   StringRef getArgument() const final { return "canonicalize-reshape"; }
@@ -199,6 +199,24 @@ struct CanonicalizeReshapePass
                                       mt.getLayout(), sharedHbm));
     }
 
+    // Stamp SharedHbm on custom-op call results that lack mem_space. A custom
+    // op is an HBM↔HBM boundary (its bridged body is compiled over shared_hbm
+    // memrefs), so its results live in HBM.  Doing this before propagation
+    // lets the mem_space flow into downstream consumers — including a chained
+    // call `op(op(x))`, where the inner result feeds the outer call operand
+    // and would otherwise stay unstamped and mismatch the reconciled decl.
+    ModuleOp module = func->getParentOfType<ModuleOp>();
+    func.walk([&](func::CallOp call) {
+      auto callee = module.lookupSymbol<func::FuncOp>(call.getCalleeAttr());
+      if (!callee || !callee->hasAttr("nkipy.custom_op")) return;
+      for (auto result : call.getResults()) {
+        auto mt = dyn_cast<MemRefType>(result.getType());
+        if (!mt || mt.getMemorySpace()) continue;
+        result.setType(MemRefType::get(mt.getShape(), mt.getElementType(),
+                                       mt.getLayout(), sharedHbm));
+      }
+    });
+
     // Propagate mem_space through view ops until convergence.
     bool changed = true;
     while (changed) {
@@ -226,17 +244,63 @@ struct CanonicalizeReshapePass
     func.setType(FunctionType::get(ctx, argTypes, resTypes));
   }
 
+  /// After mem_space annotations mutate the types flowing into func.call
+  /// operands (e.g. a matmul output stamped SharedHbm by knob().layout()),
+  /// the callee's body-less declaration still carries its trace-time
+  /// signature.  Re-sync each custom-op declaration's FunctionType to its
+  /// call sites so the module verifies.  The stashed NISA body (parsed later
+  /// by resolve-custom-ops) already uses shared_hbm memrefs, so the inlined
+  /// body matches these reconciled boundary types.
+  ///
+  /// This is a module-level fixup: a func::FuncOp pass may not legally mutate
+  /// a sibling declaration, which is why this pass operates on the ModuleOp.
+  void reconcileCustomOpDecls(ModuleOp module) {
+    for (auto decl : module.getOps<func::FuncOp>()) {
+      if (!decl.isDeclaration() || !decl->hasAttr("nkipy.custom_op"))
+        continue;
+
+      // Find a call site and adopt its operand/result types.
+      std::optional<SymbolTable::UseRange> uses =
+          SymbolTable::getSymbolUses(decl, module);
+      if (!uses)
+        continue;
+      for (SymbolTable::SymbolUse use : *uses) {
+        auto call = dyn_cast<func::CallOp>(use.getUser());
+        if (!call)
+          continue;
+        SmallVector<Type> argTypes(call.getOperandTypes());
+        SmallVector<Type> resTypes(call.getResultTypes());
+        decl.setType(
+            FunctionType::get(module.getContext(), argTypes, resTypes));
+        break; // All call sites share one traced boundary; first suffices.
+      }
+    }
+  }
+
   void runOnOperation() override {
-    func::FuncOp func = getOperation();
+    ModuleOp module = getOperation();
 
-    materializeCopies(func);
-    applyMemSpaceAnnotations(func);
+    for (auto func : module.getOps<func::FuncOp>()) {
+      // Skip body-less custom-op declarations; their NISA bodies are inlined
+      // later by the Python resolve-custom-ops step. The per-function logic
+      // below walks the body and would dereference a nonexistent block
+      // terminator (e.g. cast<func::ReturnOp> on an empty region → SIGSEGV).
+      if (func.isDeclaration())
+        continue;
 
-    // Epilogue: canonicalize to clean up dead views.
-    RewritePatternSet patterns(&getContext());
-    for (auto *dialect : getContext().getLoadedDialects())
-      dialect->getCanonicalizationPatterns(patterns);
-    (void)applyPatternsAndFoldGreedily(func, std::move(patterns));
+      materializeCopies(func);
+      applyMemSpaceAnnotations(func);
+
+      // Epilogue: canonicalize to clean up dead views.
+      RewritePatternSet patterns(&getContext());
+      for (auto *dialect : getContext().getLoadedDialects())
+        dialect->getCanonicalizationPatterns(patterns);
+      (void)applyPatternsAndFoldGreedily(func, std::move(patterns));
+    }
+
+    // Re-sync custom-op declarations after mem_space annotations changed the
+    // boundary types their call sites now carry.
+    reconcileCustomOpDecls(module);
   }
 };
 
@@ -245,7 +309,7 @@ struct CanonicalizeReshapePass
 namespace mlir {
 namespace nkipy {
 
-std::unique_ptr<OperationPass<func::FuncOp>>
+std::unique_ptr<OperationPass<ModuleOp>>
 createCanonicalizeReshapePass() {
   return std::make_unique<CanonicalizeReshapePass>();
 }

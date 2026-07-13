@@ -75,6 +75,10 @@ struct InsertMemRefDeallocPass
     func::FuncOp func = getOperation();
     hasError = false;
 
+    // Body-less custom-op declarations have no allocations to deallocate.
+    if (func.isDeclaration())
+      return;
+
     // First, collect all allocations that escape via return values
     llvm::DenseSet<Operation *> escapedAllocs;
     collectEscapedAllocations(func, escapedAllocs);

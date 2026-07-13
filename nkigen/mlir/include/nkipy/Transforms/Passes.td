@@ -5,16 +5,20 @@
 include "mlir/Pass/PassBase.td"
 
 
-def CanonicalizeReshape : Pass<"canonicalize-reshape", "func::FuncOp"> {
+def CanonicalizeReshape : Pass<"canonicalize-reshape", "ModuleOp"> {
   let summary = "Apply mem_space annotations and materialize output allocations";
   let description = [{
-    Two responsibilities:
+    Three responsibilities:
 
     1. Apply nkipy.layout mem_space to memref types, stamp SharedHbm on
        func args/returns that lack mem_space, and propagate through view ops.
 
     2. Ensure function outputs are separate HBM allocations (NISA requires
        it). When a return value is a view of a func arg, insert alloc+copy.
+
+    3. Re-sync each custom-op declaration's signature to its call sites, since
+       (1) may have changed the boundary types those calls now carry.  Runs at
+       module scope so declarations (siblings of the caller) can be mutated.
   }];
   let constructor = "mlir::nkipy::createCanonicalizeReshapePass()";
 }

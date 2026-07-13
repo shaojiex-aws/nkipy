@@ -50,6 +50,10 @@ struct InlineNkipyReferencePass
   void runOnOperation() override {
     func::FuncOp func = getOperation();
 
+    // Body-less custom-op declarations have no nkipy reference regions.
+    if (func.isDeclaration())
+      return;
+
     // Collect nkipy ops with non-empty reference_impl regions.
     SmallVector<Operation *> opsToInline;
     func.walk([&](Operation *op) {
