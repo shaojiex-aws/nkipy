@@ -3,10 +3,10 @@
 **Date:** 2026-06-28
 **Status:** Problems 1, 3, 4, 6 done ✅. Problem 2 reimplemented (2026-07-06)
 with explicit pack/split + 2D transpose lowering. Problem 5 not needed (resolved
-by 3+4). test_qwen3_layer emits valid NISA; blocked on backend SBUF OOM during
-register allocation.
-**Affects:** test_head_deconcat (green), test_qwen3_layer (full pipeline green
-through linalg-to-nisa; backend SBUF register pressure too high for neuronx-cc)
+by 3+4). Problem 7 diagnosed (2026-07-13): backend OOB on 3D sbuf with
+partition_dim=0 assigned to post-tiling buffer; workaround = skip HW mode.
+**Affects:** test_head_deconcat (green), test_qwen3_layer (STRING_CHECK + LLVM +
+CODEGEN green; HW mode blocked on Problem 7)
 
 ## The IR these tests produce (after knob-driven-tiling)
 
@@ -681,9 +681,57 @@ allocation and doesn't know how to express the access.
    Without this, a non-rank-reducing `[1, 128, 128]` subview would emit
    `par=1, free=16384` instead of the correct `par=128, free=128`.
 
-**Status:** ✅ Done. NISA emits valid, well-typed assembly. Remaining blocker is
-backend SBUF OOM during neuronx-cc register allocation (too many live SBUF
-buffers in the attention section).
+**Status:** ✅ Done. NISA emits valid, well-typed assembly.
+
+#### Problem 7: Backend OOB — 3D sbuf_map with partition_dim=0 on a post-tiling buffer
+
+**Symptom:** neuronx-cc `birverifier` rejects access pattern `[[16384,128],[1,128]]`
+on a `memref<4x16384xf32, sbuf>` buffer. The tensor_copy tile `<128|128>` claims
+128 partitions but the physical buffer only has 4.
+
+**Root cause:** The attention context matmul (`attn_weights @ v`) creates a 3D
+intermediate accumulator `memref<4x128x128xf32, Sbuf>` (BH × seq × head_dim).
+Its `nkipy.layout` has `tile_size=[1,128,128]` (from `attn_tile`), no
+`partition_dim`. Legalize-layout assigns `sbuf_map<tile:[1,128,128], blocks:[4,1,1]>`
+— making dim 0 (BH=4) the partition dimension with only 4 physical partitions.
+
+But the matmul accumulates in psum (128×128 per batch), and the psum↔sbuf
+tensor_copy needs 128 partitions. The emitter correctly emits tile `<128|128>` for
+the psum copy, which the backend correctly rejects: you can't access 128 partitions
+on a 4-partition buffer.
+
+**Why it happens:** The buffer is created by `knob-driven-tiling` (pass 05) AFTER
+`canonicalize-partition-dim` (pass 03) has already run. So no pass reorders the
+dimensions to put partition first. The `tile_size=[1,128,128]` means "1 batch per
+tile, 128×128 per batch" — partition should be dim 1 (seq_len=128), not dim 0
+(BH=1 per tile).
+
+**Current workaround:** Skip HW mode on qwen3 (test CODEGEN + LLVM only).
+
+**Cleanest fix — partition-dim enforcement in LegalizeLayout:**
+
+When `attachSbufMapAttrs` processes a tile where `tile[0] * blocks[0] < 128` but
+`tile[1] * blocks[1] >= 128`, the buffer needs partition at dim 1. The fix:
+
+1. **Reshape the alloc** from `memref<4x128x128xf32>` to `memref<512x128xf32>`
+   (collapse dims [0,1]).
+2. **Assign 2D sbuf_map:** `tile:[128,128], blocks:[4,1]` — giving 128 physical
+   partitions with free = 4×128 = 512. Each batch occupies one partition-block.
+3. **Insert `memref.expand_shape`** for all existing users that index it as 3D.
+   The expand_shape reassociation `[[0,1],[2]]` maps the 2D buffer back to 3D.
+4. All subviews like `subview(%buf, %batch)[0, 0] → 128x128` become
+   `subview(%buf_2d, %batch*128, 0)[128, 128]` — indexing into the correct
+   partition-block.
+
+This is invasive (requires updating all users) but architecturally clean: it
+enforces the sbuf_map invariant that dim 0 has enough partitions for any DMA tile
+that accesses the buffer.
+
+**Alternative (simpler, less general):** Have `canonicalize-reshape` (pass 07) set
+`partition_dim=1` on the `nkipy.layout` for buffers where `tile[0] < 128` and
+`tile[1] >= 128`. Then run a **second canonicalize-partition-dim pass** after
+tiling/reshape to transpose late-created buffers. This avoids reshape surgery but
+adds a pass ordering dependency.
 
 ---
 

@@ -592,6 +592,7 @@ class NisaEmitter:
             free = 1
             for d in tile_shape[skip + 1:]:
                 free *= d
+
             tile_str = f"{par}| {free}"
 
             remap_offsets = offsets[skip:] if skip < len(offsets) else offsets
@@ -1052,12 +1053,43 @@ class NisaEmitter:
             return
 
         scalar_name = self._name(scalar)
-        dst_str = self._operand_str(dst, "dst")
+        dst_str = self._operand_str_fill(dst)
         elem_ty = irutils.memref_elem_type(dst.type)
 
         self._line(
             f"nisa.memset({dst_str}, value={elem_ty} {scalar_name}) engine=vector"
         )
+
+    def _operand_str_fill(self, val: up_ir.Value) -> str:
+        """Build operand string for fill/memset using physical tile dims.
+
+        For sbuf_map buffers where logical_par > 128, the physical alloc is
+        folded to 128 partitions. The memset tile must match the physical
+        shape since it initializes the entire buffer.
+        """
+        trace = self._trace_access(val)
+        base_name, offsets, tile_shape, base_type, view_type = trace
+        ms = irutils.memref_memspace(base_type)
+        if ms in (irutils.MEMSPACE_SBUF, irutils.MEMSPACE_PSUM) and \
+                self._has_sbuf_map(base_type):
+            sbuf_map = self._get_sbuf_map(base_type)
+            base_shape = list(up_ir.MemRefType(base_type).shape)
+            logical_par = base_shape[0]
+            phys_par = min(logical_par, 128)
+            logical_free = 1
+            for d in base_shape[1:]:
+                logical_free *= d
+            if logical_par > 128:
+                phys_free = (logical_par // 128) * logical_free
+            else:
+                phys_free = logical_free
+            tile_str = f"{phys_par}| {phys_free}"
+            par_offset, free_offset = self._remap_sbuf_offsets(
+                offsets, sbuf_map)
+            dims = [f"{par_offset} + d0", f"{free_offset} + d1"]
+            memloc_ref = f"{self._memref_type_str_nisa(base_type)} {base_name}"
+            return f"dst<{tile_str}>={memloc_ref}[{', '.join(dims)}]"
+        return self._operand_str_from_trace(trace, "dst")
 
     # -- compute: matmul --
 
