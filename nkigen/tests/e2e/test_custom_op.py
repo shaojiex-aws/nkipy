@@ -160,5 +160,36 @@ def test_use_chained():
     )
 
 
+# ============================================================================
+# Test: .use(agent) — region emitted as kernel_builder source, passed through
+# an agent (str -> str), re-materialized, and spliced back
+# ============================================================================
+
+
+def test_use_echo_agent():
+    """``knob(x, y).use(EchoAgent())`` routes the region through the agentic
+    loop: nkigen emits the region as kernel_builder source, the EchoAgent
+    returns it unchanged, and it is re-materialized + spliced. The result is
+    numerically identical to the traced SiLU region (runs on HW)."""
+    from nkigen import EchoAgent
+
+    @trace(input_specs=[((128, 128), "f32")])
+    def model(x):
+        y = x * (1.0 / (1.0 + np.exp(-x)))  # SiLU
+        knob(x, y).use(EchoAgent())
+        return y
+
+    run_kernel_test(
+        model,
+        check_ir_contains=["nisa.activation", "nisa.dma_copy", "nisa.target"],
+        check_ir_not_contains=[
+            "nkipy.custom_op_bodies", "nkipy.custom_op", "call @__custom_op",
+        ],
+        rtol=1e-3,
+        atol=1e-3,
+        modes=Mode.HW | Mode.STRING_CHECK | Mode.CODEGEN,
+    )
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

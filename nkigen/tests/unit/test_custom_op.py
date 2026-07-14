@@ -213,6 +213,73 @@ def test_use_eager_is_noop():
 
 
 # ============================================================================
+# Agent path: .use(agent) and .tune()
+# ============================================================================
+
+
+def test_use_echo_agent_traces():
+    """.use(EchoAgent()) routes the region through emit → agent → re-materialize
+    → splice, producing the same func.call + stashed body as a direct kernel."""
+    from nkigen import EchoAgent
+
+    @trace(input_specs=[((128, 128), "f32")])
+    def model(x):
+        y = np.maximum(x, 0.0)
+        knob(x, y).use(EchoAgent())
+        return y
+
+    mlir_str = str(model.to_mlir())
+    assert "call @__custom_op__region" in mlir_str
+    assert "nkipy.custom_op_bodies" in mlir_str
+    assert "linalg." not in mlir_str  # region replaced by the call
+
+
+def test_use_plain_str_agent():
+    """A plain ``str -> str`` callable works as an agent (lightweight form)."""
+
+    seen = {}
+
+    def agent(source: str) -> str:
+        seen["src"] = source
+        return source  # identity
+
+    @trace(input_specs=[((128, 128), "f32")])
+    def model(x):
+        y = np.maximum(x, 0.0)
+        knob(x, y).use(agent)
+        return y
+
+    mlir_str = str(model.to_mlir())
+    assert "call @__custom_op__region" in mlir_str
+    assert "nb.compiler.alloc" in seen["src"]  # agent saw kernel_builder source
+
+
+def test_tune_creates_agent_workspace(tmp_path):
+    """prog.tune(db=...) gives each agent site a persistent <db>/<key>/ folder
+    with the emitted region source, and lets the agent write into it."""
+    from nkigen.frontend.agent import AgentContext
+
+    class NotingAgent:
+        def transform(self, ctx: AgentContext) -> str:
+            (ctx.workspace / "memory.txt").write_text(f"key={ctx.key}")
+            return ctx.source
+
+    @trace(input_specs=[((128, 128), "f32")])
+    def model(x):
+        y = x * (1.0 / (1.0 + np.exp(-x)))
+        knob(x, y).use(NotingAgent(), key="silu_region")
+        return y
+
+    db = tmp_path / "tune_db"
+    model.tune(db=str(db), target="trn2")
+
+    site = db / "silu_region"
+    assert (site / "region.py").exists()          # nkigen's emitted source
+    assert (site / "kernel.py").exists()           # agent's returned source
+    assert (site / "memory.txt").read_text() == "key=silu_region"  # agent scratch
+
+
+# ============================================================================
 # CustomOp public API is retired
 # ============================================================================
 

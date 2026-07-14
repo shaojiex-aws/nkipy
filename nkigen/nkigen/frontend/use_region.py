@@ -21,18 +21,19 @@ front-end reuses the Phase-1 custom-op machinery with zero new pipeline passes.
 from __future__ import annotations
 
 import inspect
-from typing import Callable, List, Tuple
+from typing import Callable, List, Optional, Tuple
 
 from mlir import ir
 from mlir.dialects import func as func_d
 
+from .agent import AgentContext
 from .custom_op import CustomOp, _get_registry
 from ..mlir_utils import to_mlir_type
 
 
 # Module-level registry of pending .use() regions. Single-threaded tracing, so
-# no locking. Each entry: (boundary ir.Values in call order, kernel fn, verify).
-_use_registry: List[Tuple[List[ir.Value], Callable, bool]] = []
+# no locking. Each entry: (boundary ir.Values in call order, impl, key, verify).
+_use_registry: List[Tuple[List[ir.Value], object, object, bool]] = []
 
 
 def _get_use_registry() -> list:
@@ -43,9 +44,9 @@ def _clear_use_registry() -> None:
     _use_registry.clear()
 
 
-def record_use(boundary_values: List[ir.Value], kernel: Callable, verify: bool) -> None:
+def record_use(boundary_values: List[ir.Value], impl, key, verify: bool) -> None:
     """Record a pending .use() region for post-trace extraction."""
-    _use_registry.append((list(boundary_values), kernel, verify))
+    _use_registry.append((list(boundary_values), impl, key, verify))
 
 
 # ----------------------------------------------------------------------
@@ -255,14 +256,157 @@ def _nb_tensor_spec(shape: tuple, elem_str: str):
 
 
 # ----------------------------------------------------------------------
+# Agent path: region -> kernel_builder source -> agent -> callable
+# ----------------------------------------------------------------------
+
+
+def _region_to_standalone_ir(
+    region_ops: list, internal_allocs: list, inputs: list, outputs: list,
+    func_op,
+) -> str:
+    """Clone a region into a fresh, self-contained ``func.func`` module.
+
+    The new func takes the region's inputs as arguments and returns its
+    outputs, with every region op (and internal alloc) cloned in and rewired
+    to the new block arguments. This standalone module is what the
+    kernelbuilder backend turns into kernel_builder source for an agent.
+    """
+    ordered = _program_order(list(region_ops) + list(internal_allocs), func_op)
+    src_ctx = func_op.operation.context
+    with src_ctx, ir.Location.unknown():
+        arg_types = [v.type for v in inputs]
+        res_types = [v.type for v in outputs]
+        new_module = ir.Module.create()
+        fn_type = ir.FunctionType.get(arg_types, res_types)
+        with ir.InsertionPoint(new_module.body):
+            fn = func_d.FuncOp("region", fn_type)
+            block = fn.add_entry_block()
+
+        # Map original region SSA values → values in the new block.
+        mapping: list = list(zip(list(inputs), list(block.arguments)))
+
+        def remap(v):
+            for old, new in mapping:
+                if old == v:
+                    return new
+            return v
+
+        # Clone region ops + internal allocs in program order, rewiring operands.
+        with ir.InsertionPoint(block):
+            for opv in ordered:
+                cloned = opv.operation.clone()
+                for i in range(len(cloned.operands)):
+                    cloned.operands[i] = remap(cloned.operands[i])
+                for old_res, new_res in zip(opv.operation.results, cloned.results):
+                    mapping.append((old_res, new_res))
+            func_d.ReturnOp([remap(v) for v in outputs])
+
+        return new_module.operation.get_asm()
+
+
+def _region_to_kb_source(
+    region_ops, internal_allocs, inputs, outputs, func_op, target: str,
+) -> str:
+    """Emit kernel_builder Python source for a region.
+
+    Isolates the region into a standalone func, runs it through the knob
+    pipeline to the tiled IR the kernelbuilder backend consumes, then emits
+    source. Params are named ``input_0..`` / ``output_0..`` by the backend.
+    """
+    from ..driver.pipeline import apply_complete_knob_pipeline
+    from ..codegen.kernelbuilder import linalg_to_kernelbuilder
+
+    region_ir = _region_to_standalone_ir(
+        region_ops, internal_allocs, inputs, outputs, func_op
+    )
+    tiled = apply_complete_knob_pipeline(
+        region_ir, target=target, stop_before="py:linalg-to-nisa"
+    )
+    return linalg_to_kernelbuilder(tiled, kernel_name="region", target=target)
+
+
+def _kb_source_to_callable(source: str):
+    """Materialize the kernel_builder function from its source string.
+
+    The backend emits exactly one top-level ``def`` (plus ``import`` bindings);
+    return that function object.
+    """
+    import types
+    namespace: dict = {}
+    exec(compile(source, "<agent-kernel>", "exec"), namespace)
+    defs = [v for k, v in namespace.items()
+            if isinstance(v, types.FunctionType) and not k.startswith("__")]
+    if not defs:
+        raise ValueError(
+            ".use(agent): agent returned source with no kernel function."
+        )
+    return defs[-1]
+
+
+def _is_agent(impl) -> bool:
+    """True if ``impl`` transforms kernel_builder source (str->str) rather than
+    being a kernel itself.
+
+    An agent either exposes ``.transform`` (the :class:`KernelAgent` protocol)
+    or is a plain callable taking a single parameter (the source string). A
+    kernel is a callable whose parameters are the region's tensors.
+    """
+    if hasattr(impl, "transform"):
+        return True
+    try:
+        params = inspect.signature(impl).parameters
+    except (TypeError, ValueError):
+        return False
+    return len(params) == 1
+
+
+def _site_workspace(db_dir, site_key):
+    """The folder an agent may read/write for this site.
+
+    Under ``prog.tune(db=...)`` this is a persistent ``<db_dir>/<key>/`` (the
+    future tuning-DB entry); otherwise an ephemeral temp dir so plain
+    ``to_mlir()`` / ``to_nisa()`` still runs agents without leaving artifacts.
+    """
+    from pathlib import Path
+    if db_dir is not None:
+        ws = Path(db_dir) / site_key
+    else:
+        import tempfile
+        ws = Path(tempfile.mkdtemp(prefix=f"nkigen_use_{site_key}_"))
+    ws.mkdir(parents=True, exist_ok=True)
+    return ws
+
+
+def _run_agent(agent, ctx: AgentContext) -> str:
+    """Invoke an agent and return the kernel_builder source it produces.
+
+    A :class:`~.agent.KernelAgent` (``.transform``) receives the full context
+    (source + workspace + key). A plain callable receives just the source
+    string — the lightweight ``str -> str`` form, no workspace.
+    """
+    if hasattr(agent, "transform"):
+        return agent.transform(ctx)
+    return agent(ctx.source)
+
+
+# ----------------------------------------------------------------------
 # Extraction
 # ----------------------------------------------------------------------
 
 
-def extract_use_regions(module: ir.Module, func_op) -> None:
+def extract_use_regions(module: ir.Module, func_op, target: str = "trn2",
+                        db_dir: "Optional[str]" = None) -> None:
     """Post-trace pass: replace each recorded ``.use()`` region with a
     ``func.call`` to a bridged custom op. Mutates ``module`` in place and
     registers the derived :class:`CustomOp`\\ s for declaration + resolution.
+
+    ``target`` is used only for the agent path (tiling the isolated region
+    before emitting kernel_builder source); it defaults to the pipeline default.
+
+    ``db_dir`` is the tuning-DB root (from ``prog.tune(db=...)``). When set, each
+    agent site gets a persistent workspace ``<db_dir>/<key>/`` it may read/write;
+    otherwise agents get an ephemeral temp workspace. Kernel (non-agent) sites
+    ignore it.
 
     Runs before ``run_canonicalize`` so recorded boundary ``ir.Value`` handles
     are still valid and per-op constants/fills are still private.
@@ -277,16 +421,18 @@ def extract_use_regions(module: ir.Module, func_op) -> None:
     # replaces its outputs' uses with a call result and erases the producing
     # ops, so a later marker that named such an output holds a stale handle —
     # remap those boundaries to the call result after each extraction.
-    pending = [list(boundaries) for boundaries, _, _ in registry]
+    pending = [list(boundaries) for boundaries, _, _, _ in registry]
 
-    for site_id, (_, kernel, verify) in enumerate(registry):
+    for site_id, (_, impl, key, verify) in enumerate(registry):
         if verify:
             raise NotImplementedError(
                 ".use(verify=True): numeric region-vs-kernel verification is a "
                 "planned follow-up; call .use(...) without verify for now."
             )
+        site_key = key or f"site{site_id}"
         replacements = _extract_one(
-            module, func_op, pending[site_id], kernel, site_id, claimed_ops,
+            module, func_op, pending[site_id], impl, site_id, claimed_ops,
+            target, site_key, db_dir,
         )
         for later in range(site_id + 1, len(pending)):
             pending[later] = [
@@ -302,7 +448,8 @@ def _remap(value, replacements):
     return value
 
 
-def _extract_one(module, func_op, boundaries, kernel, site_id, claimed_ops):
+def _extract_one(module, func_op, boundaries, impl, site_id, claimed_ops,
+                 target, site_key="site0", db_dir=None):
     ctx = module.context
 
     # 1. Classify boundaries into inputs vs outputs by graph position.
@@ -398,13 +545,33 @@ def _extract_one(module, func_op, boundaries, kernel, site_id, claimed_ops):
         func_op, claimed_ops,
     )
 
-    # 4. Bridge kernel -> CustomOp (NISA text). Specs from classified
-    #    boundaries zipped with kernel param names (inputs first, then outputs).
+    # 4a. Agent path: if `impl` transforms kernel_builder *source* rather than
+    #     being a kernel itself, emit the region as kb source, run the agent in
+    #     its workspace, and materialize its returned source into the kernel to
+    #     bridge. The region's own backend-emitted source names params
+    #     input_0.. / output_0.. in boundary order.
+    kernel = impl
+    if _is_agent(impl):
+        source = _region_to_kb_source(
+            region_ops, internal_allocs, inputs, outputs, func_op, target,
+        )
+        workspace = _site_workspace(db_dir, site_key)
+        (workspace / "region.py").write_text(source)  # the agent's input IR
+        agent_ctx = AgentContext(
+            source=source, workspace=workspace, key=site_key,
+        )
+        new_source = _run_agent(impl, agent_ctx)
+        (workspace / "kernel.py").write_text(new_source)  # the agent's output
+        kernel = _kb_source_to_callable(new_source)
+
+    # 4b. Bridge kernel -> CustomOp (NISA text). Specs from classified
+    #     boundaries zipped with kernel param names (inputs first, then outputs).
     param_names = list(inspect.signature(kernel).parameters.keys())
     n_in, n_out = len(inputs), len(outputs)
     if len(param_names) != n_in + n_out:
+        kname = getattr(kernel, "__name__", repr(kernel))
         raise ValueError(
-            f".use(): kernel '{kernel.__name__}' takes {len(param_names)} "
+            f".use(): kernel '{kname}' takes {len(param_names)} "
             f"parameters but the region has {n_in} input(s) + {n_out} "
             f"output(s) = {n_in + n_out} boundary tensors."
         )
@@ -604,6 +771,11 @@ def _last_in_block(region_ops, func_op):
 def _reverse_program_order(ops, func_op):
     order = _program_index(func_op)
     return sorted(ops, key=lambda o: order.get(o.operation, -1), reverse=True)
+
+
+def _program_order(ops, func_op):
+    order = _program_index(func_op)
+    return sorted(ops, key=lambda o: order.get(o.operation, -1))
 
 
 def _program_index(func_op) -> dict:

@@ -100,8 +100,14 @@ def trace(
         def wrapper(*args, **kwargs):
             return f(*args, **kwargs)
 
-        def to_mlir(specs: Optional[list] = None, debug: bool = False):
-            """Generate MLIR module from the traced function."""
+        def to_mlir(specs: Optional[list] = None, debug: bool = False,
+                    *, target: str = "trn2", db_dir: Optional[str] = None):
+            """Generate MLIR module from the traced function.
+
+            ``target``/``db_dir`` are only consumed by ``knob().use(agent)``
+            sites (region tiling + the agent's persistent workspace); a program
+            with no agent sites ignores them.
+            """
             nonlocal input_specs
             specs = specs or input_specs
             if not specs:
@@ -147,7 +153,8 @@ def trace(
                 # Splice any knob().use() regions into func.call + custom op
                 # BEFORE stashing declarations: extraction registers the derived
                 # CustomOps that emit_custom_op_declarations then drains.
-                extract_use_regions(b.module, b._func_op)
+                extract_use_regions(b.module, b._func_op, target=target,
+                                    db_dir=db_dir)
 
                 custom_ops = _get_registry()
                 b.emit_custom_op_declarations(custom_ops)
@@ -160,10 +167,15 @@ def trace(
                 _clear_use_registry()
                 b.cleanup()
 
-        def to_nisa(target: str = "trn2", *, dump_dir: Optional[str] = None) -> str:
-            """Run the full knob pipeline. Returns NISA MLIR assembly."""
+        def to_nisa(target: str = "trn2", *, dump_dir: Optional[str] = None,
+                    db: Optional[str] = None) -> str:
+            """Run the full knob pipeline. Returns NISA MLIR assembly.
+
+            ``db`` is the tuning-DB dir passed to ``knob().use(agent)`` sites
+            (agent workspaces); ``None`` gives agents ephemeral workspaces.
+            """
             from ..driver.pipeline import apply_complete_knob_pipeline
-            mlir_text = to_mlir()
+            mlir_text = to_mlir(target=target, db_dir=db)
             return apply_complete_knob_pipeline(
                 str(mlir_text), target=target, dump_dir=dump_dir,
             )
@@ -178,9 +190,29 @@ def trace(
                 dump_dir=dump_dir, comments=comments,
             )
 
+        def tune(db: str, *, target: str = "trn2") -> str:
+            """Offline step: give each ``knob().use(agent)`` site a persistent
+            workspace under ``db/<key>/`` and run its agent there.
+
+            The agent reads the region's kernel_builder source
+            (``db/<key>/region.py``) and may dump memory/scratch/artifacts into
+            its folder; nkigen records the source it returns
+            (``db/<key>/kernel.py``). Returns the compiled NISA (agents are run
+            as part of tracing, so this compiles the tuned program).
+
+            POC scope: one pass over the sites with a persistent workspace. The
+            full offline loop (candidate scoring, on-hardware profiling, and
+            ``to_nisa(db=...)`` reading winners back so compile never searches)
+            is future work — see docs/2026-06-09-nki-autotune-backend-plan.md.
+            """
+            import os
+            os.makedirs(db, exist_ok=True)
+            return to_nisa(target=target, db=db)
+
         wrapper.to_mlir = to_mlir
         wrapper.to_nisa = to_nisa
         wrapper.to_nki = to_nki
+        wrapper.tune = tune
         wrapper.__traced__ = True
         wrapper.input_specs = input_specs
 

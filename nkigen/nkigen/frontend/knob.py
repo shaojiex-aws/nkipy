@@ -222,29 +222,38 @@ class _KnobBuilder:
         nkipy_d.FuseOp(targets=self._values, loc=self._locs[0])
         return self
 
-    def use(self, kernel, *, verify: bool = False) -> "_KnobBuilder":
-        """Replace the subgraph bounded by these tensors with ``kernel``.
+    def use(self, impl, *, key: Optional[str] = None,
+            verify: bool = False) -> "_KnobBuilder":
+        """Replace the subgraph bounded by these tensors with ``impl``.
 
-        ``knob(inputs..., outputs...).use(kernel)`` names the boundary tensors of
+        ``knob(inputs..., outputs...).use(impl)`` names the boundary tensors of
         a region. Each boundary is classified from the graph: a block arg or a
         tensor produced *outside* the region is an input; a tensor produced by
         ops *between* the inputs is an output. The region between them is
-        extracted and replaced by a call to ``kernel`` (a plain kernel_builder
-        function whose parameters are the inputs followed by the outputs).
+        extracted and replaced by a call derived from ``impl``.
+
+        ``impl`` is either:
+        - a **kernel_builder function** (params = inputs then outputs), spliced
+          directly; or
+        - a **KernelAgent** that rewrites the region's kernel_builder *source*
+          (see :mod:`nkigen.frontend.agent`) — nkigen emits the region as
+          kernel_builder source, the agent returns source to use instead.
 
         Extraction is deferred to a post-trace pass (escape analysis needs the
         whole traced function), so this only records the boundary values. See
         :mod:`nkigen.frontend.use_region`.
 
         Args:
-            kernel: A kernel_builder function; params = inputs then outputs.
+            impl: A kernel_builder function or a KernelAgent.
+            key: Human-readable site label — names the agent's workspace folder
+                under ``prog.tune(db=...)``. Defaults to ``site{N}``.
             verify: Reserved for numeric region-vs-kernel verification (not yet
                 implemented; passing ``True`` raises at extraction time).
         """
         if not self._values:
             return self  # eager mode: outputs are already real arrays
         from .use_region import record_use
-        record_use(self._values, kernel, verify)
+        record_use(self._values, impl, key, verify)
         return self
 
     def _validate_tile_size(self, tile_size: List[int]) -> None:
