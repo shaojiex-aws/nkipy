@@ -1,7 +1,8 @@
 # Plan: user-defined NKI kernels via `knob().use()`
 
 **Date:** 2026-07-02  
-**Status:** Phase 1 done (2026-07-13); phases 2–7 proposed  
+**Status:** Phases 1–4 + 6 done (2026-07-13); `.use()` works end-to-end on HW.
+Remaining: Phase 5 (gather via `.use()`), Phase 7 (`register_op`), numeric verify.  
 **Working checkout:** `/home/ubuntu/nkipy/nkigen`
 
 ---
@@ -228,10 +229,10 @@ max abs diff.
 |---|---|---|---|
 | **1** | Fix compile path: passes skip declarations; decl↔call types reconciled; emitter preserves call+decl+stash; resolution called inside `linalg_to_nisa` | Existing e2e custom-op tests pass | ✅ **done 2026-07-13** (also on HW) |
 | **2** | Bridge: `CustomOp.from_kernel_builder()` | kernel_builder fn → NISA-MLIR that `_resolve_custom_ops` accepts | ✅ pre-existing + exercised by Phase 1 tests |
-| **3** | Marker op + `.use()`: `Nkipy_UseOp` + registry | `knob(x, w, y).use(k)` traces to marker; registry populated | ⬜ not started |
-| **4** | Extraction (post-trace hook) + verification | Multi-op, multi-output, and error cases all work | ⬜ not started |
+| **3** | `.use()` verb + registry (NO dialect op — see below) | `knob(x, w, y).use(k)` records a boundary registry | ✅ **done 2026-07-13** |
+| **4** | Extraction (post-trace hook) + validation | Multi-op, multi-output, interior-boundary, chained, and error cases work | ✅ **done 2026-07-13** (numeric verify deferred) |
 | **5** | Replace `nkipy.gather` with built-in custom op | `np.take` goes through `.use()` path; `Nkipy_GatherOp` removed | ⬜ not started |
-| **6** | Tests + docs | All tests pass; new e2e green | ⬜ not started |
+| **6** | Tests + docs | All tests pass; new e2e green | ✅ **done 2026-07-13** |
 
 ### Phase 1 — fix the compile path ✅ DONE
 
@@ -278,23 +279,49 @@ clean baseline), not custom-op related.
 - `CustomOp.from_kernel_builder(kernel_fn, input_specs, output_specs, target)` —
   calls bridge, reads shapes/dtypes from the compiled func type.
 
-### Phase 3 — marker op + `.use()`
+### Phase 3 — `.use()` verb + registry ✅ DONE
 
-- `Nkipy_UseOp` in `NkipyOps.td` (variadic operands = boundary tensors,
-  `site_id` attribute).
-- `.use(impl, *, verify=True)` on `_KnobBuilder`: emit `nkipy.use`, record
-  `(site_id, impl, boundaries, verify)` in registry.
-- Eager mode: run kernel via `nb.simulate_kernel`, return result.
+**No dialect marker op was needed** (the plan originally proposed `Nkipy_UseOp`).
+Extraction runs in-memory before any canonicalize/DCE, so recorded `ir.Value`
+handles stay valid — a plain Python registry suffices, avoiding an ODS change +
+C++ rebuild for zero correctness benefit.
 
-### Phase 4 — extraction (post-trace hook) + verification
+- `_KnobBuilder.use(kernel, *, verify=False)` (`frontend/knob.py`): in tracing
+  mode records `(boundary values, kernel, verify)` in `_use_registry`
+  (`frontend/use_region.py`); eager mode (real arrays) is a no-op.
+- Registry cleared at both ends of `to_mlir` (`frontend/trace.py`).
+- `knob()` now accepts func-arg (block-arg) tensors: `__init__` captures
+  `v.location` (a block arg's `v.owner` is a Block, which has no `.location`).
 
-Runs after tracing completes, before the pipeline starts (alongside existing
-module finalization). For each `nkipy.use` marker:
+### Phase 4 — extraction (post-trace hook) ✅ DONE
 
-1. `extract_region(boundaries, func)` — classify inputs/outputs, validate.
-2. Bridge kernel → `CustomOp`; validate shapes match.
-3. Simulate-verify (region NumPy vs `nb.simulate_kernel`).
-4. Emit `func.call`, stash body, erase region + marker.
+`extract_use_regions(module, func_op)` runs in `to_mlir` between
+`finish_function` and `emit_custom_op_declarations` (Python, in-memory, upstream
+`mlir` bindings). For each registry entry:
+
+1. **Classify** boundaries by graph position via backward *cones*: a boundary is
+   an INPUT if it is a block arg or feeds another boundary's cone; else an
+   OUTPUT. (This is what makes `knob(mm, y)` with `y=silu(mm)` put `mm`=input,
+   `y`=output even though `mm` is produced by a retained matmul — the naive
+   "written by any linalg op → output" rule got this wrong.)
+2. **Walk** the region: from each output, backward via **all** DPS-init writers
+   (fill+matmul trap) and through view ops, stopping at inputs / block args.
+3. **Validate**: ≥1 input & ≥1 output; undeclared-input check (a region op's
+   memref operand must be a declared input or produced inside — dual of escape);
+   alias-aware escape check; disjointness across markers; kernel arity == #in+#out.
+4. **Bridge** `CustomOp.from_kernel_builder(kernel, input_specs, output_specs)`;
+   specs from classified boundary shapes/dtypes zipped with kernel param names
+   (inputs first, then outputs — the ordering contract).
+5. **Rewrite**: insert `func.call` after the last region op, replace *external*
+   uses of each output with the call result, erase region ops + internal allocs
+   reverse-topologically. Chained regions: outputs consumed by a later marker are
+   remapped to the call result so stale handles aren't dereferenced.
+
+**Numeric verification deferred:** `verify=False` (default) does shape/dtype/arity
++ structural checks only; `verify=True` raises `NotImplementedError`. Follow-up:
+region LLVM-JIT (`LLVMModule` in `execution/llvm.py`) vs `nb.simulate_kernel`,
+`np.allclose`. This is the only guard against silent equal-shape operand-order
+swaps, so enable before "production-safe".
 
 ### Phase 5 — replace `nkipy.gather` with a built-in custom op
 

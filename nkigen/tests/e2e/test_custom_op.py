@@ -1,9 +1,10 @@
 """
-End-to-end tests for custom op integration.
+End-to-end tests for user-defined kernels via ``knob(...).use(kernel)``.
 
-Tests the full flow: tracing with CustomOp -> pipeline passes -> resolve-custom-ops.
-The custom op replaces the activation function in a kernel with a
-pre-compiled NISA function body (either hand-written or built via kernel_builder).
+A ``knob(inputs..., outputs...).use(kernel)`` call names the boundary tensors of
+a traced subgraph; the region between them is extracted and replaced by a call to
+a plain kernel_builder ``kernel`` (params = inputs then outputs). The kernel's
+NISA body is inlined by the resolve-custom-ops step inside ``linalg-to-nisa``.
 
 Run with: pytest tests/e2e/test_custom_op.py -v
 """
@@ -12,296 +13,88 @@ import pytest
 import numpy as np
 
 from nkigen import trace, knob
-from nkigen.frontend.custom_op import CustomOp
 from harness import run_kernel_test, Mode
 
 import nki.compiler.kernel_builder as nb
 
 
-def _make_silu_custom_op(M, N, tile_p=128, tile_f=128):
-    """Create a CustomOp with real NISA MLIR compiled via kernel_builder.
-
-    Uses kernel_builder to compile a real SiLU activation, then extracts the
-    MLIR string and passes it to the direct CustomOp() constructor.  This tests
-    the raw-constructor path with genuine NISA ops (dma_copy, activation, etc.)
-    rather than a hand-written stub.
-    """
-    shape = (M, N)
-
-    def silu_kernel(x_hbm, out_hbm):
-        import nki.language as nl
-
-        n_row_tiles = M // tile_p
-        n_col_tiles = N // tile_f
-        for r in nl.affine_range(n_row_tiles):
-            for t in nl.affine_range(n_col_tiles):
-                x_sbuf = nb.ndarray((tile_p, tile_f), x_hbm.dtype, nb.sbuf)
-                nb.isa.dma_copy(
-                    dst=x_sbuf,
-                    src=x_hbm[
-                        r * tile_p : (r + 1) * tile_p, t * tile_f : (t + 1) * tile_f
-                    ],
-                )
-
-                out_sbuf = nb.ndarray((tile_p, tile_f), x_hbm.dtype, nb.sbuf)
-
-                bias = nb.ndarray((tile_p, 1), x_hbm.dtype, nb.sbuf)
-                nb.isa.memset(dst=bias, value=0.0)
-                scale = nb.ndarray((tile_p, 1), x_hbm.dtype, nb.sbuf)
-                nb.isa.memset(dst=scale, value=1.0)
-
-                nb.isa.activation(
-                    dst=out_sbuf,
-                    src=x_sbuf,
-                    bias=bias,
-                    scale=scale,
-                    op=nb.isa.activation_function.silu,
-                )
-
-                nb.isa.dma_copy(
-                    dst=out_hbm[
-                        r * tile_p : (r + 1) * tile_p, t * tile_f : (t + 1) * tile_f
-                    ],
-                    src=out_sbuf,
-                )
-
-    # Compile via kernel_builder and extract MLIR string
-    module = nb.build_kernel(
-        silu_kernel,
-        input_specs={"x_hbm": nb.Tensor(shape, nb.float32, nb.shared_hbm)},
-        output_specs={"out_hbm": nb.Tensor(shape, nb.float32, nb.shared_hbm)},
-    )
-    nisa_mlir = module.operation.get_asm(print_generic_op_form=True)
-
-    def silu_reference(x):
-        return x / (1.0 + np.exp(-x))
-
-    return CustomOp(
-        nisa_mlir=nisa_mlir,
-        func_name=f"silu_{M}x{N}_{M}x{N}",
-        input_names=["x_hbm"],
-        output_names=["out_hbm"],
-        input_shapes=[shape],
-        output_shapes=[shape],
-        input_dtypes=["f32"],
-        output_dtypes=["f32"],
-        reference_fn=silu_reference,
-    )
-
-
 # ============================================================================
-# Test: custom op tracing produces correct IR structure
+# kernel_builder kernels used as .use() targets
 # ============================================================================
 
 
-def test_custom_op_trace_ir_structure():
-    """
-    Verify that tracing with a CustomOp produces the expected IR:
-    - func.call to the custom op
-    - func.func private declaration with nkipy.custom_op
-    - nkipy.custom_op_bodies stashed on the module
-    """
-    custom_silu = _make_silu_custom_op(256, 256)
+def _silu_kernel_256(in_hbm, out_hbm):
+    """SiLU over a 256x256 buffer, tiled 128x128 internally."""
+    import nki.language as nl
 
-    @trace(input_specs=[((256, 256), "f32")])
-    def kernel(x):
-        return custom_silu(x)
-
-    module = kernel.to_mlir()
-    mlir_str = str(module)
-
-    # Verify call site
-    assert "call @__custom_op__silu_256x256_256x256" in mlir_str
-    # Verify declaration
-    assert "nkipy.custom_op" in mlir_str
-    # Verify body stashing
-    assert "nkipy.custom_op_bodies" in mlir_str
-    # Verify the NISA body string is stashed
-    assert "nisa.target" in mlir_str
+    M = N = 256
+    tile = 128
+    for r in nl.affine_range(M // tile):
+        for t in nl.affine_range(N // tile):
+            x_sb = nb.ndarray((tile, tile), in_hbm.dtype, nb.sbuf)
+            nb.isa.dma_copy(dst=x_sb,
+                            src=in_hbm[r * tile:(r + 1) * tile, t * tile:(t + 1) * tile])
+            o_sb = nb.ndarray((tile, tile), in_hbm.dtype, nb.sbuf)
+            bias = nb.ndarray((tile, 1), in_hbm.dtype, nb.sbuf)
+            nb.isa.memset(dst=bias, value=0.0)
+            scale = nb.ndarray((tile, 1), in_hbm.dtype, nb.sbuf)
+            nb.isa.memset(dst=scale, value=1.0)
+            nb.isa.activation(dst=o_sb, src=x_sb, bias=bias, scale=scale,
+                              op=nb.isa.activation_function.silu)
+            nb.isa.dma_copy(
+                dst=out_hbm[r * tile:(r + 1) * tile, t * tile:(t + 1) * tile],
+                src=o_sb)
 
 
-# ============================================================================
-# Test: custom op in feedforward kernel (full pipeline, STRING_CHECK)
-# ============================================================================
-
-
-def test_matmul_custom_activation_string_check():
-    """
-    Simple kernel: matmul followed by a CustomOp activation.
-
-    The pipeline should:
-    1. Trace the kernel with func.call to the custom op
-    2. Run all passes (tiling, bufferize, annotate, legalize, linalg-to-nisa)
-       - The custom op declaration passes through as a bodyless func.func
-    3. resolve-custom-ops links the NISA body and rewrites call sites
-    4. prepare-for-nki strips nkipy.* attrs and adds nisa.target
-
-    We verify the final IR contains the resolved custom op.
-    """
-    custom_silu = _make_silu_custom_op(256, 256)
-
-    @trace(
-        input_specs=[
-            ((256, 256), "f32"),  # x
-            ((256, 256), "f32"),  # weight
-        ]
-    )
-    def matmul_activation_kernel(x, weight):
-        # Matrix multiply
-        mm_out = np.matmul(x, weight)
-        knob(mm_out).tile_op(tile_size=[128, 128, 128]).layout(mem_space="SharedHbm")
-
-        # Custom SiLU activation on result (input/output on HBM)
-        output = custom_silu(mm_out)
-
-        return output
-
-    run_kernel_test(
-        matmul_activation_kernel,
-        check_ir_contains=[
-            # NISA ops from the main kernel
-            "nisa.matmul",
-            "nisa.target",
-            # NISA ops from the inlined SiLU custom op
-            "nisa.activation",
-            "nisa.dma_copy",
-            "nisa.memset",
-        ],
-        check_ir_not_contains=[
-            # These should be stripped by prepare-for-nki
-            "nkipy.custom_op_bodies",
-            "nkipy.custom_op",
-            "transform.named_sequence",
-            # Function should be inlined, not linked
-            "__custom_op__silu_256x256_256x256",
-        ],
-        rtol=1e-3,
-        atol=1e-3,
-        modes=Mode.HW | Mode.STRING_CHECK | Mode.CODEGEN,
-    )
+def _relu_kernel_128(x_hbm, out_hbm):
+    """Single-tile ReLU: load, activate, store."""
+    x_sb = nb.ndarray((128, 128), x_hbm.dtype, nb.sbuf)
+    nb.isa.dma_copy(dst=x_sb, src=x_hbm[0:128, 0:128])
+    o_sb = nb.ndarray((128, 128), x_hbm.dtype, nb.sbuf)
+    bias = nb.ndarray((128, 1), x_hbm.dtype, nb.sbuf)
+    nb.isa.memset(dst=bias, value=0.0)
+    scale = nb.ndarray((128, 1), x_hbm.dtype, nb.sbuf)
+    nb.isa.memset(dst=scale, value=1.0)
+    nb.isa.activation(dst=o_sb, src=x_sb, bias=bias, scale=scale,
+                      op=nb.isa.activation_function.relu)
+    nb.isa.dma_copy(dst=out_hbm[0:128, 0:128], src=o_sb)
 
 
 # ============================================================================
-# Test: custom op reference_fn works for numpy execution
+# Test: .use() replaces an elementwise region (SiLU) after a matmul
 # ============================================================================
 
 
-def test_custom_op_reference_fn_numpy():
-    """
-    Verify that the custom op's reference_fn produces correct numpy results
-    when called outside of tracing (for test validation).
-    """
-    custom_silu = _make_silu_custom_op(4, 4)
+def test_use_replaces_silu_region():
+    """A matmul stays in NumPy-traced land; the SiLU that follows is replaced by
+    a kernel_builder SiLU kernel via ``knob(mm, y).use(...)``.
 
-    x = np.random.randn(4, 4).astype(np.float32)
-    result = custom_silu(x)
-    expected = x / (1.0 + np.exp(-x))
-    np.testing.assert_allclose(result, expected, rtol=1e-6)
-
-
-# ============================================================================
-# Test: kernel_builder SiLU custom op (full pipeline, STRING_CHECK)
-# ============================================================================
-
-
-def _make_silu_kernel_builder_op(M, N, tile_p=128, tile_f=128):
-    """Create a CustomOp using kernel_builder to compile a real SiLU activation.
-
-    The kernel tiles internally: processes (tile_p x tile_f) chunks of the
-    (M x N) input, one column-tile at a time.  This keeps SBUF usage to
-    tile_p*tile_f elements (fitting in one SBUF partition row).
+    ``mm`` is produced by the (external) matmul so it is the region *input*;
+    ``y`` is produced by the SiLU ops so it is the *output*. Numerically the
+    replaced region computes exactly SiLU(mm), matching the traced ops.
     """
 
-    def silu_kernel(x_hbm, out_hbm):
-        import nki.language as nl
-
-        n_row_tiles = M // tile_p
-        n_col_tiles = N // tile_f
-        for r in nl.affine_range(n_row_tiles):
-            for t in nl.affine_range(n_col_tiles):
-                x_sbuf = nb.ndarray((tile_p, tile_f), x_hbm.dtype, nb.sbuf)
-                nb.isa.dma_copy(
-                    dst=x_sbuf,
-                    src=x_hbm[
-                        r * tile_p : (r + 1) * tile_p, t * tile_f : (t + 1) * tile_f
-                    ],
-                )
-
-                out_sbuf = nb.ndarray((tile_p, tile_f), x_hbm.dtype, nb.sbuf)
-
-                bias = nb.ndarray((tile_p, 1), x_hbm.dtype, nb.sbuf)
-                nb.isa.memset(dst=bias, value=0.0)
-                scale = nb.ndarray((tile_p, 1), x_hbm.dtype, nb.sbuf)
-                nb.isa.memset(dst=scale, value=1.0)
-
-                nb.isa.activation(
-                    dst=out_sbuf,
-                    src=x_sbuf,
-                    bias=bias,
-                    scale=scale,
-                    op=nb.isa.activation_function.silu,
-                )
-
-                nb.isa.dma_copy(
-                    dst=out_hbm[
-                        r * tile_p : (r + 1) * tile_p, t * tile_f : (t + 1) * tile_f
-                    ],
-                    src=out_sbuf,
-                )
-
-    def silu_reference(x):
-        return x / (1.0 + np.exp(-x))
-
-    return CustomOp.from_kernel_builder(
-        kernel_func=silu_kernel,
-        input_specs={"x_hbm": nb.Tensor((M, N), nb.float32, nb.shared_hbm)},
-        output_specs={"out_hbm": nb.Tensor((M, N), nb.float32, nb.shared_hbm)},
-        reference_fn=silu_reference,
-    )
-
-
-def test_kernel_builder_silu():
-    """
-    Matmul + SiLU activation where SiLU is compiled via kernel_builder.
-
-    This tests the from_kernel_builder() path which produces real NISA ops
-    (dma_copy, activation, memset) rather than a hand-written stub.
-
-    Uses 128x128 tiles because SBUF partition dim max is 128.
-    Verifies both IR structure (STRING_CHECK) and numerical correctness (HW).
-    """
-    # Custom op processes 256x256 HBM buffer, tiling to 128x128 internally
-    custom_silu = _make_silu_kernel_builder_op(256, 256, tile_p=128, tile_f=128)
-
-    @trace(
-        input_specs=[
-            ((256, 256), "f32"),  # x
-            ((256, 256), "f32"),  # weight
-        ]
-    )
+    @trace(input_specs=[((256, 256), "f32"), ((256, 256), "f32")])
     def matmul_silu_kernel(x, weight):
-        mm_out = np.matmul(x, weight)
-        knob(mm_out).tile_op(tile_size=[128, 128, 128]).layout(mem_space="SharedHbm")
-
-        output = custom_silu(mm_out)
-        return output
+        mm = np.matmul(x, weight)
+        knob(mm).tile_op(tile_size=[128, 128, 128]).layout(mem_space="SharedHbm")
+        y = mm * (1.0 / (1.0 + np.exp(-mm)))  # SiLU
+        knob(mm, y).use(_silu_kernel_256)
+        return y
 
     run_kernel_test(
         matmul_silu_kernel,
         check_ir_contains=[
-            # Custom op body is inlined — check for NISA ops from both
-            # the main kernel (matmul) and the inlined SiLU activation
-            "nisa.activation",
+            "nisa.matmul",       # main-kernel matmul survives
+            "nisa.activation",   # inlined SiLU
             "nisa.dma_copy",
-            "nisa.matmul",
+            "nisa.memset",
             "nisa.target",
-            "nisa.memset",  # from SiLU bias/scale initialization
         ],
         check_ir_not_contains=[
             "nkipy.custom_op_bodies",
             "nkipy.custom_op",
-            # Function should be inlined, not linked as separate func
-            "__custom_op__silu_kernel",
+            "call @__custom_op",
         ],
         rtol=1e-3,
         atol=1e-3,
@@ -310,60 +103,56 @@ def test_kernel_builder_silu():
 
 
 # ============================================================================
-# Test: chained custom op calls (result of one feeds the next)
+# Test: whole single-input region replaced by one kernel (block-arg input)
 # ============================================================================
 
 
-def _make_relu_kernel_builder_op(M=128, N=128):
-    """A single-tile ReLU custom op via kernel_builder."""
+def test_use_replaces_elementwise_cone():
+    """``knob(x, y).use(k)`` replaces an entire elementwise region: x is the
+    block-arg input, y is the output. The kernel computes SiLU(x), matching the
+    traced region exactly."""
 
-    def relu_kernel(x_hbm, out_hbm):
-        x_sbuf = nb.ndarray((M, N), x_hbm.dtype, nb.sbuf)
-        nb.isa.dma_copy(dst=x_sbuf, src=x_hbm[0:M, 0:N])
-        o_sbuf = nb.ndarray((M, N), x_hbm.dtype, nb.sbuf)
-        bias = nb.ndarray((M, 1), x_hbm.dtype, nb.sbuf)
-        nb.isa.memset(dst=bias, value=0.0)
-        scale = nb.ndarray((M, 1), x_hbm.dtype, nb.sbuf)
-        nb.isa.memset(dst=scale, value=1.0)
-        nb.isa.activation(
-            dst=o_sbuf, src=x_sbuf, bias=bias, scale=scale,
-            op=nb.isa.activation_function.relu,
-        )
-        nb.isa.dma_copy(dst=out_hbm[0:M, 0:N], src=o_sbuf)
+    @trace(input_specs=[((256, 256), "f32")])
+    def model(x):
+        y = x * (1.0 / (1.0 + np.exp(-x)))  # SiLU(x)
+        knob(x, y).use(_silu_kernel_256)
+        return y
 
-    return CustomOp.from_kernel_builder(
-        kernel_func=relu_kernel,
-        input_specs={"x_hbm": nb.Tensor((M, N), nb.float32, nb.shared_hbm)},
-        output_specs={"out_hbm": nb.Tensor((M, N), nb.float32, nb.shared_hbm)},
-        reference_fn=lambda x: np.maximum(x, 0),
+    run_kernel_test(
+        model,
+        check_ir_contains=["nisa.activation", "nisa.dma_copy", "nisa.memset", "nisa.target"],
+        check_ir_not_contains=[
+            "nkipy.custom_op_bodies", "nkipy.custom_op", "call @__custom_op",
+        ],
+        rtol=1e-3,
+        atol=1e-3,
+        modes=Mode.HW | Mode.STRING_CHECK | Mode.CODEGEN,
     )
 
 
-def test_chained_custom_op_calls():
-    """Two calls to the same custom op where the first result feeds the second.
+# ============================================================================
+# Test: chained .use() (result of one region feeds the next)
+# ============================================================================
 
-    Exercises mem_space propagation across a custom-op call boundary: the inner
-    call's result must be stamped SharedHbm so the outer call operand and the
-    (deduplicated, single) declaration stay type-consistent.  Both bodies are
-    inlined — the final IR has two nisa.activation ops and no residual call.
-    """
-    relu = _make_relu_kernel_builder_op(128, 128)
+
+def test_use_chained():
+    """Two .use() regions where the first output feeds the second. Exercises
+    call-result mem_space consistency and dedup (same kernel+shapes → one decl,
+    two call sites)."""
 
     @trace(input_specs=[((128, 128), "f32")])
-    def chained_kernel(x):
-        return relu(relu(x))
+    def model(x):
+        a = np.maximum(x, 0.0)          # relu-ish region 1
+        knob(x, a).use(_relu_kernel_128)
+        b = np.maximum(a, 0.0)          # relu-ish region 2
+        knob(a, b).use(_relu_kernel_128)
+        return b
 
     run_kernel_test(
-        chained_kernel,
-        check_ir_contains=[
-            "nisa.activation",
-            "nisa.dma_copy",
-            "nisa.target",
-        ],
+        model,
+        check_ir_contains=["nisa.activation", "nisa.dma_copy", "nisa.target"],
         check_ir_not_contains=[
-            "nkipy.custom_op_bodies",
-            "nkipy.custom_op",
-            "__custom_op__relu_kernel",
+            "nkipy.custom_op_bodies", "nkipy.custom_op", "call @__custom_op",
         ],
         rtol=1e-3,
         atol=1e-3,

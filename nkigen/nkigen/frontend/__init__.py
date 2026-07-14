@@ -12,10 +12,8 @@ Import those functions from :mod:`nkigen.apis` instead.
 
 from .trace import trace
 from .traced_array import TracedArray
-from .custom_op import CustomOp
 
 __all__ = [
     "trace",
     "TracedArray",
-    "CustomOp",
 ]

@@ -15,6 +15,7 @@ from . import builder
 from .traced_array import TracedArray
 from .op_vtable import _to_handle, _from_handle
 from .custom_op import _get_registry, _clear_registry
+from .use_region import _clear_use_registry, extract_use_regions
 
 
 def _normalize_shape(shape):
@@ -109,6 +110,7 @@ def trace(
                 )
 
             _clear_registry()
+            _clear_use_registry()
 
             b = IRBuilder(source_file=source_file)
             arg_shapes = [s for s, _ in specs]
@@ -142,6 +144,11 @@ def trace(
                 result_handles = [_to_handle(r) for r in results]
                 b.finish_function(result_handles)
 
+                # Splice any knob().use() regions into func.call + custom op
+                # BEFORE stashing declarations: extraction registers the derived
+                # CustomOps that emit_custom_op_declarations then drains.
+                extract_use_regions(b.module, b._func_op)
+
                 custom_ops = _get_registry()
                 b.emit_custom_op_declarations(custom_ops)
 
@@ -150,6 +157,7 @@ def trace(
                 return b.run_canonicalize()
             finally:
                 _clear_registry()
+                _clear_use_registry()
                 b.cleanup()
 
         def to_nisa(target: str = "trn2", *, dump_dir: Optional[str] = None) -> str:

@@ -58,7 +58,9 @@ class _KnobBuilder:
             if v.owner is None:
                 continue
             self._values.append(v)
-            self._locs.append(v.owner.location)
+            # Use the value's own location: v.owner is a defining op for
+            # produced tensors but a Block for func-arg tensors (no .location).
+            self._locs.append(v.location)
 
         if has_traced:
             for i, t in enumerate(tensors):
@@ -218,6 +220,31 @@ class _KnobBuilder:
                 f"fuse() requires at least 2 tensors, got {len(self._values)}"
             )
         nkipy_d.FuseOp(targets=self._values, loc=self._locs[0])
+        return self
+
+    def use(self, kernel, *, verify: bool = False) -> "_KnobBuilder":
+        """Replace the subgraph bounded by these tensors with ``kernel``.
+
+        ``knob(inputs..., outputs...).use(kernel)`` names the boundary tensors of
+        a region. Each boundary is classified from the graph: a block arg or a
+        tensor produced *outside* the region is an input; a tensor produced by
+        ops *between* the inputs is an output. The region between them is
+        extracted and replaced by a call to ``kernel`` (a plain kernel_builder
+        function whose parameters are the inputs followed by the outputs).
+
+        Extraction is deferred to a post-trace pass (escape analysis needs the
+        whole traced function), so this only records the boundary values. See
+        :mod:`nkigen.frontend.use_region`.
+
+        Args:
+            kernel: A kernel_builder function; params = inputs then outputs.
+            verify: Reserved for numeric region-vs-kernel verification (not yet
+                implemented; passing ``True`` raises at extraction time).
+        """
+        if not self._values:
+            return self  # eager mode: outputs are already real arrays
+        from .use_region import record_use
+        record_use(self._values, kernel, verify)
         return self
 
     def _validate_tile_size(self, tile_size: List[int]) -> None:
